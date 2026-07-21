@@ -1,0 +1,97 @@
+{
+  "version": 2,
+  "dgSpecHash": "G6MBRFiAyg4=",
+  "success": true,
+  "projectFilePath": "/Users/prajuab/Workspace/foundry/templates/Foundry.Api.Template/Foundry.Api.Template.csproj",
+  "expectedPackageFiles": [
+    "/Users/prajuab/.nuget/packages/bananacakepop.middleware/16.0.3/bananacakepop.middleware.16.0.3.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/dnsclient/1.6.1/dnsclient.1.6.1.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/fluentvalidation/11.11.0/fluentvalidation.11.11.0.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/fluentvalidation.dependencyinjectionextensions/11.11.0/fluentvalidation.dependencyinjectionextensions.11.11.0.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/greendonut/13.9.14/greendonut.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate/13.9.14/hotchocolate.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.abstractions/13.9.14/hotchocolate.abstractions.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.aspnetcore/13.9.14/hotchocolate.aspnetcore.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.authorization/13.9.14/hotchocolate.authorization.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.data/13.9.14/hotchocolate.data.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.data.mongodb/13.9.14/hotchocolate.data.mongodb.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.execution/13.9.14/hotchocolate.execution.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.execution.abstractions/13.9.14/hotchocolate.execution.abstractions.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.fetching/13.9.14/hotchocolate.fetching.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.language/13.9.14/hotchocolate.language.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.language.syntaxtree/13.9.14/hotchocolate.language.syntaxtree.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.language.utf8/13.9.14/hotchocolate.language.utf8.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.language.visitors/13.9.14/hotchocolate.language.visitors.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.language.web/13.9.14/hotchocolate.language.web.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.subscriptions/13.9.14/hotchocolate.subscriptions.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.subscriptions.inmemory/13.9.14/hotchocolate.subscriptions.inmemory.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.transport.sockets/13.9.14/hotchocolate.transport.sockets.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.types/13.9.14/hotchocolate.types.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.types.cursorpagination/13.9.14/hotchocolate.types.cursorpagination.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.types.mongodb/13.9.14/hotchocolate.types.mongodb.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.types.mutations/13.9.14/hotchocolate.types.mutations.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.types.offsetpagination/13.9.14/hotchocolate.types.offsetpagination.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.types.scalars.upload/13.9.14/hotchocolate.types.scalars.upload.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.types.shared/13.9.14/hotchocolate.types.shared.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.utilities/13.9.14/hotchocolate.utilities.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.utilities.dependencyinjection/13.9.14/hotchocolate.utilities.dependencyinjection.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/hotchocolate.validation/13.9.14/hotchocolate.validation.13.9.14.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/humanizer.core/2.14.1/humanizer.core.2.14.1.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/mediatr/12.4.1/mediatr.12.4.1.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/mediatr.contracts/2.0.1/mediatr.contracts.2.0.1.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/microsoft.aspnetcore.openapi/9.0.0/microsoft.aspnetcore.openapi.9.0.0.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/microsoft.extensions.apidescription.server/6.0.5/microsoft.extensions.apidescription.server.6.0.5.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/microsoft.openapi/1.6.17/microsoft.openapi.1.6.17.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/mongodb.bson/3.4.0/mongodb.bson.3.4.0.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/mongodb.driver/3.4.0/mongodb.driver.3.4.0.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/sharpcompress/0.39.0/sharpcompress.0.39.0.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/snappier/1.1.6/snappier.1.1.6.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/swashbuckle.aspnetcore/6.6.2/swashbuckle.aspnetcore.6.6.2.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/swashbuckle.aspnetcore.swagger/6.6.2/swashbuckle.aspnetcore.swagger.6.6.2.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/swashbuckle.aspnetcore.swaggergen/6.6.2/swashbuckle.aspnetcore.swaggergen.6.6.2.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/swashbuckle.aspnetcore.swaggerui/6.6.2/swashbuckle.aspnetcore.swaggerui.6.6.2.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/system.componentmodel.annotations/5.0.0/system.componentmodel.annotations.5.0.0.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/system.io.hashing/7.0.0/system.io.hashing.7.0.0.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/system.linq.dynamic.core/1.6.3/system.linq.dynamic.core.1.6.3.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/yarp.reverseproxy/2.1.0/yarp.reverseproxy.2.1.0.nupkg.sha512",
+    "/Users/prajuab/.nuget/packages/zstdsharp.port/0.8.4/zstdsharp.port.0.8.4.nupkg.sha512"
+  ],
+  "logs": [
+    {
+      "code": "NU1904",
+      "level": "Warning",
+      "message": "Package 'HotChocolate.Language' 13.9.14 has a known critical severity vulnerability, https://github.com/advisories/GHSA-qr3m-xw4c-jqw3",
+      "projectPath": "/Users/prajuab/Workspace/foundry/templates/Foundry.Api.Template/Foundry.Api.Template.csproj",
+      "warningLevel": 1,
+      "filePath": "/Users/prajuab/Workspace/foundry/templates/Foundry.Api.Template/Foundry.Api.Template.csproj",
+      "libraryId": "HotChocolate.Language",
+      "targetGraphs": [
+        "net10.0"
+      ]
+    },
+    {
+      "code": "NU1902",
+      "level": "Warning",
+      "message": "Package 'SharpCompress' 0.39.0 has a known moderate severity vulnerability, https://github.com/advisories/GHSA-6c8g-7p36-r338",
+      "projectPath": "/Users/prajuab/Workspace/foundry/templates/Foundry.Api.Template/Foundry.Api.Template.csproj",
+      "warningLevel": 1,
+      "filePath": "/Users/prajuab/Workspace/foundry/templates/Foundry.Api.Template/Foundry.Api.Template.csproj",
+      "libraryId": "SharpCompress",
+      "targetGraphs": [
+        "net10.0"
+      ]
+    },
+    {
+      "code": "NU1903",
+      "level": "Warning",
+      "message": "Package 'Snappier' 1.1.6 has a known high severity vulnerability, https://github.com/advisories/GHSA-pggp-6c3x-2xmx",
+      "projectPath": "/Users/prajuab/Workspace/foundry/templates/Foundry.Api.Template/Foundry.Api.Template.csproj",
+      "warningLevel": 1,
+      "filePath": "/Users/prajuab/Workspace/foundry/templates/Foundry.Api.Template/Foundry.Api.Template.csproj",
+      "libraryId": "Snappier",
+      "targetGraphs": [
+        "net10.0"
+      ]
+    }
+  ]
+}

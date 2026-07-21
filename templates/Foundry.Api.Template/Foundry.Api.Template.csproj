@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../foundry-api/src/Foundry.Api/Foundry.Api.csproj" />
+    <ProjectReference Include="../../foundry-mongo/src/FoundryMongo.csproj" />
+    <ProjectReference Include="../../foundry-api/src/Foundry.Api.SourceGenerators/Foundry.Api.SourceGenerators.csproj" 
+                      OutputItemType="Analyzer" 
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FluentValidation.DependencyInjectionExtensions" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Swashbuckle.AspNetCore" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="api-manifest.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- Include api-manifest.json as an AdditionalFile for the Source Generator -->
+  <ItemGroup>
+    <AdditionalFiles Include="api-manifest.json" />
+  </ItemGroup>
+
+</Project>

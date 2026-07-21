@@ -1,0 +1,28 @@
+{
+  "Namespace": "Foundry.Api.Template.Domain",
+  "Endpoints": [
+    {
+      "Entity": "TodoItem",
+      "Route": "/api/v1/todos",
+      "Methods": [ "GET", "GET_BY_ID", "POST", "PUT", "DELETE" ],
+      "Roles": {
+        "GET": [ "User", "Admin" ],
+        "GET_BY_ID": [ "User", "Admin" ],
+        "POST": [ "Admin" ],
+        "PUT": [ "Admin" ],
+        "DELETE": [ "Admin" ]
+      },
+      "Caching": {
+        "GET": {
+          "Enabled": true,
+          "TtlSeconds": 30
+        },
+        "GET_BY_ID": {
+          "Enabled": true,
+          "TtlSeconds": 60
+        }
+      }
+    }
+  ],
+  "CustomEndpoints": []
+}

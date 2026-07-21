@@ -1,0 +1,15 @@
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/bin/Debug/net10.0/Foundry.FileIO.deps.json
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/bin/Debug/net10.0/Foundry.FileIO.dll
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/bin/Debug/net10.0/Foundry.FileIO.pdb
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/bin/Debug/net10.0/Foundry.Core.dll
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/bin/Debug/net10.0/Foundry.Core.pdb
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/obj/Debug/net10.0/Foundry.FileIO.csproj.AssemblyReference.cache
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/obj/Debug/net10.0/Foundry.FileIO.GeneratedMSBuildEditorConfig.editorconfig
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/obj/Debug/net10.0/Foundry.FileIO.AssemblyInfoInputs.cache
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/obj/Debug/net10.0/Foundry.FileIO.AssemblyInfo.cs
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/obj/Debug/net10.0/Foundry.FileIO.csproj.CoreCompileInputs.cache
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/obj/Debug/net10.0/Foundry..55D4E789.Up2Date
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/obj/Debug/net10.0/Foundry.FileIO.dll
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/obj/Debug/net10.0/refint/Foundry.FileIO.dll
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/obj/Debug/net10.0/Foundry.FileIO.pdb
+/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/obj/Debug/net10.0/ref/Foundry.FileIO.dll

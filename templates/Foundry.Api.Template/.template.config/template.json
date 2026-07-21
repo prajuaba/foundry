@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "Foundry Framework Team",
+  "classifications": [ "Web", "API", "Foundry" ],
+  "name": "Foundry Microservice API Application",
+  "identity": "Foundry.Api.Template",
+  "shortName": "foundry-api",
+  "tags": {
+    "language": "C#",
+    "type": "project"
+  },
+  "sourceName": "Foundry.Api.Template",
+  "preferNameDirectory": true
+}

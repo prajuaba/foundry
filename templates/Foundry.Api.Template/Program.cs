@@ -1,0 +1,146 @@
+using System;
+using System.IO;
+using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using MediatR;
+using FluentValidation;
+using FoundryMongo.DependencyInjection;
+using Foundry.Core.Audit;
+using Foundry.Core.User;
+using Foundry.Api.Manifest;
+using Foundry.Api.Endpoints;
+using Foundry.Api.GraphQL;
+using Foundry.Api.Security;
+using Foundry.Api.Docs;
+using Foundry.Api.MediatR.Behaviors;
+
+namespace Foundry.Api.Template;
+
+public class Program
+{
+    public static async Task Main(string[] args)
+    {
+        var builder = WebApplication.CreateBuilder(args);
+
+        // Add standard Web API services
+        builder.Services.AddEndpointsApiExplorer();
+        builder.Services.AddSwaggerGen();
+        builder.Services.AddHttpContextAccessor();
+        builder.Services.AddMemoryCache();
+
+        // Load ApiManifest configuration
+        var manifestPath = Path.Combine(builder.Environment.ContentRootPath, "api-manifest.json");
+        var manifestJson = await File.ReadAllTextAsync(manifestPath);
+        var manifest = JsonSerializer.Deserialize<ApiManifest>(manifestJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            ?? throw new InvalidOperationException("Failed to deserialize api-manifest.json");
+
+        builder.Services.AddSingleton(manifest);
+
+        // Setup distributed in-memory cache for L2 caching tier
+        builder.Services.AddDistributedMemoryCache();
+
+        // Database settings resolution
+        var mongoConnectionString = Environment.GetEnvironmentVariable("MONGODB_CONNECTION") 
+            ?? builder.Configuration.GetConnectionString("MongoDb") 
+            ?? "mongodb://localhost:27017";
+
+        var mongoDatabaseName = Environment.GetEnvironmentVariable("MONGODB_DATABASE") 
+            ?? builder.Configuration["MongoDbSettings:DatabaseName"] 
+            ?? "FoundryTemplateDb";
+
+        var encryptionKeyRaw = Environment.GetEnvironmentVariable("MONGODB_ENCRYPTION_KEY") 
+            ?? builder.Configuration["MongoDbSettings:EncryptionKey"] 
+            ?? "12345678901234567890123456789012"; // 32-character key for AES-256 fallback
+
+        var encryptionKeyBytes = System.Text.Encoding.UTF8.GetBytes(encryptionKeyRaw.PadRight(32).Substring(0, 32));
+
+        builder.Services.AddFoundryMongo(options =>
+        {
+            options.ConnectionString = mongoConnectionString;
+            options.DatabaseName = mongoDatabaseName;
+            options.EncryptionKey = Convert.ToBase64String(encryptionKeyBytes);
+            options.EnableCaching = false; // Pipeline caching behavior handles this
+        });
+
+        // Register default console audit sink
+        builder.Services.AddSingleton<IAuditSink, DefaultConsoleAuditSink>();
+
+        // Register Current User claims resolver
+        builder.Services.AddScoped<ICurrentUserContext, DefaultTemplateUserContext>();
+
+        // Register validators from this assembly
+        builder.Services.AddValidatorsFromAssembly(typeof(Program).Assembly);
+
+        // Register MediatR
+        builder.Services.AddMediatR(cfg =>
+        {
+            cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);
+            cfg.RegisterServicesFromAssembly(typeof(Foundry.Api.MediatR.InsertCommand<>).Assembly);
+        });
+
+        // Register compile-time generated Handlers
+        builder.Services.AddGeneratedHandlers();
+
+        // Register MediatR pipeline behaviors
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(AuditBehavior<,>));
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(SecurityBehavior<,>));
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(IdempotencyBehavior<,>));
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(CachingBehavior<,>));
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(BusinessRuleBehavior<,>));
+        builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(OutboxDomainEventBehavior<,>));
+
+        // Register GraphQL dynamic types builder
+        builder.Services.AddDynamicGraphQL(manifest);
+
+        // Register Exception Handler Middleware
+        builder.Services.AddExceptionHandler<Foundry.Api.Middleware.GlobalExceptionHandler>();
+        builder.Services.AddProblemDetails();
+
+        var app = builder.Build();
+
+        app.UseExceptionHandler();
+
+        // Enable documentation endpoints for dev environment
+        app.UseSwagger();
+        app.UseSwaggerUI();
+
+        // Map compile-time generated REST endpoints
+        app.MapGeneratedEndpoints(manifest);
+
+        // Map dynamic interactive docs spec
+        app.MapDocsEndpoint(manifest);
+
+        // Map Hot Chocolate GraphQL schema
+        app.MapGraphQL();
+
+        await app.RunAsync();
+    }
+}
+
+public class DefaultConsoleAuditSink : IAuditSink
+{
+    public Task WriteAsync(AuditLogEntry entry, CancellationToken ct = default)
+    {
+        Console.WriteLine($"[Audit Log] Actor: {entry.OperatorId} | Action: {entry.Action} | Entity: {entry.EntityType} | Diffs: {entry.PropertyDiffs.Count}");
+        return Task.CompletedTask;
+    }
+
+    public Task WriteManyAsync(IReadOnlyList<AuditLogEntry> entries, CancellationToken ct = default)
+    {
+        foreach (var entry in entries)
+        {
+            Console.WriteLine($"[Audit Log Batch] Actor: {entry.OperatorId} | Action: {entry.Action} | Entity: {entry.EntityType}");
+        }
+        return Task.CompletedTask;
+    }
+}
+
+public class DefaultTemplateUserContext : ICurrentUserContext
+{
+    public string OperatorId => "SystemBootstrapper";
+    public string? OperatorName => "System Bootstrapper";
+    public System.Security.Claims.ClaimsPrincipal? User => null;
+}

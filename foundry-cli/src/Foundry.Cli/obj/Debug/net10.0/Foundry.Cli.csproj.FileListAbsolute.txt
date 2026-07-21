@@ -1,0 +1,14 @@
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/bin/Debug/net10.0/foundry
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/bin/Debug/net10.0/foundry.deps.json
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/bin/Debug/net10.0/foundry.runtimeconfig.json
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/bin/Debug/net10.0/foundry.dll
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/bin/Debug/net10.0/foundry.pdb
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/obj/Debug/net10.0/Foundry.Cli.GeneratedMSBuildEditorConfig.editorconfig
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/obj/Debug/net10.0/Foundry.Cli.AssemblyInfoInputs.cache
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/obj/Debug/net10.0/Foundry.Cli.AssemblyInfo.cs
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/obj/Debug/net10.0/Foundry.Cli.csproj.CoreCompileInputs.cache
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/obj/Debug/net10.0/foundry.dll
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/obj/Debug/net10.0/refint/foundry.dll
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/obj/Debug/net10.0/foundry.pdb
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/obj/Debug/net10.0/Foundry.Cli.genruntimeconfig.cache
+/Users/prajuab/Workspace/foundry/foundry-cli/src/Foundry.Cli/obj/Debug/net10.0/ref/foundry.dll
