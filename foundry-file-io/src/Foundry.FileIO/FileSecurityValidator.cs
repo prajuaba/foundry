@@ -70,8 +70,31 @@ public sealed class FileSecurityValidator
     }
 
     /// <summary>
+    /// Maximum length of the returned name, in characters.
+    /// </summary>
+    /// <remarks>
+    /// Most filesystems cap a single path component at 255 bytes. Without a cap the name is accepted
+    /// here and then fails at write time with an IOException from inside the storage layer, far from
+    /// the upload that caused it.
+    /// </remarks>
+    private const int MaxFileNameLength = 255;
+
+    /// <summary>
     /// Sanitizes filenames to eliminate potential path traversal inputs.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The result is always a single path component, never a traversal token. Stripping directory
+    /// separators and invalid characters is not sufficient on its own: <c>Path.GetFileName("..")</c>
+    /// returns <c>".."</c>, and <c>'.'</c> is not an invalid filename character, so a name consisting
+    /// only of dots used to pass through unchanged — and <c>Path.Combine(uploadDirectory, "..")</c>
+    /// resolves to the parent directory.
+    /// </para>
+    /// <para>
+    /// A name that reduces to nothing usable is replaced with a generated one rather than rejected,
+    /// so an upload with a hostile name still succeeds under a safe name.
+    /// </para>
+    /// </remarks>
     public string SanitizeFileName(string fileName)
     {
         if (string.IsNullOrWhiteSpace(fileName))
@@ -82,14 +105,28 @@ public sealed class FileSecurityValidator
         var normalized = fileName.Replace('\\', '/');
         var nameOnly = Path.GetFileName(normalized);
         var invalidChars = Path.GetInvalidFileNameChars();
-        
+
         var cleanName = new string(nameOnly
             .Where(c => !invalidChars.Contains(c))
-            .ToArray());
+            .ToArray())
+            .Trim();
 
-        if (string.IsNullOrWhiteSpace(cleanName))
+        // "." and ".." are directory references, not filenames, and any all-dots name is treated the
+        // same way: there is no legitimate upload named "..." and several filesystems normalise it.
+        if (cleanName.Length == 0 || cleanName.All(c => c == '.'))
         {
             return Guid.NewGuid().ToString("N");
+        }
+
+        if (cleanName.Length > MaxFileNameLength)
+        {
+            // Truncate the stem and keep the extension: downstream code keys content handling off the
+            // extension, so dropping it would change how the file is treated.
+            var extension = Path.GetExtension(cleanName);
+            if (extension.Length >= MaxFileNameLength) extension = string.Empty;
+
+            var stemLength = MaxFileNameLength - extension.Length;
+            cleanName = cleanName.Substring(0, stemLength) + extension;
         }
 
         return cleanName;

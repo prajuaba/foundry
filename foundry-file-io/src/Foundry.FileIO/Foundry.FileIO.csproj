@@ -14,4 +14,10 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\foundry-core\src\Foundry.Core\Foundry.Core.csproj" />
   </ItemGroup>
+
+  <!-- TryConvert is where the cell-conversion defect lived; tested directly rather than made public. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Foundry.FileIO.Tests" />
+  </ItemGroup>
+
 </Project>

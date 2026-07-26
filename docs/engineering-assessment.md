@@ -98,15 +98,15 @@ Three defects, stacked, each masked by the one above it. The generalisable lesso
 
 ## 3. Coverage reality
 
-Six modules have tests, plus the integration suite:
+Nine modules have tests, plus the integration suite:
 
 | Has tests | No tests at all |
 | --------- | --------------- |
-| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) | `foundry-file-io` · `foundry-testing` · `foundry-cli` · `foundry-studio` |
+| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) | `foundry-testing` · `foundry-cli` · `foundry-studio` |
 
 The still-untested list includes ~7.5k lines of Studio TypeScript verified only by `tsc`.
 
-**The prediction held in all five modules covered on 2026-07-26**, and the defect count per
+**The prediction held in all six modules covered on 2026-07-26**, and the defect count per
 module has not declined:
 
 - `foundry-rules` — **five**, four in guard-condition evaluation, each failing by *silently
@@ -151,6 +151,19 @@ module has not declined:
   indistinguishable from one that matched nothing; and GraphQL bound responses with case-sensitive
   defaults, so conventional camelCase fields silently produced an all-defaults object.
 
+- `foundry-file-io` — **five**, two of them security defects in the component whose stated purpose is
+  security. `SanitizeFileName` is documented as eliminating path traversal, and returned `".."`
+  unchanged: `Path.GetFileName("..")` is `".."` and `'.'` is not an invalid filename character, so
+  `Path.Combine(uploadDirectory, sanitised)` resolved to the parent directory. Separately, the CSV
+  exporter was open to **formula injection** — a field beginning with `=`, `+`, `@` or `-` is
+  evaluated when the export is opened in Excel or Sheets, so a value typed into a name field
+  executes in the session of whoever opens it. Both produce valid, successful operations. Also: the
+  Excel parser caught every conversion failure and left the property at its default, so a cell of
+  `"1,234.00 USD"` imported as an amount of **zero** while the row count matched what the user
+  expected — data corruption presented as a clean import, now loud by default with an opt-in lenient
+  mode that reports what it dropped; enum columns could never convert at all; and an empty upload
+  threw CsvHelper's "No header record was found" for what is an ordinary user mistake.
+
 Four areas came back clean, which is worth recording as evidence rather than left unsaid:
 **ambient tenant propagation** held under 50 interleaved flows, the **serialization defaults**
 were correct on every property including the deliberately-writable OCC token, `AddFoundryRules`
@@ -166,10 +179,10 @@ dependence on global MongoDB driver state, which this suite has exhibited before
 rather than closed — a suite that fails one run in ten undermines every other claim in this
 document, and it must be reproduced before it is called fixed.
 
-Four modules remain, and nothing yet contradicts the assumption that they carry comparable
+Three modules remain, and nothing yet contradicts the assumption that they carry comparable
 defect density.
 
-All 447 tests pass and there are zero vulnerable NuGet packages. CI
+All 510 tests pass and there are zero vulnerable NuGet packages. CI
 (`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
 a Studio typecheck; it **first went green on `bf3e227`**, after the three repository-level
 defects in section 2 were fixed. The seven modules are now vendored into the root

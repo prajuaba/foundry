@@ -21,6 +21,77 @@ public sealed class ExcelDataParser<TOut> : IDataParser<TOut> where TOut : class
         System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
     }
 
+    /// <summary>
+    /// When <c>true</c>, a cell that cannot be converted leaves its property at the default and the
+    /// failure is recorded in <see cref="UnconvertibleValues"/> instead of throwing.
+    /// </summary>
+    /// <remarks>
+    /// Defaults to <c>false</c>: an import that silently substitutes zeros produces a row count the
+    /// user expects and data they cannot trust. Opting in still surfaces every failure, rather than
+    /// discarding them as the previous behaviour did.
+    /// </remarks>
+    public bool SkipUnconvertibleValues { get; init; }
+
+    /// <summary>
+    /// Cells that could not be converted, populated when <see cref="SkipUnconvertibleValues"/> is set.
+    /// </summary>
+    public IList<ExcelCellError> UnconvertibleValues { get; } = new List<ExcelCellError>();
+
+    /// <summary>
+    /// Converts a cell value to <paramref name="targetType"/>, reporting failure rather than throwing.
+    /// </summary>
+    /// <remarks>
+    /// Uses the invariant culture. <c>Convert.ChangeType</c> without an explicit culture reads the
+    /// ambient one, so the same spreadsheet imported on two differently-configured servers produced
+    /// different numbers.
+    /// </remarks>
+    internal static bool TryConvert(object value, Type targetType, out object? converted)
+    {
+        converted = null;
+        if (value is null) return false;
+
+        try
+        {
+            if (targetType.IsInstanceOfType(value))
+            {
+                converted = value;
+                return true;
+            }
+
+            if (targetType.IsEnum)
+            {
+                converted = Enum.Parse(targetType, value.ToString() ?? string.Empty, ignoreCase: true);
+                return true;
+            }
+
+            if (targetType == typeof(Guid))
+            {
+                converted = Guid.Parse(value.ToString() ?? string.Empty);
+                return true;
+            }
+
+            if (targetType == typeof(DateTime))
+            {
+                converted = value is DateTime dateTime
+                    ? dateTime
+                    : DateTime.Parse(
+                        value.ToString() ?? string.Empty,
+                        System.Globalization.CultureInfo.InvariantCulture);
+                return true;
+            }
+
+            converted = Convert.ChangeType(
+                value, targetType, System.Globalization.CultureInfo.InvariantCulture);
+            return true;
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException
+                                      or ArgumentException)
+        {
+            converted = null;
+            return false;
+        }
+    }
+
     /// <inheritdoc />
     public async IAsyncEnumerable<TOut> ParseAsync(Stream fileStream, [EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -45,8 +116,12 @@ public sealed class ExcelDataParser<TOut> : IDataParser<TOut> where TOut : class
             .ToList();
 
         // Read records
+        // Row 1 is the header, so data starts at 2 -- matching what a user sees in the spreadsheet.
+        var rowNumber = 1;
+
         while (reader.Read())
         {
+            rowNumber++;
             ct.ThrowIfCancellationRequested();
             var item = new TOut();
 
@@ -58,37 +133,28 @@ public sealed class ExcelDataParser<TOut> : IDataParser<TOut> where TOut : class
                     if (val != null)
                     {
                         var targetType = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
-                        try
+
+                        if (TryConvert(val, targetType, out var converted))
                         {
-                            var convertedVal = Convert.ChangeType(val, targetType);
-                            prop.SetValue(item, convertedVal);
+                            prop.SetValue(item, converted);
                         }
-                        catch
+                        else if (SkipUnconvertibleValues)
                         {
-                            try
-                            {
-                                var strVal = val.ToString();
-                                if (strVal != null)
-                                {
-                                    if (targetType == typeof(Guid))
-                                    {
-                                        prop.SetValue(item, Guid.Parse(strVal));
-                                    }
-                                    else if (targetType == typeof(DateTime))
-                                    {
-                                        prop.SetValue(item, DateTime.Parse(strVal));
-                                    }
-                                    else
-                                    {
-                                        var converted = Convert.ChangeType(strVal, targetType);
-                                        prop.SetValue(item, converted);
-                                    }
-                                }
-                            }
-                            catch
-                            {
-                                // Fail silently and leave property default
-                            }
+                            UnconvertibleValues.Add(new ExcelCellError(rowNumber, prop.Name, val.ToString(), targetType));
+                        }
+                        else
+                        {
+                            // Loudly, by default.
+                            //
+                            // This used to swallow the failure and leave the property at its default,
+                            // so a spreadsheet cell of "1,234.00 USD" produced an imported row with a
+                            // TotalAmount of 0 and reported success. For a bulk import that is data
+                            // corruption presented as a clean result, and the row count matches what
+                            // the user expected, so nothing looks wrong.
+                            throw new InvalidDataException(
+                                $"Row {rowNumber}, column '{prop.Name}': cannot convert "
+                                + $"'{val}' to {targetType.Name}. Set SkipUnconvertibleValues to import "
+                                + "the row anyway and collect the failures in UnconvertibleValues.");
                         }
                     }
                 }

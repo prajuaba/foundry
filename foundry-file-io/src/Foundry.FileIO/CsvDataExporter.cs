@@ -28,6 +28,11 @@ public sealed class CsvDataExporter<TIn>
         using var writer = new StreamWriter(outputStream, leaveOpen: true);
         using var csv = new CsvWriter(writer, _config);
 
+        // Exported data is user-controlled, and a spreadsheet evaluates any cell whose text begins
+        // with =, +, @ or -. Registered as a string converter rather than applied per field so it
+        // cannot be forgotten, and so numeric and date columns are untouched by construction.
+        csv.Context.TypeConverterCache.AddConverter<string>(new FormulaSafeStringConverter());
+
         csv.WriteHeader<TIn>();
         await csv.NextRecordAsync();
 
