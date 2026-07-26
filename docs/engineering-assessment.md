@@ -1,368 +1,290 @@
 # Engineering Assessment — 2026-07-26
 
-An honest read of where Foundry actually stands, written after a full working session
-*inside* the codebase rather than from reading it. It is deliberately blunt: the point of
-this document is to be useful for planning the next cycle, not to market the project.
+An honest read of where Foundry stands, written from a full working session *inside* the codebase
+rather than from reading it. It is deliberately blunt: the point is to be useful for planning the next
+cycle, not to market the project.
 
-**Summary:** strong architecture, demo-grade implementation, hardened only where it has
-been touched. The single most important finding is not any individual bug — it is that the
-codebase has a consistent disposition toward *silent failure*, which is the worst possible
-default for a code generator.
+**Summary.** The architecture is strong and the differentiation is real. The implementation was
+demo-grade, and it is now *verified at its edges* — the repository builds from a clean clone, CI passes
+for the first time, a generated application is proven to boot and persist, and every module has tests.
+That is a floor, not a finish. The single most important finding is not any individual bug: it is that
+the codebase had a consistent disposition toward **silent failure**, which is the worst possible default
+for a code generator, and that disposition is only partly corrected.
 
 ---
 
 ## 1. Where it genuinely stands
 
-The runtime layer — `foundry-mongo`, roughly 11.5k lines covering tenant filter injection,
-envelope encryption, optimistic concurrency, seek pagination and hot/cold partitioning — is
-real senior-level work and held up under inspection.
+The runtime layer — `foundry-mongo`, 4,775 lines across 27 files covering tenant filter injection,
+envelope encryption, optimistic concurrency, seek pagination and hot/cold partitioning — is real
+senior-level work and held up under inspection. (An earlier draft of this document said 11.5k lines;
+that figure was inherited and never checked. Measured, `foundry-mongo/src` is 4,775 lines and the whole
+module including tests and samples is 6,909.)
 
-The AI thesis is now **validated rather than aspirational**. The local model never writes
-C#; it writes IR (the domain schema), and the compiler writes C#. Measured with
-`qwen3-coder:30b`:
+The AI thesis is **validated rather than aspirational**. The local model never writes C#; it writes IR,
+and the compiler writes C#. Measured with `qwen3-coder:30b`:
 
 | Band | Cases | Domain accuracy | Schema-valid IR |
 | ---- | ----- | --------------- | --------------- |
 | Core | 30    | 100%            | 100%            |
 | Hard | 10    | 40%             | 100%            |
 
-The load-bearing number is the last column. At 40% hard-domain accuracy the model's
-*judgement* is degrading while output *validity* never does — which is precisely the
-behaviour the design predicts. Best-practice output is guaranteed by construction, because
-the model does not author the layer where a missing tenant filter or an N+1 query would live.
+The load-bearing number is the last column. At 40% hard-domain accuracy the model's *judgement*
+degrades while output *validity* never does — precisely what the design predicts. Best-practice output
+is guaranteed by construction, because the model does not author the layer where a missing tenant
+filter or an N+1 query would live.
 
-An awkward consequence worth stating plainly: **the AI layer is currently the most mature
-part of the system.** It generates onto a runtime that is less verified than it is.
+An awkward consequence, still true: **the AI layer is the most mature part of the system.** It
+generates onto a runtime that is less verified than it is — though the gap is now much narrower than it
+was.
 
 ---
 
 ## 2. The systemic defect pattern
 
-Nearly every bug found during the session had the same shape: **success reported, nothing done.**
+Nearly every bug found had the same shape: **success reported, nothing done.**
 
 - The compiler printed `Success` having emitted zero files.
 - An index was declared in the schema and never created.
 - Studio config was emitted and silently dropped by the compiler.
 - An endpoint was declared and silently skipped.
 - A client-supplied id was accepted, then silently replaced by the driver.
-- An enum was declared and silently never used.
 - `foundry api` slept 100 ms and returned success.
+- A **test report** stated that every protocol passed, regardless of the results it was given.
 
-This is a design disposition, not bad luck. The codebase consistently prefers *carry on*
-over *fail loudly*. For a code generator that is the most damaging default available: the
-output looks plausible, passes review, and the failure surfaces in production.
+This is a design disposition, not bad luck. The codebase preferred *carry on* over *fail loudly*. For a
+code generator that is the most damaging default available: the output looks plausible, passes review,
+and the failure surfaces in production.
 
-**Treat "returns success without doing the thing" as a bug class, not a list of individual
-defects.** Fixes should change the default, not patch instances.
+**Treat "returns success without doing the thing" as a bug class, not a list of individual defects.**
+Fixes should change the default, not patch instances.
 
-A corollary discovered the hard way: the generated code had apparently **never been built
-and run**. The generator emitted calls to `AddAsync` and `FindAsync`, neither of which
-exists on its own repository interface. Nothing caught it, because no test had ever
-compiled the output. `GeneratedCodeCompilesTests` now does, and found four bugs in under an
-hour by exercising reality instead of asserting on strings.
+### The pattern at its largest scale: the repository could not be built
 
-### The clearest example: the repository itself could not be built
-
-Found the same day this document was first written, and worth recording because it is the
-pattern operating at the largest possible scale.
-
-The root repository recorded its seven sibling modules as **gitlinks** (mode `160000`) with
-no `.gitmodules` file. Git therefore had no path-to-URL mapping for them. The consequences:
+The root repository recorded its seven sibling modules as **gitlinks** (mode `160000`) with no
+`.gitmodules` file, so Git had no path-to-URL mapping for them:
 
 - `git clone` produced seven **empty** directories.
-- `git submodule update --init` failed outright — *"No url found for submodule path"*.
+- `git submodule update --init` failed — *"No url found for submodule path"*.
 - `dotnet restore` could not find ~15 of the projects referenced by `Foundry.slnx`.
 - **CI had never passed. Not once, on any commit, since the workflow was added.**
 
-Every `git push` reported success. The local working tree built and tested clean, because
-the seven directories happened to be populated on that one machine. Nothing anywhere
-reported a problem, and the published repository was unusable by every person and system
-other than its author.
+Every `git push` reported success. The local tree built and tested clean, because those directories
+happened to be populated on one machine. The published repository was unusable by every person and
+system other than its author.
 
-It was found by cloning the repo from GitHub and building *that*, rather than reasoning
-about it — which immediately exposed a second hidden dependency underneath: `Foundry.Cli`
-embedded `foundry-studio/dist/index.html`, a correctly-gitignored build artifact, so a
-clean clone failed with CS1566 until someone ran an undocumented `npm run build`. And
-underneath *that*, a third: `dotnet test Foundry.slnx` tried to run the `Foundry.Testing`
-helper library as a suite and exited 1 while all 258 tests passed — invisible for as long
-as the four suites were run individually rather than solution-wide.
+It was found by cloning from GitHub and building *that*, which exposed a second dependency underneath:
+`Foundry.Cli` embedded `foundry-studio/dist/index.html`, a correctly-gitignored build artifact, so a
+clean clone failed with CS1566 until someone ran an undocumented `npm run build`. And underneath that a
+third: `dotnet test Foundry.slnx` tried to run the `Foundry.Testing` helper library as a suite and
+exited 1 while all 258 tests passed — invisible for as long as the suites were run individually.
 
-Three defects, stacked, each masked by the one above it. The generalisable lessons:
+Three defects stacked, each masked by the one above. The two generalisable lessons:
 
-1. **Verify against a fresh clone, not your working tree.** A working tree accumulates
-   state that the repository does not contain.
-2. **Run the command CI runs.** "All suites green" and `dotnet test Foundry.slnx` were not
-   the same statement, and only one of them was the one that mattered.
+1. **Verify against a fresh clone, not your working tree.** A working tree accumulates state the
+   repository does not contain.
+2. **Run the command CI runs.** "All suites green" and `dotnet test Foundry.slnx` were not the same
+   statement, and only one of them mattered.
 
 ---
 
-## 3. Coverage reality
+## 3. What is now verified
 
-Every module now has tests, plus the integration suite:
+| Gate | What it proves |
+| ---- | -------------- |
+| Clean clone builds | The repository is usable by someone other than its author |
+| `Build and test` | 603 C# tests across 12 suites |
+| `Studio tests and typecheck` | 28 TypeScript tests, plus the bundle builds |
+| `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
+| `Runtime smoke test` | A scaffolded app boots, serves generated REST endpoints, persists, **restarts**, and serves the record back from MongoDB |
 
-| Has tests | Untested |
-| --------- | --------------- |
-| `foundry-schema` (153) · `foundry-integration-tests` (75) · `foundry-rules` (73) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) · `foundry-testing` (26) · `foundry-cli` (21) · `foundry-studio` (28) | *(none)* |
+CI first went green on `bf3e227`. The runtime smoke test is the one that matters most, because it is the
+only gate that runs a generated application rather than compiling one — and reaching it required six
+fixes, including that **creating an entity over HTTP had never worked** (`required Id` failed model
+binding on every `POST`) and that a CLI-scaffolded project produced no `api-manifest.json`, so it served
+no routes at all.
 
-Every module now has at least one test suite. Studio's 7.5k lines of TypeScript were previously verified only by `tsc`; it now has vitest and a CI job.
+Two contracts that had silently forked now have single producers:
 
-**The prediction held in eight of the nine modules covered on 2026-07-26**, and the defect count per
-module has not declined:
+- **`api-manifest.json`** — Studio derived it independently and disagreed with the compiler on the
+  route prefix and on whether an entity with no declared methods gets full CRUD. Studio now exports IR;
+  the compiler derives the manifest.
+- **C# generation** — six TypeScript generators across two Studio files reimplemented `PocoGenerator`,
+  emitting a namespace that does not exist and omitting `partial`, on which the whole `*.Custom.cs`
+  design depends. Studio now fetches from `POST /api/compile`.
 
-- `foundry-rules` — **five**, four in guard-condition evaluation, each failing by *silently
-  blocking a transition* rather than erroring.
-- `foundry-core` — **five**: three in pagination metadata (a page count saturating to
-  `long.MaxValue` on a zero page size, an untrimmed seek sentinel returning `PageSize + 1`
-  items, and `Map` dropping the cursor so a mapped result reported itself as the last page) and
-  two in the audit trail (an insert rendered as `(no change → <String>)`, misdescribing the
-  change *and* printing the type instead of the value).
-- `foundry-kafka` — **five**, and these are the most serious found all day, because they
-  silently break the two guarantees the transactional outbox exists to provide. Ordering was
-  broken at both ends: a fresh `Guid` partition key per message spread one entity's mutations
-  across partitions, and the publisher requested a sort order it never received because
-  `FindManyAsync` ignores `sortOrder` when `sortBy` is null. Durability defaulted to
-  `Acks=Leader`, which acknowledges before replication — so a broker failure loses a message
-  the outbox has already marked processed. Plus an unvalidated `int`-to-`Acks` cast and a topic
-  name that could degrade to `-events` and publish there successfully.
-
-- `foundry-realtime` — **four**, and the first one is the most serious defect found anywhere in
-  the codebase. Every mutation was sent to SignalR's `Clients.All` *in addition* to the
-  subscription groups, so any connected client received every entity's changes — bypassing the
-  `[RealTime(roles: ...)]` RBAC that `NotificationHub` carefully validates on subscribe, and, in
-  a multi-tenant deployment, delivering one tenant's mutations to another tenant's clients. An
-  `AuditLogEntry` carries `PropertyDiffs`, so what leaked was the changed *values*, not merely
-  metadata. Alongside it: entity subscription groups never matched (subscribers joined under the
-  simple type name, delivery targeted the assembly-qualified one) which the firehose masked;
-  record subscriptions were authorised against a client-supplied entity name but keyed on the
-  record id alone, so a caller could name an entity they may read and then join the record group
-  of one they may not; and an unresolvable entity name failed *open*.
-
-- `foundry-connectors` — **five**. The registration helpers keyed `ConnectorOptions` and the typed
-  `HttpClient` on the *type* rather than the connector name, so a second connector of the same type
-  replaced the first: an application integrating a CRM and a billing provider ended up with both
-  pointing at one base URL carrying one set of credentials — sending one service's API key to the
-  other's endpoint, in a perfectly well-formed request. Five of six new registration tests fail
-  against the original code; the one that passes is the single-connector demo case. Also: the HTTP
-  verb was chosen with `payload.Equals(default(TRequest))`, so a legitimate `0` or `false` was
-  mistaken for "no payload" and silently downgraded to a GET with the body dropped;
-  `EnsureSuccessStatusCode` discarded the remote body in all three connectors, which for SOAP means
-  throwing away the entire fault detail; GraphQL returned `null` and dropped the `errors` array on
-  the protocol's *normal* failure mode (HTTP 200 plus errors), making a rejected query
-  indistinguishable from one that matched nothing; and GraphQL bound responses with case-sensitive
-  defaults, so conventional camelCase fields silently produced an all-defaults object.
-
-- `foundry-file-io` — **five**, two of them security defects in the component whose stated purpose is
-  security. `SanitizeFileName` is documented as eliminating path traversal, and returned `".."`
-  unchanged: `Path.GetFileName("..")` is `".."` and `'.'` is not an invalid filename character, so
-  `Path.Combine(uploadDirectory, sanitised)` resolved to the parent directory. Separately, the CSV
-  exporter was open to **formula injection** — a field beginning with `=`, `+`, `@` or `-` is
-  evaluated when the export is opened in Excel or Sheets, so a value typed into a name field
-  executes in the session of whoever opens it. Both produce valid, successful operations. Also: the
-  Excel parser caught every conversion failure and left the property at its default, so a cell of
-  `"1,234.00 USD"` imported as an amount of **zero** while the row count matched what the user
-  expected — data corruption presented as a clean import, now loud by default with an opt-in lenient
-  mode that reports what it dropped; enum columns could never convert at all; and an empty upload
-  threw CsvHelper's "No header record was found" for what is an ordinary user mistake.
-
-- `foundry-cli` — **one**, and the low count is itself informative: this is the module worked on
-  most heavily earlier in the day, so most of its defects had already been found and fixed. The one
-  remaining was bare `foundry` printing help and exiting **0**, which makes `foundry $COMMAND` with
-  an unset variable do nothing and report success. Its 21 tests drive the built binary as a process,
-  because the CLI's contract is its exit code and its stdio: CI treats a non-zero exit as a failed
-  gate, and the VS Code extension speaks LSP over stdin/stdout. That also means the earlier LSP
-  byte-framing fix is now **verified end to end** — a request containing `café-naïve-piñata-日本語`
-  followed by a second request proves the stream does not desynchronise, which inspection alone
-  could not establish.
-
-- `foundry-testing` — **five**, and the first is the purest expression of the pattern in the whole
-  codebase: **the test report reported success unconditionally.** Both the HTML and Markdown
-  generators embedded a fixed seven-row "Protocol Coverage Matrix" in which every row read `PASSED`,
-  next to strings like "100% Endpoint Coverage", "Zero Breach" and "KRaft Verified" — none measured,
-  none affected by the results passed in. A run with fifty failures produced a clean bill of health.
-  A zero-test run additionally rendered a "100.0%" pass rate. And one level up, `foundry test` fed it
-  `generatedTests.Count * 2` as both the total *and* the passed count with zero failures and a
-  hardcoded 0.45s duration — for suites it had generated and never executed. Per-protocol status is
-  now rendered only when supplied; a zero-test run reads "INCONCLUSIVE"; and the command states
-  plainly that it generated rather than ran. Also in the mock-data generator: keys were 32-character
-  Guids where an ObjectId is 24, so every generated test that posted or fetched by id was broken
-  before it ran; `MaxLength` and `Range` constraints were ignored, so fixtures violated the schema
-  they came from and the API's own validation rejected them; and a shared non-thread-safe `Random`
-  could degrade to returning zeros under concurrent generation.
-
-- `foundry-studio` — **two**, and they are divergences rather than isolated bugs, which makes them
-  the most structurally interesting finding. Studio is the *second* producer of `api-manifest.json`,
-  alongside the compiler's `ApiManifestGenerator`; both claim to turn the same domain model into the
-  same API surface, and they disagreed. Studio emitted `/api/v1/{plural}` where the compiler emits
-  `/api/{plural}`, so an application built from a Studio-exported manifest served different URLs from
-  one built by `foundry compile` — and a client generated against either 404s against the other. And
-  Studio defaulted an entity with no declared methods to **full CRUD** where the compiler skips it, so
-  an entity present only as a workflow target or DTO source acquired a complete public surface,
-  `DELETE` included, purely by being on the canvas. Neither reports a conflict, because each manifest
-  is individually valid. Studio is now pinned to the compiler's contract by test, and Studio gained a
-  test runner (vitest) and a CI job in the process — it had none.
-
-### The workflow orchestrator: reflection replaced with contracts
-
-Recorded separately because it was the largest single piece of untested code in the repository, and
-the reason it was untested was its design rather than neglect.
-
-`WorkflowTransitionBehavior` (344 lines) located four collaborators at runtime by scanning
-`AppDomain.CurrentDomain.GetAssemblies()` for **simple-name** matches and invoking methods through
-`MethodInfo`: the API manifest, the current-user context, the entity's CLR type, and
-`IRepository<T>`. Consequences:
-
-- Two entities named `Order` in different namespaces resolved to whichever assembly was enumerated
-  first — silently the wrong type, since either result is a usable `Type`.
-- The key type was guessed from the id string's *length*: 24 characters meant `ObjectId`, anything
-  else `string`. A malformed id was quietly treated as a different key type and failed inside the
-  driver.
-- Renaming a repository method broke the workflow at runtime with no compiler error.
-- Exercising any of it required a real MongoDB repository and the API assembly loaded in-process, so
-  none of the orchestration had a test.
-
-The reflection existed to avoid a project reference from `Foundry.Rules` to `Foundry.Api` — a genuine
-layering constraint. Two interfaces (`IWorkflowDefinitionProvider`, `IWorkflowStateStore`) preserve
-that independence with compile-time contracts, implemented in `Foundry.Api`, which already references
-Rules, Mongo and Core. The behaviour now contains **no reflection at all**, and gained 24 tests
-covering the transition sequence end to end with fakes.
-
-Two defects surfaced once it was reachable. The activity log was written *before* the handler ran with
-`Success` hardcoded to `true`, so a handler that threw left a history entry claiming the transition had
-succeeded — a false record in the one place someone would look. And a cyclic choice-node chain
-exhausted the depth counter and fell through, leaving `CurrentState` set to the choice node's id: a
-state no transition matches, so the document was silently stranded. Both now fail or record honestly.
-
-Registration is explicit (`AddFoundryWorkflows(registry => registry.Register<Order>())`) and that is
-the point: an application that has not declared its workflow entities fails at startup naming what to
-add, rather than at the first transition from inside an assembly scan.
-
-### The manifest now has one producer
-
-Resolved, and the resolution turned up more of the same problem than the original finding described.
-
-Studio no longer derives `api-manifest.json`. `exportToApiManifest` is deleted; Studio exports the IR
-and the compiler derives the manifest through `ApiManifestGenerator`, either via a new
-`POST /api/manifest` endpoint for downloads or inside `POST /api/save-manifest`, which now takes the IR
-rather than a client-computed manifest. A manifest obtained from Studio is byte-identical to one written
-by `foundry compile`, because the same code produces both.
-
-The 19 Studio tests that encoded the contract were not deleted with the code: **`ApiManifestGenerator`
-had no tests at all**, so the contract existed only in TypeScript, for an implementation that was
-wrong. Those assertions were ported to `ApiManifestGeneratorTests` (22 tests) before the producer was
-removed. Studio's suite now covers what Studio actually owns — the IR it exports, and the client that
-must fail loudly rather than fall back to a local computation.
-
-**Two more copies surfaced while doing it, both worse than the original.** `ApiDesigner` had its own
-pluraliser and displayed `/api/v1/{plural}` routes; `ApiPlayground` built `/api/v1/{entity}` and did
-not pluralise at all, so the playground sent requests to `/api/v1/customer` while the application
-served `/api/customers`. Every request 404'd and looked like a broken application. `ApiDesigner` also
-defaulted its display to full CRUD, showing endpoints the compiler does not generate.
-
-Those two are display paths that need a route without a server round trip per keystroke, so they now
-share one `crudRouteFor` helper pinned to the compiler's behaviour by the same test table used on the
-C# side. **That is a mirrored implementation, not a single one** — a weaker guarantee, taken
-deliberately to keep the editor responsive and offline, with a shared table as the thing that keeps it
-honest. Worth naming as residual risk rather than calling it solved.
-
-### The C# preview duplication is gone too
-
-There were **six** TypeScript generators, not the two originally recorded: entity, enum, DTO and handler
-in `StudioWorkspace`, plus a second copy of the DTO and handler pair in `ApiDesigner`. All of them
-reimplemented `PocoGenerator`, and all had drifted far enough that the preview was misleading rather
-than merely stale:
-
-- They emitted `using FoundryMongo.Domain.Entities;` — a namespace that does not exist. The compiler
-  emits `Foundry.Core.Entities`. The previewed code would not compile.
-- They omitted `partial`, which the whole `*.Custom.cs` scaffold-preservation design depends on. A
-  developer copying the preview lost the extension point with no indication.
-- They omitted the generated-file header, `#nullable enable`, validation attributes, `[JsonIgnore]` on
-  soft-delete fields, compound indexes and workflow interfaces.
-
-A preview that differs from the real output is worse than none, because it is read *as* the output.
-Studio now fetches from `POST /api/compile`, so what it shows is what `foundry compile` writes — 334
-lines of duplicated generation deleted against 254 added, most of the additions being tests and error
-handling. One detail worth recording: the compiler keys files by path *without* an extension and appends
-`.cs` in its writer, so the client mirrors that; without it, downloads arrived as extensionless files.
-
-Both new clients fail loudly when the backend is unavailable and never fall back to local generation — a
-fallback is exactly how the divergence would return. The preview empties and shows the reason, because
-an empty list with no explanation reads as "this schema has no entities".
-
-Four areas came back clean, which is worth recording as evidence rather than left unsaid:
-**ambient tenant propagation** held under 50 interleaved flows, the **serialization defaults**
-were correct on every property including the deliberately-writable OCC token, `AddFoundryRules`
-produced a valid container under `ValidateOnBuild`/`ValidateScopes`, and the **real-time audit
-sink** correctly honours `[RealTime(false)]` while still writing audit records. Tenant isolation
-is the highest-consequence surface in the framework, so a negative result there is a real finding.
-
-**The flake: mechanism removed, root cause never reproduced.** Stated that way deliberately, because
-the two are not the same thing and only one of them is proven.
-
-The suites that share process-global state now run serially, and the MongoDB serialization
-configuration is registered from a module initializer before any test starts rather than incidentally
-by whichever test called `AddFoundryMongo` first. That removes the class of nondeterminism: xUnit runs
-test classes in parallel by default, MongoDB freezes a type's class map on first use, and NSubstitute
-queues argument matchers per thread across async continuations — so *which* test observed *which*
-global configuration depended on thread scheduling. This suite had already produced one confirmed bug
-of exactly that shape, where `FullFlow_WithRealMongoDB` passed or failed according to whether another
-test's `AddFoundryMongo` call had run first.
-
-What is **not** established: that this was the cause of the two specific failures observed. They were
-never reproduced — 12 isolated runs, 6 under deliberate CPU load, and repeated solution-wide runs all
-passed, and the original assertion message was not captured. Several plausible mechanisms were checked
-and eliminated by reading the code: the audit sink is per-instance, the property cache is a
-`ConcurrentDictionary`, the test cursor is per-test, and the diff computation uses CLR property names
-rather than BSON element names, so the camelCase convention cannot affect it.
-
-The honest summary is that a real hazard was removed and the specific failure remains unexplained. The
-cost of serialising was measured rather than assumed: the Mongo suite went from ~230ms to ~490ms and
-the integration suite from 6s to 7-9s. **If it recurs, capture the assertion message first** — that is
-the piece of evidence this investigation lacked, and without it any further fix is another guess.
-
-No module is now wholly unverified. That is a floor, not a finish: the suites added today
-target the highest-consequence surface of each module, not its whole surface area.
-
-All 603 C# tests pass and there are zero vulnerable NuGet packages. CI
-(`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
-a Studio typecheck; it **first went green on `bf3e227`**, after the three repository-level
-defects in section 2 were fixed. The seven modules are now vendored into the root
-repository, so a clone builds.
+And the largest untestable-by-design block is gone: `WorkflowTransitionBehavior` located four
+collaborators by scanning `AppDomain` for simple-name matches and invoking methods through `MethodInfo`.
+Two interfaces preserve the `Foundry.Rules` → `Foundry.Api` layering constraint that the reflection was
+working around, with compile-time contracts instead. It now has 24 tests.
 
 ---
 
-## 4. Recommended priority for the next cycle
+## 4. Coverage and what covering it found
 
-Verification, not features. In order:
+Every module has tests:
 
-1. ~~**Prove a generated application actually runs.**~~ **Done 2026-07-26.**
-   `scripts/runtime-smoke-test.sh` scaffolds a project with `foundry new`, boots it, exercises
-   the generated REST endpoints, restarts the process and reads the record back from MongoDB.
-   It runs as its own CI job. Getting there took six fixes: the scaffolder emitted absolute
-   paths to one machine, produced no `api-manifest.json` (so no routes at all), the endpoint
-   generator failed to compile with more than one entity, `AddFoundryRealTime` deadlocked
-   startup on a circular DI registration, and `required Id` made every `POST` fail model
-   binding — meaning creating an entity over HTTP had never worked.
-2. **Continue module coverage.** `foundry-rules` and `foundry-core` are done; seven remain.
-   Next most valuable: `foundry-kafka` (the outbox is a correctness-critical differentiator)
-   and `foundry-mongo`'s untested paths.
-3. **Audit the ~54 catch sites** for swallowed failures and flip the default to failing loudly.
-4. **Any test at all for Studio.** One end-to-end pass — draw entity → export IR → compile —
-   covers the path users actually take.
-5. **Then** a second data provider beyond MongoDB. It is the commercial ceiling for
-   enterprise .NET shops, but adding one to an unverified runtime just doubles the
-   unverified surface.
+| Suite | Tests |
+| ----- | ----: |
+| `foundry-schema` | 153 |
+| `foundry-integration-tests` | 75 |
+| `foundry-rules` | 73 |
+| `foundry-file-io` | 63 |
+| `foundry-core` | 52 |
+| `foundry-kafka` | 34 |
+| `foundry-mongo` | 29 |
+| `foundry-connectors` | 28 |
+| `foundry-studio` | 28 |
+| `foundry-realtime` | 26 |
+| `foundry-testing` | 26 |
+| `foundry-api` | 23 |
+| `foundry-cli` | 21 |
+
+**Nine modules went from zero tests to a suite each, and seven of the nine yielded five defects.** The
+count did not decline as the work went on, which is the strongest available evidence that the pattern
+was systemic rather than local. Around fifty defects were fixed in total: three repository-level, six in
+the scaffold-to-running-application path, roughly thirty-six across the nine modules, and the rest in
+the workflow orchestrator and the Studio duplications.
+
+The two exceptions are informative rather than lucky:
+
+- **`foundry-cli` yielded one.** It was the module worked over earliest, so its defects had already been
+  found. Its 21 tests drive the built binary as a process, because the CLI's contract is its exit code
+  and its stdio. That also verified the earlier LSP byte-framing fix **end to end** — a request
+  containing `café-naïve-piñata-日本語` followed by a second request proves the stream does not
+  desynchronise, which inspection alone could not establish.
+- **`foundry-studio` yielded divergences, not omissions** — see section 3.
+
+### The findings worth remembering
+
+Ordered by consequence, not by module.
+
+**A cross-tenant data leak.** `foundry-realtime` sent every mutation to SignalR's `Clients.All` *in
+addition* to the subscription groups, bypassing the `[RealTime(roles: …)]` RBAC that `NotificationHub`
+carefully validates on subscribe — and in a multi-tenant deployment delivering one tenant's mutations to
+another's clients. An `AuditLogEntry` carries `PropertyDiffs`, so what leaked was the changed *values*.
+Two more defects in the same area cancelled each other out and hid it: entity subscription groups never
+matched (subscribers joined under the simple type name, delivery targeted the assembly-qualified one),
+so subscriptions were broken while the firehose delivered everything anyway. Record subscriptions were
+also authorised against a client-supplied entity name but keyed on the record id alone, and an
+unresolvable name failed *open*.
+
+**Credentials sent to the wrong service.** `foundry-connectors` keyed `ConnectorOptions` and the typed
+`HttpClient` on the *type* rather than the connector name, so registering a second connector of the same
+type replaced the first. An application integrating a CRM and a billing provider ended up with both
+pointing at one base URL carrying one set of credentials. Five of six new registration tests fail
+against the original code; the one that passes is the single-connector demo case.
+
+**Both guarantees of the transactional outbox.** `foundry-kafka` broke ordering at both ends — a fresh
+`Guid` partition key per message scattered one entity's mutations across partitions, and the publisher
+requested a sort order it never received because `FindManyAsync` ignores `sortOrder` when `sortBy` is
+null. Durability defaulted to `Acks=Leader`, acknowledging before replication, so a broker failure loses
+a message the outbox has already marked processed. It fails only under broker failure, so never in
+development.
+
+**Two security defects in the security component.** `foundry-file-io`'s `SanitizeFileName` is documented
+as eliminating path traversal and returned `".."` unchanged, so `Path.Combine(uploadDir, sanitised)`
+resolved to the parent directory. And the CSV exporter was open to **formula injection**: a field
+beginning with `=`, `+`, `@` or `-` executes when the export is opened in Excel or Sheets.
+
+**A test report that reported success unconditionally.** `foundry-testing` embedded a fixed seven-row
+"Protocol Coverage Matrix" where every row read `PASSED`, beside "100% Endpoint Coverage" and "Zero
+Breach" — none measured, none affected by the results passed in. A run with fifty failures produced a
+clean bill of health, and a zero-test run rendered a "100.0%" pass rate. One level up, `foundry test`
+fed it invented counts for suites it had generated and never executed. This is the purest expression of
+the pattern in the codebase.
+
+**Silent data corruption on import.** `foundry-file-io`'s Excel parser caught every conversion failure
+and left the property at its default, so a cell of `"1,234.00 USD"` imported as an amount of **zero**
+while the row count matched what the user expected.
+
+**Guard conditions that silently blocked their own transitions.** `foundry-rules` had four defects in
+condition evaluation — enums never matched, dates could not be ordered, decimals were parsed with the
+ambient culture, and a null value ignored the operator. Each failed by refusing a legitimate transition
+with "guard condition failed", indistinguishable from a correct refusal. The cause of all four was a
+second copy of the comparison logic that had drifted from the business-rule evaluator.
+
+**Pagination metadata that made clients stop early.** `foundry-core`'s `TotalPages` divided by
+`PageSize` unguarded (a zero size saturating to `long.MaxValue`), `WithCursor` did not trim the seek
+sentinel, and `Map` dropped the cursor so a mapped result reported itself as the last page.
+
+### Four areas came back clean
+
+Recorded as evidence, not omitted for being unexciting:
+
+- **Ambient tenant propagation** held under 50 interleaved async flows, did not escape a child task, and
+  was inherited by child operations. This is the highest-consequence surface in the framework, so a
+  negative result here is a real finding.
+- **The serialization defaults** were correct on every property — including that `Version` is
+  deliberately *not* server-owned, because it is the OCC token and hiding it would silently disable
+  optimistic concurrency.
+- **`AddFoundryRules`** produced a valid container under `ValidateOnBuild`/`ValidateScopes`.
+- **The real-time audit sink** honours `[RealTime(false)]` while still writing audit records.
 
 ---
 
-## 5. Strategic read
+## 5. What is not fixed
 
-The differentiation is real and defensible: local-model-first so the domain model never
-leaves the building, IR-not-C# so generated code cannot drift from best practice, and
-tenant isolation plus envelope encryption at the data layer. That aims squarely at
-regulated .NET shops which OutSystems prices out and Retool cannot serve. Nothing found
-during this session undermines the thesis.
+Stated plainly, because a document that only lists wins is not useful for planning.
 
-The risk is execution, not strategy. The gap between what the README claimed and the actual
-state of the system was wide. And the fastest way to lose a regulated-industry buyer is a
-silent failure in tenant isolation or audit — which is exactly this codebase's default
-disposition, and exactly what section 4 is ordered to fix.
+**Coverage is a floor, not a finish.** The suites target each module's highest-consequence surface, not
+its whole surface area. `ExecuteActionAsync`'s HTTP path, SOAP envelope parsing, and the Excel
+end-to-end path are still uncovered.
+
+**One mirrored implementation remains, deliberately.** `crudRouteFor` in Studio duplicates the
+compiler's route derivation so the designer and playground can show a route without a request per
+keystroke. It is pinned to the compiler by a test table shared with `ApiManifestGeneratorTests`, which is
+a weaker guarantee than a single implementation. It is the only copy left, and it is a trade rather than
+an oversight.
+
+**A flake was mitigated, not diagnosed.** Two `FoundryMongo.Tests` audit tests failed once in a
+solution-wide run and were **never reproduced** across ~27 subsequent runs (isolated, under CPU load,
+and solution-wide). The suites that share process-global state now run serially and the MongoDB
+serialization configuration is registered from a module initializer, which removes a real class of
+nondeterminism — xUnit runs classes in parallel, MongoDB freezes a class map on first use, and
+NSubstitute queues matchers per thread. This suite had already produced one confirmed bug of that shape.
+But the specific failure remains unexplained: the original assertion message was not captured, and
+several candidate mechanisms were eliminated by reading the code. **If it recurs, capture the assertion
+message before anything else.**
+
+**The 64 catch sites in product code have not been audited.** The default was flipped to failing loudly where defects
+were found, not systematically.
+
+**MongoDB is still the only data provider.** That is the commercial ceiling for enterprise .NET shops.
+
+---
+
+## 6. Recommended priority for the next cycle
+
+1. **Audit the 64 `catch` sites** across `foundry-*/src` for swallowed failures. This is the direct attack on the bug class in
+   section 2, and it is now the highest-value remaining work: every module has tests, so the change is
+   safe to make and its effects are observable.
+2. **Deepen coverage on the paths that talk to the outside world** — the connectors' HTTP and SOAP
+   paths, the workflow engine's `ExecuteActionAsync`, the Excel import end to end. These are where
+   untrusted input meets the framework and where the remaining silent failures most likely live.
+3. **Extend the runtime smoke test.** It proves one entity, one create, one restart. Multi-tenant
+   isolation, an OCC conflict, a workflow transition and an outbox round trip through Kafka are all
+   claims the framework makes and nothing yet executes.
+4. **Remove the last mirrored implementation** by having the designer and playground read routes from a
+   cached manifest rather than deriving them.
+5. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
+   rewrite — but it doubles the surface, and it should follow the verification work rather than precede
+   it.
+
+---
+
+## 7. Strategic read
+
+The differentiation is real and defensible: local-model-first so the domain model never leaves the
+building, IR-not-C# so generated code cannot drift from best practice, and tenant isolation plus
+envelope encryption at the data layer. That aims squarely at regulated .NET shops which OutSystems
+prices out and Retool cannot serve. Nothing found undermines the thesis.
+
+The risk was always execution, and the specific risk was sharper than "some bugs". The fastest way to
+lose a regulated-industry buyer is a silent failure in tenant isolation or audit — and this codebase
+contained exactly that: a cross-tenant broadcast of changed values, an audit trail that misdescribed
+changes, and a test report that certified passes it had never observed. None of them would have
+announced themselves.
+
+What has changed is not that the code is now correct, but that it can now tell you when it is not. That
+is the prerequisite for everything else.
