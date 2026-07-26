@@ -82,7 +82,17 @@ public static class RealTimeServiceCollectionExtensions
         }
         else
         {
-            services.AddSingleton<IAuditSink, RealTimeAuditSink>();
+            // No sink to decorate, so construct it with no inner sink explicitly.
+            //
+            // This was AddSingleton<IAuditSink, RealTimeAuditSink>(), which looks equivalent but is
+            // not: RealTimeAuditSink's second constructor parameter is IAuditSink, and the container
+            // tries to satisfy it from the registration being defined rather than using the
+            // parameter's default. Every application that called AddFoundryRealTime() without
+            // having registered an IAuditSink first therefore failed at startup with "A circular
+            // dependency was detected for the service of type 'Foundry.Core.Audit.IAuditSink'" --
+            // including the project produced by 'foundry new'.
+            services.AddSingleton<IAuditSink>(sp =>
+                new RealTimeAuditSink(sp.GetRequiredService<IRealTimeNotificationBroker>(), innerSink: null));
         }
 
         return services;

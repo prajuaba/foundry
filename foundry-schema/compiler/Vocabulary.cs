@@ -81,8 +81,16 @@ namespace Foundry.Schema.Compiler
         /// <summary>
         /// Types that are valid for a property marked <c>isKey</c>.
         /// </summary>
+        /// <remarks>
+        /// Only <c>ObjectId</c>. This list previously also advertised <c>Guid</c>, <c>string</c>,
+        /// <c>int</c> and <c>long</c>, none of which work: <c>IRepository&lt;T&gt;</c> in the MongoDB
+        /// data layer is constrained to <c>IEntity&lt;ObjectId&gt;</c>, so an entity keyed on anything
+        /// else generates a type that compiles but has no resolvable repository — it cannot be
+        /// persisted, queried or served. Widening this set again requires widening that constraint
+        /// first.
+        /// </remarks>
         public static readonly IReadOnlySet<string> KeyTypes =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ObjectId", "Guid", "string", "int", "long" };
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ObjectId" };
 
         /// <summary>
         /// HTTP methods accepted on a custom endpoint.

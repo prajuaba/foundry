@@ -279,7 +279,14 @@ namespace Foundry.Api.SourceGenerators
             {
                 var fullEntityType = $"{ns}.{ep.Entity}";
                 sb.AppendLine($"        // Endpoint Config for {ep.Entity}");
-                sb.AppendLine($"        var config_{ep.Entity} = manifest.Endpoints.Find(e => e.Entity == \"{ep.Entity}\")!;");
+
+                // Each entity's registrations go in their own block. The per-method locals below
+                // (builderGet, builderPost, ...) are not named per entity, so a manifest with more
+                // than one entity previously emitted duplicate declarations in a single scope and
+                // failed to compile with CS0128. Every shipped manifest and test fixture had
+                // exactly one entity, so the generated REST layer had never been built with two.
+                sb.AppendLine("        {");
+                sb.AppendLine($"            var config_{ep.Entity} = manifest.Endpoints.Find(e => e.Entity == \"{ep.Entity}\")!;");
                 sb.AppendLine();
 
                 foreach (var method in ep.Methods)
@@ -358,6 +365,9 @@ namespace Foundry.Api.SourceGenerators
                         sb.AppendLine($"            ConfigureMetadata(builderGet, config_{ep.Entity}, \"GET\", typeof({fullEntityType}), 200);");
                     }
                 }
+
+                sb.AppendLine("        }");
+                sb.AppendLine();
             }
 
             // Map custom endpoints at compile-time

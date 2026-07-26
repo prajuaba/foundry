@@ -62,6 +62,38 @@ jobs:
       - name: Test
         run: dotnet test Foundry.slnx --no-build --configuration Release --verbosity normal
 
+  runtime-smoke-test:
+    name: Runtime smoke test
+    runs-on: ubuntu-latest
+
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # The only gate that runs a generated application rather than compiling one. Scaffolds a
+      # project with 'foundry new', boots it, exercises the generated REST endpoints, then restarts
+      # the process and reads the record back to prove it reached MongoDB. Four defects that a
+      # green build could not see -- a circular DI registration, an unresolvable
+      # ICurrentUserContext, a Microsoft.OpenApi version mismatch and a POST that could never bind
+      # -- were all found this way.
+      - name: Scaffold, run and verify a generated application
+        run: ./scripts/runtime-smoke-test.sh
+
   schema-gates:
     name: Schema gates
     runs-on: ubuntu-latest

@@ -278,11 +278,17 @@ namespace Foundry.Schema.Compiler
             }
             else if (!Vocabulary.KeyTypes.Contains(keys[0].Type ?? string.Empty))
             {
-                bag.Warning(
-                    DiagnosticCatalog.UnknownType,
-                    $"Key property '{keys[0].Name}' has type '{keys[0].Type}', which is not a recommended key type.",
+                // An error, not a warning. This was previously a warning saying the type was "not
+                // recommended", which understated it: the MongoDB data layer constrains
+                // IRepository<T> to IEntity<ObjectId>, so a differently-keyed entity generates code
+                // that compiles and then has no repository to resolve at runtime. The scaffolded
+                // project shipped with a string key and could not serve a single request.
+                bag.Error(
+                    DiagnosticCatalog.EntityUnsupportedKeyType,
+                    $"Entity '{entity.Name}' has key property '{keys[0].Name}' of type '{keys[0].Type}', "
+                        + "which the MongoDB data layer cannot serve.",
                     $"{path}/properties/{properties.IndexOf(keys[0])}/type",
-                    $"Use one of: {string.Join(", ", Vocabulary.KeyTypes)}.");
+                    $"Change the key property's \"type\" to \"ObjectId\".");
             }
         }
 

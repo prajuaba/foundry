@@ -135,7 +135,38 @@ public static class FoundryJsonDefaults
             options.Converters.Add(new JsonStringEnumConverter());
 
         options.TypeInfoResolver = (options.TypeInfoResolver ?? new DefaultJsonTypeInfoResolver())
-            .WithAddedModifier(MakeAuditTimestampsReadOnly);
+            .WithAddedModifier(MakeAuditTimestampsReadOnly)
+            .WithAddedModifier(MakeEntityIdOptionalOnTheWire);
+    }
+
+    /// <summary>
+    /// Makes an entity's <c>Id</c> optional when deserializing, without changing its
+    /// compile-time <c>required</c> semantics.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>BaseEntity&lt;TId&gt;.Id</c> is declared <c>required</c>, which is right for C# code —
+    /// an entity should never be constructed without an id. System.Text.Json honours the
+    /// <c>required</c> keyword as <c>JsonRequired</c> though, so it rejected any payload that
+    /// omitted <c>id</c>.
+    /// </para>
+    /// <para>
+    /// That made <c>POST</c> impossible for every entity in the framework: the client cannot
+    /// supply an id because the server assigns it, and omitting it failed model binding with a
+    /// bodyless <c>400 Bad Request</c> before the handler ran. Nothing logged it, so a create
+    /// simply never worked.
+    /// </para>
+    /// </remarks>
+    private static void MakeEntityIdOptionalOnTheWire(JsonTypeInfo typeInfo)
+    {
+        if (typeInfo.Kind != JsonTypeInfoKind.Object) return;
+        if (!IsEntity(typeInfo.Type)) return;
+
+        foreach (var property in typeInfo.Properties)
+        {
+            if (string.Equals(property.Name, "Id", StringComparison.OrdinalIgnoreCase))
+                property.IsRequired = false;
+        }
     }
 
     /// <summary>

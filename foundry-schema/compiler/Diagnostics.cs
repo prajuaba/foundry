@@ -175,6 +175,13 @@ namespace Foundry.Schema.Compiler
         /// <summary>The IR document uses the Studio canvas format instead of the normative IR format.</summary>
         public const string CanvasFormatNotIr = "FDY1010";
 
+        /// <summary>
+        /// The key property's type is not <c>objectid</c>. <c>IRepository&lt;T&gt;</c> is constrained to
+        /// <c>IEntity&lt;ObjectId&gt;</c>, so an entity keyed on anything else compiles but can never be
+        /// persisted, queried or served — no repository can be resolved for it.
+        /// </summary>
+        public const string EntityUnsupportedKeyType = "FDY1011";
+
         // ---- FDY2xxx: semantic / cross-reference ----
 
         /// <summary>Two entities share a name.</summary>
@@ -310,6 +317,7 @@ namespace Foundry.Schema.Compiler
             [PropertyMissingType] = "Every property must have a non-empty 'type'.",
             [EnumNoValues] = "An enum must declare at least one value.",
             [CanvasFormatNotIr] = "This document is in Studio canvas format ('nodes'/'edges'). The compiler consumes the normative IR format ('entities'/'enums'/'dtos'). Convert it with 'foundry migrate'.",
+            [EntityUnsupportedKeyType] = "The key property must be of type 'objectid'. The MongoDB data layer constrains IRepository<T> to IEntity<ObjectId>, so an entity keyed on any other type generates code that compiles but has no resolvable repository -- it can never be persisted or served.",
             [DuplicateEntityName] = "Entity names must be unique; duplicates would generate colliding C# types.",
             [DuplicatePropertyName] = "Property names must be unique within an entity.",
             [WorkflowUnknownState] = "A workflow transition references a state not present in the workflow's 'states'.",

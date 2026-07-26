@@ -428,6 +428,72 @@ public class Program
         return 0;
     }
 
+    /// <summary>
+    /// Locates the Foundry framework checkout that a scaffolded project should reference.
+    /// </summary>
+    /// <remarks>
+    /// Checks <c>FOUNDRY_HOME</c> first, then walks up from the running assembly, then from the
+    /// working directory. Returns <c>null</c> rather than guessing, so the caller can report the
+    /// problem instead of writing an unusable project file.
+    /// </remarks>
+    private static string? FindFrameworkRoot()
+    {
+        static bool IsRoot(string candidate) =>
+            Directory.Exists(Path.Combine(candidate, "foundry-core", "src", "Foundry.Core"))
+            && Directory.Exists(Path.Combine(candidate, "foundry-api", "src", "Foundry.Api"));
+
+        var fromEnvironment = Environment.GetEnvironmentVariable("FOUNDRY_HOME");
+        if (!string.IsNullOrWhiteSpace(fromEnvironment)
+            && Directory.Exists(fromEnvironment)
+            && IsRoot(fromEnvironment))
+        {
+            return Path.GetFullPath(fromEnvironment);
+        }
+
+        foreach (var start in new[] { AppContext.BaseDirectory, Directory.GetCurrentDirectory() })
+        {
+            var dir = new DirectoryInfo(start);
+            while (dir is not null)
+            {
+                if (IsRoot(dir.FullName)) return dir.FullName;
+                dir = dir.Parent;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Reads a package version out of the framework's central package management file.
+    /// </summary>
+    /// <remarks>
+    /// A scaffolded project usually lives outside the framework checkout, so it is not covered by
+    /// the repository's <c>Directory.Packages.props</c> and a versionless <c>PackageReference</c>
+    /// fails to restore with NU1015. Versions are therefore written explicitly into the generated
+    /// project, taken from the same file the framework itself was built with rather than hardcoded
+    /// here, so the two cannot drift apart.
+    /// </remarks>
+    private static string? ResolvePackageVersion(string frameworkRoot, string packageId)
+    {
+        var propsPath = Path.Combine(frameworkRoot, "Directory.Packages.props");
+        if (!File.Exists(propsPath)) return null;
+
+        try
+        {
+            var document = System.Xml.Linq.XDocument.Load(propsPath);
+            return document
+                .Descendants()
+                .Where(e => e.Name.LocalName == "PackageVersion")
+                .FirstOrDefault(e => string.Equals(
+                    e.Attribute("Include")?.Value, packageId, StringComparison.OrdinalIgnoreCase))
+                ?.Attribute("Version")?.Value;
+        }
+        catch (System.Xml.XmlException)
+        {
+            return null;
+        }
+    }
+
     private static int CreateNewProject(string projectName, string? customSchemaPath = null)
     {
         var targetDir = Path.Combine(Directory.GetCurrentDirectory(), projectName);
@@ -449,6 +515,67 @@ public class Program
         Directory.CreateDirectory(targetDir);
 
         // 1. Create .csproj
+        //
+        // The framework is referenced by project path, so the scaffolded app needs to know where
+        // the Foundry repository is. That location was previously hardcoded to the machine this
+        // CLI was developed on, which made every scaffolded project unbuildable anywhere else --
+        // while still printing "READY-TO-RUN". It is resolved at runtime and written relative to
+        // the new project instead, and if it cannot be found we say so rather than emit a path
+        // that is guaranteed to fail.
+        var frameworkRoot = FindFrameworkRoot();
+        if (frameworkRoot is null)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("[Error] Could not locate the Foundry framework sources.");
+            Console.ResetColor();
+            Console.WriteLine("  'foundry new' references the framework by project path, so it must run from within");
+            Console.WriteLine("  a Foundry checkout (or with FOUNDRY_HOME pointing at one).");
+            return 1;
+        }
+
+        // Packages the scaffolded project must pin explicitly.
+        //
+        // The framework repository uses central package management with transitive pinning, so
+        // Foundry.Api is compiled against Microsoft.OpenApi 2.11.0. A scaffolded project sits
+        // outside that, resolves Swashbuckle's own dependency (2.0.0 -- the version with a known
+        // advisory) and then fails at startup with a FileNotFoundException for the 2.11.0 assembly
+        // Foundry.Api was built against. The app compiled cleanly and died on first request, so
+        // pinning here is what makes a scaffolded project actually run.
+        var requiredPackages = new[]
+        {
+            "FluentValidation.DependencyInjectionExtensions",
+            "Microsoft.OpenApi",
+            "Swashbuckle.AspNetCore"
+        };
+
+        var packageReferences = new List<string>();
+        foreach (var packageId in requiredPackages)
+        {
+            var version = ResolvePackageVersion(frameworkRoot, packageId);
+            if (version is null)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[Error] Could not read the {packageId} version from");
+                Console.WriteLine($"  {Path.Combine(frameworkRoot, "Directory.Packages.props")}");
+                Console.ResetColor();
+                Console.WriteLine("  The scaffolded project needs explicit versions because it sits outside the");
+                Console.WriteLine("  framework's central package management.");
+                return 1;
+            }
+
+            packageReferences.Add(
+                $@"    <PackageReference Include=""{packageId}"" Version=""{version}"" />");
+        }
+
+        var packageReferenceBlock = string.Join("\n", packageReferences);
+
+        string Reference(string relativeProjectPath)
+        {
+            var absolute = Path.Combine(frameworkRoot, relativeProjectPath.Replace('/', Path.DirectorySeparatorChar));
+            // Relative so the project survives the checkout being moved or cloned elsewhere.
+            return Path.GetRelativePath(targetDir, absolute).Replace(Path.DirectorySeparatorChar, '/');
+        }
+
         var csprojContent = $@"<Project Sdk=""Microsoft.NET.Sdk.Web"">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -458,17 +585,39 @@ public class Program
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include=""/Users/prajuab/Workspace/foundry/foundry-core/src/Foundry.Core/Foundry.Core.csproj"" />
-    <ProjectReference Include=""/Users/prajuab/Workspace/foundry/foundry-mongo/src/Foundry.Mongo/Foundry.Mongo.csproj"" />
-    <ProjectReference Include=""/Users/prajuab/Workspace/foundry/foundry-api/src/Foundry.Api/Foundry.Api.csproj"" />
-    <ProjectReference Include=""/Users/prajuab/Workspace/foundry/foundry-rules/src/Foundry.Rules/Foundry.Rules.csproj"" />
-    <ProjectReference Include=""/Users/prajuab/Workspace/foundry/foundry-file-io/src/Foundry.FileIO/Foundry.FileIO.csproj"" />
-    <ProjectReference Include=""/Users/prajuab/Workspace/foundry/foundry-realtime/src/Foundry.RealTime/Foundry.RealTime.csproj"" />
-    <ProjectReference Include=""/Users/prajuab/Workspace/foundry/foundry-kafka/src/Foundry.Kafka/Foundry.Kafka.csproj"" />
+    <ProjectReference Include=""{Reference("foundry-core/src/Foundry.Core/Foundry.Core.csproj")}"" />
+    <ProjectReference Include=""{Reference("foundry-mongo/src/Foundry.Mongo/Foundry.Mongo.csproj")}"" />
+    <ProjectReference Include=""{Reference("foundry-api/src/Foundry.Api/Foundry.Api.csproj")}"" />
+    <ProjectReference Include=""{Reference("foundry-rules/src/Foundry.Rules/Foundry.Rules.csproj")}"" />
+    <ProjectReference Include=""{Reference("foundry-file-io/src/Foundry.FileIO/Foundry.FileIO.csproj")}"" />
+    <ProjectReference Include=""{Reference("foundry-realtime/src/Foundry.RealTime/Foundry.RealTime.csproj")}"" />
+    <ProjectReference Include=""{Reference("foundry-kafka/src/Foundry.Kafka/Foundry.Kafka.csproj")}"" />
+  </ItemGroup>
+
+  <!-- The REST surface is emitted by this analyser from api-manifest.json. Without the analyser
+       reference and the AdditionalFiles entry the app builds, starts, and serves no routes. -->
+  <ItemGroup>
+    <ProjectReference Include=""{Reference("foundry-api/src/Foundry.Api.SourceGenerators/Foundry.Api.SourceGenerators.csproj")}""
+                      OutputItemType=""Analyzer""
+                      ReferenceOutputAssembly=""false"" />
+    <AdditionalFiles Include=""api-manifest.json"" />
+  </ItemGroup>
+
+  <!-- Pinned to the versions the framework itself was built against. Letting these float
+       resolves an older Microsoft.OpenApi than Foundry.Api was compiled with, which builds
+       fine and then throws FileNotFoundException on the first request. -->
+  <ItemGroup>
+{packageReferenceBlock}
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update=""api-manifest.json"">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 </Project>";
         File.WriteAllText(Path.Combine(targetDir, $"{projectName}.csproj"), csprojContent);
-        Console.WriteLine($"  ✓ Generated {projectName}.csproj (References All 8 Foundry Framework Engines)");
+        Console.WriteLine($"  ✓ Generated {projectName}.csproj (framework referenced relatively from {frameworkRoot})");
 
         // 2. Create Program.cs (generated after schema compilation to conditionally wire services)
         // Placeholder — actual Program.cs content is written below AFTER schema compilation
@@ -515,7 +664,7 @@ public class Program
       ""SoftDelete"": true,
       ""Auditable"": true,
       ""Properties"": [
-        { ""Name"": ""Id"", ""Type"": ""string"", ""IsKey"": true },
+        { ""Name"": ""Id"", ""Type"": ""ObjectId"", ""IsKey"": true },
         { ""Name"": ""FullName"", ""Type"": ""string"", ""Attributes"": [""Required""] },
         { ""Name"": ""Email"", ""Type"": ""string"", ""Attributes"": [""Required"", ""MaskEmail""] }
       ],
@@ -526,7 +675,7 @@ public class Program
       ""SoftDelete"": true,
       ""Auditable"": true,
       ""Properties"": [
-        { ""Name"": ""Id"", ""Type"": ""string"", ""IsKey"": true },
+        { ""Name"": ""Id"", ""Type"": ""ObjectId"", ""IsKey"": true },
         { ""Name"": ""CustomerId"", ""Type"": ""string"", ""Attributes"": [""Required"", ""Index""] },
         { ""Name"": ""TotalAmount"", ""Type"": ""decimal"", ""Attributes"": [""Required""] },
         { ""Name"": ""Status"", ""Type"": ""string"" }
@@ -598,7 +747,40 @@ volumes:
         // 6. Automatically compile domain schema into ./Generated
         var generatedDir = Path.Combine(targetDir, "Generated");
         Console.WriteLine("  ➜ Compiling domain schema into C# POCOs and Handlers...");
-        Foundry.Schema.Compiler.Program.Main(new[] { "--input", schemaPath, "--output", generatedDir });
+        var compileExit = Foundry.Schema.Compiler.Program.Main(new[] { "--input", schemaPath, "--output", generatedDir });
+        if (compileExit != 0)
+        {
+            // The compiler already reported the diagnostics. Stopping here matters: continuing
+            // would leave a project directory that looks scaffolded and cannot build.
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"[Error] Schema compilation failed; '{projectName}' is incomplete.");
+            Console.ResetColor();
+            return compileExit;
+        }
+
+        // 6b. Derive api-manifest.json from the schema.
+        //
+        // This is what makes the app serve anything. The REST surface is emitted by the
+        // Foundry.Api.SourceGenerators analyser from this file; with no manifest the analyser
+        // generates empty registrations and the application answers 404 on every entity route.
+        // Previously only Studio produced it, so CLI-scaffolded projects had no API at all.
+        var manifestSchema = System.Text.Json.JsonSerializer.Deserialize<Foundry.Schema.Compiler.SchemaModel>(
+            File.ReadAllText(schemaPath),
+            new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        if (manifestSchema is null)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("[Error] Could not read the schema back to derive api-manifest.json.");
+            Console.ResetColor();
+            return 1;
+        }
+
+        var manifestJson = Foundry.Schema.Compiler.ApiManifestGenerator.Generate(manifestSchema);
+        File.WriteAllText(Path.Combine(targetDir, "api-manifest.json"), manifestJson);
+
+        var routeCount = manifestSchema.Entities?.Count(e => e.ApiEnabledMethods.Count > 0) ?? 0;
+        Console.WriteLine($"  ✓ Generated api-manifest.json ({routeCount} entity route group(s))");
 
         // 7. Write scaffolded Program.cs after checking generated artifacts
         var hasKafka = Directory.Exists(Path.Combine(generatedDir, "Kafka"));
@@ -614,54 +796,106 @@ volumes:
 
         var kafkaRegistration = hasKafka ? "\n// Register generated Kafka consumer handlers\nbuilder.Services.AddGeneratedKafkaHandlers();\n" : "";
 
-        var programContent = $@"using Foundry.Mongo;
-using Foundry.Api;
+        // 7. Write Program.cs.
+        //
+        // This previously called AddControllers()/MapControllers(), but the compiler emits no
+        // controllers -- the REST surface comes from the analyser's AddGeneratedHandlers() and
+        // MapGeneratedEndpoints(manifest). The scaffolded app therefore started successfully and
+        // served nothing, while the CLI advertised "full REST CRUD". The wiring below mirrors
+        // templates/Foundry.Api.Template/Program.cs, which is the arrangement the API tests cover.
+        var programContent = $@"using System.Text.Json;
+using MediatR;
+using FluentValidation;
+using Foundry.Mongo.DependencyInjection;
+using Foundry.Api.Manifest;
+using Foundry.Api.Endpoints;
+using Foundry.Api.MediatR.Behaviors;
+using Foundry.Core.Serialization;
 using Foundry.Rules;
 using Foundry.RealTime;
-using Foundry.Kafka;
 {extraUsingsStr}
 var builder = WebApplication.CreateBuilder(args);
 
-// 1. Add MongoDB Data Access Layer (with KMS Encryption, OCC & Auditing)
+// The API surface is described by api-manifest.json, which is derived from the domain schema.
+// The analyser reads the same file at compile time to generate the endpoints and handlers.
+var manifestPath = Path.Combine(builder.Environment.ContentRootPath, ""api-manifest.json"");
+if (!File.Exists(manifestPath))
+{{
+    throw new InvalidOperationException(
+        $""api-manifest.json not found at {{manifestPath}}. Regenerate it with 'foundry compile'; ""
+        + ""without it no entity endpoints are served."");
+}}
+
+var manifest = JsonSerializer.Deserialize<ApiManifest>(
+    File.ReadAllText(manifestPath),
+    new JsonSerializerOptions {{ PropertyNameCaseInsensitive = true }})
+    ?? throw new InvalidOperationException(""api-manifest.json could not be deserialized."");
+
+builder.Services.AddSingleton(manifest);
+
+// 1. MongoDB data access layer (tenant filtering, envelope encryption, OCC, auditing)
 builder.Services.AddFoundryMongo(options =>
 {{
-    options.ConnectionString = builder.Configuration.GetConnectionString(""MongoDb"") 
+    options.ConnectionString = builder.Configuration.GetConnectionString(""MongoDb"")
         ?? ""mongodb://localhost:27017"";
     options.DatabaseName = ""{projectName}Db"";
 }});
 
-// 2. Add Real-Time SignalR, WebSockets & SSE Audit Broker
+// 2. Real-time audit broker (SignalR, WebSockets, SSE)
 builder.Services.AddFoundryRealTime();
 
-// 3. Add Business Rules Engine
+// 3. Business rules engine
 builder.Services.AddFoundryRules();
 
-// 4. Add Kafka Event Producer & Outbox Broker
-builder.Services.AddFoundryKafka(options =>
+builder.Services.AddHttpContextAccessor();
+
+// Required by the generated DELETE endpoint, and by the repository layer to stamp audit fields.
+// Without it ASP.NET cannot see ICurrentUserContext as a service, infers it as a request body
+// parameter, and startup fails with ""Body was inferred but the method does not allow inferred
+// body parameters"" -- before serving a single request.
+builder.Services.AddScoped<Foundry.Core.User.ICurrentUserContext, Foundry.Api.Security.CurrentUserContext>();
+
+builder.Services.AddMemoryCache();
+builder.Services.AddDistributedMemoryCache();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddValidatorsFromAssembly(typeof(Program).Assembly);
+
+builder.Services.AddMediatR(cfg =>
 {{
-    options.BootstrapServers = builder.Configuration.GetConnectionString(""Kafka"") ?? ""localhost:9092"";
+    cfg.RegisterServicesFromAssembly(typeof(Program).Assembly);
+    cfg.RegisterServicesFromAssembly(typeof(Foundry.Api.MediatR.InsertCommand<>).Assembly);
 }});
 
-// 5. Add Dynamic GraphQL Gateway
-builder.Services.AddDynamicGraphQL();
+// Generated request handlers, one per entity method in the manifest.
+builder.Services.AddGeneratedHandlers();
 {kafkaRegistration}
-builder.Services.AddControllers();
-builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(BusinessRuleBehavior<,>));
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(CachingBehavior<,>));
+
+builder.Services.AddExceptionHandler<Foundry.Api.Middleware.GlobalExceptionHandler>();
+builder.Services.AddProblemDetails();
+
+// Entity ids are MongoDB ObjectIds, which System.Text.Json cannot round-trip unaided: it decodes
+// them to ObjectId.Empty, the driver then assigns a different id at insert, and a GET by the id the
+// caller was given returns 404 while the record sits in the collection.
+builder.Services.ConfigureHttpJsonOptions(options =>
+    FoundryJsonDefaults.Apply(options.SerializerOptions));
 
 var app = builder.Build();
 
-app.UseRouting();
+app.UseExceptionHandler();
 
-app.MapControllers();
+// Generated REST endpoints for every entity in the manifest.
+app.MapGeneratedEndpoints(manifest);
 
-// Map Real-Time WebSockets, SignalR, SSE & GraphQL endpoints
+// Real-time channels.
 app.MapFoundryRealTime();
-app.MapGraphQL();
 
 app.Run();
 ";
         File.WriteAllText(Path.Combine(targetDir, "Program.cs"), programContent);
-        Console.WriteLine("  ✓ Generated Program.cs (Pre-wired with REST, GraphQL, Kafka, Rules & WebSockets)");
+        Console.WriteLine("  ✓ Generated Program.cs (REST endpoints from api-manifest.json, rules, real-time)");
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine("\n=================================================================");
@@ -694,8 +928,9 @@ app.Run();
         if (subCommand == "build" || subCommand == "compile")
         {
             Console.WriteLine("[Foundry Engine] Executing in-process schema compiler...");
-            Foundry.Schema.Compiler.Program.Main(args.Skip(1).ToArray());
-            return 0;
+            // Propagate the compiler's exit code. Returning 0 unconditionally meant a failed
+            // compile looked like a successful one to any script or CI job invoking this.
+            return Foundry.Schema.Compiler.Program.Main(args.Skip(1).ToArray());
         }
         else if (subCommand == "studio")
         {
@@ -777,7 +1012,19 @@ app.Run();
 
             try
             {
-                Foundry.Schema.Compiler.Program.Main(new[] { "--input", tempFile, "--output", outDir });
+                // Report the real outcome. This used to answer 200 { success = true } even when
+                // compilation had failed and nothing was written, so the Studio canvas showed a
+                // successful compile for a schema the compiler had rejected.
+                var exitCode = Foundry.Schema.Compiler.Program.Main(new[] { "--input", tempFile, "--output", outDir });
+                if (exitCode != 0)
+                {
+                    return Results.BadRequest(new
+                    {
+                        success = false,
+                        error = "Schema compilation failed. Run 'foundry validate' for the diagnostics."
+                    });
+                }
+
                 return Results.Ok(new { success = true, outputDirectory = outDir });
             }
             finally

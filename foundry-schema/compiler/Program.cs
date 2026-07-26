@@ -7,7 +7,17 @@ namespace Foundry.Schema.Compiler
 {
     public class Program
     {
-        public static void Main(string[] args)
+        /// <summary>
+        /// Compiles a schema into C# and returns a process exit code.
+        /// </summary>
+        /// <remarks>
+        /// Returns <c>int</c> rather than <c>void</c> so in-process callers such as
+        /// <c>foundry new</c> can tell whether compilation actually succeeded. It previously set
+        /// <see cref="Environment.ExitCode"/> and returned void, which the standalone process
+        /// honoured but an in-process caller could not observe -- so the scaffolder continued
+        /// happily after a failed compile and reported a ready-to-run project.
+        /// </remarks>
+        public static int Main(string[] args)
         {
             string? inputPath = null;
             string? outputPath = null;
@@ -22,7 +32,7 @@ namespace Foundry.Schema.Compiler
                     {
                         Console.WriteLine("Error: --input requires a file path.");
                         PrintUsage();
-                        return;
+                        return 1;
                     }
                 }
                 else if (args[i] == "--output" || args[i] == "-o")
@@ -33,7 +43,7 @@ namespace Foundry.Schema.Compiler
                     {
                         Console.WriteLine("Error: --output requires a directory path.");
                         PrintUsage();
-                        return;
+                        return 1;
                     }
                 }
             }
@@ -42,13 +52,13 @@ namespace Foundry.Schema.Compiler
             {
                 Console.WriteLine("Error: Both --input and --output are required.");
                 PrintUsage();
-                return;
+                return 1;
             }
 
             if (!File.Exists(inputPath))
             {
                 Console.WriteLine($"Error: Input file '{inputPath}' does not exist.");
-                return;
+                return 1;
             }
 
             try
@@ -75,8 +85,7 @@ namespace Foundry.Schema.Compiler
                 if (bag.HasErrors)
                 {
                     Console.WriteLine($"Error: schema validation failed with {bag.ErrorCount} error(s). No files were written.");
-                    Environment.ExitCode = 1;
-                    return;
+                    return 1;
                 }
 
                 var generatedFiles = PocoGenerator.GenerateFiles(schema!);
@@ -111,23 +120,24 @@ namespace Foundry.Schema.Compiler
 
                 var warnings = bag.WarningCount > 0 ? $", {bag.WarningCount} warning(s)" : "";
                 Console.WriteLine($"Success: {written} file(s) written, {preserved} scaffold(s) preserved{warnings}.");
+                return 0;
             }
             catch (UnsafeSchemaValueException ex)
             {
                 // Validation should have caught this. Reaching here means a gap in the
                 // validator, so fail loudly rather than emit the value.
                 Console.WriteLine($"Error: refusing to emit unsafe schema value. {ex.Message}");
-                Environment.ExitCode = 1;
+                return 1;
             }
             catch (JsonException ex)
             {
                 Console.WriteLine($"Error: Failed to deserialize JSON. {ex.Message}");
-                Environment.ExitCode = 1;
+                return 1;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error: An unexpected error occurred. {ex.Message}");
-                Environment.ExitCode = 1;
+                return 1;
             }
         }
 
