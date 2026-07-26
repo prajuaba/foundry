@@ -102,20 +102,28 @@ Three modules have tests, plus the integration suite:
 
 | Has tests | No tests at all |
 | --------- | --------------- |
-| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-rules` (49) · `foundry-mongo` (29) · `foundry-api` (23) | `foundry-core` · `foundry-kafka` · `foundry-realtime` · `foundry-connectors` · `foundry-file-io` · `foundry-testing` · `foundry-cli` · `foundry-studio` |
+| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-mongo` (29) · `foundry-api` (23) | `foundry-kafka` · `foundry-realtime` · `foundry-connectors` · `foundry-file-io` · `foundry-testing` · `foundry-cli` · `foundry-studio` |
 
-`foundry-rules` was covered on 2026-07-26 and the prediction above held: five defects in the
-first module examined, four of them in guard-condition evaluation, every one of which failed by
-*silently blocking a transition* rather than erroring. Eight modules remain.
+The still-untested list includes the **Kafka outbox** and ~7.5k lines of Studio TypeScript
+verified only by `tsc`.
 
-That untested list includes the **workflow engine**, the **Kafka outbox**, and ~7.5k lines
-of Studio TypeScript verified only by `tsc`.
+**The prediction held in both modules covered on 2026-07-26.** `foundry-rules` yielded five
+defects, four in guard-condition evaluation, each failing by *silently blocking a transition*.
+`foundry-core` yielded five more: three in pagination metadata (a page count that saturated to
+`long.MaxValue` on a zero page size, an untrimmed seek sentinel returning `PageSize + 1` items,
+and `Map` dropping the cursor so a mapped result reported itself as the last page) and two in the
+audit trail (an insert rendered as `(no change → <String>)` — misdescribing the change *and*
+printing the type instead of the value).
 
-Every area that *was* tested turned out to contain multiple real defects before it was
-examined. There is no reason to assume the other nine differ, and currently no mechanism
-that would tell us.
+Two areas came back clean, which is worth recording as evidence rather than left unsaid:
+**ambient tenant propagation** held under interleaved concurrency, and `AddFoundryRules`
+produced a valid container under `ValidateOnBuild`/`ValidateScopes`. Tenant isolation is the
+highest-consequence surface in the framework, so a negative result there is a real finding.
 
-All 307 tests pass and there are zero vulnerable NuGet packages. CI
+Seven modules remain, and nothing yet contradicts the assumption that they carry comparable
+defect density.
+
+All 359 tests pass and there are zero vulnerable NuGet packages. CI
 (`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
 a Studio typecheck; it **first went green on `bf3e227`**, after the three repository-level
 defects in section 2 were fixed. The seven modules are now vendored into the root
@@ -127,13 +135,17 @@ repository, so a clone builds.
 
 Verification, not features. In order:
 
-1. **Prove a generated application actually runs.** Compilation is proven; booting, serving
-   a request, persisting, and surviving a restart is not. The E2E showcase builds and has
-   never been executed. Until this exists, "Foundry generates production APIs" is unverified
-   at the only level that matters to a buyer.
-2. **Point the `GeneratedCodeCompilesTests` pattern at the untested nine.** Start with
-   `foundry-rules` — workflows are a genuine differentiator and the place a silent failure
-   hurts most.
+1. ~~**Prove a generated application actually runs.**~~ **Done 2026-07-26.**
+   `scripts/runtime-smoke-test.sh` scaffolds a project with `foundry new`, boots it, exercises
+   the generated REST endpoints, restarts the process and reads the record back from MongoDB.
+   It runs as its own CI job. Getting there took six fixes: the scaffolder emitted absolute
+   paths to one machine, produced no `api-manifest.json` (so no routes at all), the endpoint
+   generator failed to compile with more than one entity, `AddFoundryRealTime` deadlocked
+   startup on a circular DI registration, and `required Id` made every `POST` fail model
+   binding — meaning creating an entity over HTTP had never worked.
+2. **Continue module coverage.** `foundry-rules` and `foundry-core` are done; seven remain.
+   Next most valuable: `foundry-kafka` (the outbox is a correctness-critical differentiator)
+   and `foundry-mongo`'s untested paths.
 3. **Audit the ~54 catch sites** for swallowed failures and flip the default to failing loudly.
 4. **Any test at all for Studio.** One end-to-end pass — draw entity → export IR → compile —
    covers the path users actually take.
