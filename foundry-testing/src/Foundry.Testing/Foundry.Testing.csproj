@@ -4,6 +4,13 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <!-- This is a helper library that other suites consume, not a suite itself. Because it
+         references xunit, `dotnet test` on the solution treated it as a test project, launched
+         a testhost against it and failed with a missing assembly in its deps.json, taking the
+         whole Test step to exit 1 even though all 258 real tests passed. -->
+    <IsTestProject>false</IsTestProject>
+    <IsTestingPlatformApplication>false</IsTestingPlatformApplication>
   </PropertyGroup>
 
   <ItemGroup>
