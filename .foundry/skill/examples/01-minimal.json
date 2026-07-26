@@ -1,0 +1,15 @@
+{
+  "namespace": "Acme.Catalog",
+  "entities": [
+    {
+      "name": "Product",
+      "softDelete": true,
+      "properties": [
+        { "name": "Id", "type": "ObjectId", "isKey": true },
+        { "name": "Sku", "type": "string", "attributes": ["Required", "Unique"] },
+        { "name": "Name", "type": "string", "attributes": ["Required"] },
+        { "name": "UnitPrice", "type": "decimal" }
+      ]
+    }
+  ]
+}

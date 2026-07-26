@@ -1,0 +1,34 @@
+{
+  "namespace": "Acme.Claims",
+  "entities": [
+    {
+      "name": "Claim",
+      "auditable": true,
+      "properties": [
+        { "name": "Id", "type": "ObjectId", "isKey": true },
+        { "name": "Reference", "type": "string", "attributes": ["Required", "Unique"] },
+        { "name": "Amount", "type": "decimal" }
+      ]
+    }
+  ],
+  "workflows": [
+    {
+      "id": "claim-approval",
+      "name": "ClaimApproval",
+      "entity": "Claim",
+      "version": "1.0.0",
+      "isActive": true,
+      "states": [
+        { "name": "Draft", "isInitial": true, "isFinal": false },
+        { "name": "Review", "isInitial": false, "isFinal": false, "allowedRoles": ["Adjuster"] },
+        { "name": "Settled", "isInitial": false, "isFinal": true },
+        { "name": "Rejected", "isInitial": false, "isFinal": true }
+      ],
+      "transitions": [
+        { "id": "t1", "name": "Submit", "fromState": "Draft", "toState": "Review", "trigger": "SubmitClaimCommand" },
+        { "id": "t2", "name": "Settle", "fromState": "Review", "toState": "Settled", "trigger": "SettleClaimCommand", "requiredRoles": ["Adjuster"] },
+        { "id": "t3", "name": "Reject", "fromState": "Review", "toState": "Rejected", "trigger": "RejectClaimCommand", "requiredRoles": ["Adjuster"] }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,673 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://foundry.dev/schemas/foundry.ir.schema.json",
+  "title": "Foundry IR document",
+  "description": "The normative Foundry intermediate representation. A Foundry domain is authored as one of these documents; the compiler turns it into C#. Hand-written business logic belongs in *.Custom.cs files, never in this document.",
+  "$defs": {
+    "Entity": {
+      "type": "object",
+      "description": "A persisted domain entity. Generates a record, a MongoDB repository, CRUD endpoints, and any opted-in infrastructure (Kafka outbox, FileIO service, real-time push).",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "PascalCase C# identifier. No spaces or punctuation."
+        },
+        "baseClass": {
+          "type": "string",
+          "description": "Optional base type name. Leave unset to derive from BaseEntity<TKey>."
+        },
+        "softDelete": {
+          "type": "boolean"
+        },
+        "auditable": {
+          "type": "boolean"
+        },
+        "partitioned": {
+          "type": "boolean"
+        },
+        "archiveThresholdYears": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "enableRealTime": {
+          "type": "boolean"
+        },
+        "realTimeRoles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enableKafkaOutbox": {
+          "type": "boolean"
+        },
+        "kafkaTopic": {
+          "type": "string"
+        },
+        "enableFileIO": {
+          "type": "boolean"
+        },
+        "fileIOAllowedExtensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enableGraphQL": {
+          "type": "boolean"
+        },
+        "multiTenant": {
+          "type": "boolean"
+        },
+        "tenantProperty": {
+          "type": "string"
+        },
+        "apiBusinessRules": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "apiEnabledMethods": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "apiRoles": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "apiCaching": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ApiCachingConfig"
+          }
+        },
+        "properties": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Property"
+          }
+        },
+        "indexes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Index"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "properties"
+      ]
+    },
+    "ApiCachingConfig": {
+      "type": "object",
+      "description": "ApiCachingConfig",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "ttlSeconds": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Property": {
+      "type": "object",
+      "description": "A property on an entity. Exactly one property per entity must set isKey.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "PascalCase C# identifier for the property."
+        },
+        "type": {
+          "type": "string",
+          "description": "One of the scalar types (string, int, long, decimal, double, float, bool, DateTime, DateOnly, TimeOnly, Guid, ObjectId), or the name of an enum declared in 'enums' (in which case set isEnum: true)."
+        },
+        "isKey": {
+          "type": "boolean"
+        },
+        "isTenantKey": {
+          "type": "boolean"
+        },
+        "isEnum": {
+          "type": "boolean"
+        },
+        "attributes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(Required|Unique|UniqueIndex|Indexed|Index|TextIndex|TenantKey|Encrypt|Mask|MaskEmail|PiiEmail|PiiCreditCard|Email|Url|Phone|MinLength\\([0-9]+\\)|MaxLength\\([0-9]+\\)|Range\\(-?[0-9]+(\\.[0-9]+)?, *-?[0-9]+(\\.[0-9]+)?\\)|Regex\\(\"[^\"\\\\{}]*\"\\))$",
+            "description": "Required: Emits [Required] and makes the C# property 'required', so it must be supplied.; Unique: Creates a unique MongoDB index on the property.; Indexed: Creates a non-unique MongoDB index on the property.; TextIndex: Includes the property in the entity's full-text search index.; TenantKey: Marks the property as the tenant discriminator. Requires the entity to set multiTenant: true.; Encrypt: Encrypts the property at rest with AES-256-GCM via the KMS envelope key.; Mask: Irreversibly masks the property in logs and API responses.; MaskEmail: Masks the property using email-shaped masking, e.g. j***@domain.com.; PiiEmail: Tags the property as personally identifiable email data for audit reporting.; PiiCreditCard: Tags the property as payment card data for audit reporting.; MinLength: Minimum string length. Takes one integer argument.; MaxLength: Maximum string length. Takes one integer argument.; Range: Inclusive numeric range. Takes two numeric arguments.; Regex: Emits a compiled [GeneratedRegex] validation pattern. Takes one quoted string argument.; Email: Validates the property as an email address.; Url: Validates the property as an absolute URL.; Phone: Validates the property as a telephone number."
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "Index": {
+      "type": "object",
+      "description": "A MongoDB index over one or more of the entity's own properties.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unique": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Enum": {
+      "type": "object",
+      "description": "A C# enum emitted into the domain namespace.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "PascalCase C# identifier. No spaces or punctuation."
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "values"
+      ]
+    },
+    "DtoModel": {
+      "type": "object",
+      "description": "A data-transfer object, optionally projected from entity properties.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "PascalCase C# identifier. No spaces or punctuation."
+        },
+        "properties": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DtoProperty"
+          }
+        },
+        "enableKafkaOutbox": {
+          "type": "boolean"
+        },
+        "kafkaTopic": {
+          "type": "string"
+        },
+        "enableFileIO": {
+          "type": "boolean"
+        },
+        "fileIOAllowedExtensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "DtoProperty": {
+      "type": "object",
+      "description": "A property on a DTO. Set sourceEntity/sourceProperty to project from an entity.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "PascalCase C# identifier for the property."
+        },
+        "type": {
+          "type": "string",
+          "description": "One of the scalar types (string, int, long, decimal, double, float, bool, DateTime, DateOnly, TimeOnly, Guid, ObjectId), or the name of an enum declared in 'enums' (in which case set isEnum: true)."
+        },
+        "sourceEntity": {
+          "type": "string"
+        },
+        "sourceProperty": {
+          "type": "string"
+        },
+        "isRequired": {
+          "type": "boolean"
+        },
+        "attributes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(Required|Unique|UniqueIndex|Indexed|Index|TextIndex|TenantKey|Encrypt|Mask|MaskEmail|PiiEmail|PiiCreditCard|Email|Url|Phone|MinLength\\([0-9]+\\)|MaxLength\\([0-9]+\\)|Range\\(-?[0-9]+(\\.[0-9]+)?, *-?[0-9]+(\\.[0-9]+)?\\)|Regex\\(\"[^\"\\\\{}]*\"\\))$",
+            "description": "Required: Emits [Required] and makes the C# property 'required', so it must be supplied.; Unique: Creates a unique MongoDB index on the property.; Indexed: Creates a non-unique MongoDB index on the property.; TextIndex: Includes the property in the entity's full-text search index.; TenantKey: Marks the property as the tenant discriminator. Requires the entity to set multiTenant: true.; Encrypt: Encrypts the property at rest with AES-256-GCM via the KMS envelope key.; Mask: Irreversibly masks the property in logs and API responses.; MaskEmail: Masks the property using email-shaped masking, e.g. j***@domain.com.; PiiEmail: Tags the property as personally identifiable email data for audit reporting.; PiiCreditCard: Tags the property as payment card data for audit reporting.; MinLength: Minimum string length. Takes one integer argument.; MaxLength: Maximum string length. Takes one integer argument.; Range: Inclusive numeric range. Takes two numeric arguments.; Regex: Emits a compiled [GeneratedRegex] validation pattern. Takes one quoted string argument.; Email: Validates the property as an email address.; Url: Validates the property as an absolute URL.; Phone: Validates the property as a telephone number."
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "CustomEndpoint": {
+      "type": "object",
+      "description": "A hand-shaped API endpoint beyond generated CRUD.",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "DELETE",
+            "GET",
+            "PATCH",
+            "POST",
+            "PUT"
+          ]
+        },
+        "route": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9_./{}-]*$",
+          "description": "Absolute route path beginning with '/', e.g. '/api/v1/orders/submit'."
+        },
+        "requestType": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+        },
+        "targetEntity": {
+          "type": "string"
+        },
+        "operationType": {
+          "type": "string",
+          "enum": [
+            "Custom",
+            "Insert",
+            "Query",
+            "Update"
+          ]
+        },
+        "filterField": {
+          "type": "string"
+        },
+        "filterOperator": {
+          "type": "string"
+        },
+        "filterSourceValue": {
+          "type": "string"
+        },
+        "assignments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AssignmentRule"
+          }
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "businessRules": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "route",
+        "requestType",
+        "targetEntity",
+        "operationType"
+      ]
+    },
+    "AssignmentRule": {
+      "type": "object",
+      "description": "Maps a request field onto an entity property for Update operations.",
+      "properties": {
+        "entityProperty": {
+          "type": "string"
+        },
+        "sourceValue": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkflowModel": {
+      "type": "object",
+      "description": "A versioned state machine bound to one entity.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "entity": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "effectiveDate": {
+          "type": "string"
+        },
+        "expirationDate": {
+          "type": "string"
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowStateModel"
+          }
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowTransitionModel"
+          }
+        },
+        "choiceNodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowChoiceNodeModel"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkflowStateModel": {
+      "type": "object",
+      "description": "A workflow state. Exactly one state must set isInitial.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "isInitial": {
+          "type": "boolean"
+        },
+        "isFinal": {
+          "type": "boolean"
+        },
+        "allowedRoles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkflowTransitionModel": {
+      "type": "object",
+      "description": "A transition between workflow states; generates a command type.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "fromState": {
+          "type": "string"
+        },
+        "toState": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "PascalCase command name generated for this transition. Must be unique across all workflows."
+        },
+        "useCustomCommand": {
+          "type": "boolean"
+        },
+        "requiredRoles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowConditionModel"
+          }
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowActionModel"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkflowConditionModel": {
+      "type": "object",
+      "description": "A guard evaluated before a transition or choice branch is taken.",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "property": {
+          "type": "string"
+        },
+        "operator": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkflowActionModel": {
+      "type": "object",
+      "description": "A side effect performed when a transition fires.",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "requestType": {
+          "type": "string"
+        },
+        "payloadTemplate": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "bodyTemplate": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkflowChoiceNodeModel": {
+      "type": "object",
+      "description": "A decision gate that routes to one of several states by condition.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkflowBranchModel"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkflowBranchModel": {
+      "type": "object",
+      "description": "One conditional branch out of a choice node.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "condition": {
+          "$ref": "#/$defs/WorkflowConditionModel"
+        },
+        "targetState": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConnectorModel": {
+      "type": "object",
+      "description": "An outbound connector to an external REST, SOAP or GraphQL service.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "PascalCase C# identifier. No spaces or punctuation."
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "GraphQL",
+            "REST",
+            "SOAP"
+          ]
+        },
+        "baseUrl": {
+          "type": "string"
+        },
+        "authType": {
+          "type": "string",
+          "enum": [
+            "ApiKey",
+            "Basic",
+            "Bearer",
+            "None",
+            "OAuth2"
+          ]
+        },
+        "username": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "apiKey": {
+          "type": "string"
+        },
+        "apiKeyHeaderName": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        },
+        "soapAction": {
+          "type": "string"
+        },
+        "timeoutSeconds": {
+          "type": "integer"
+        },
+        "maxRetries": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "namespace": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_.]*$",
+      "description": "Dotted C# namespace for the generated code, e.g. 'Acme.Billing'."
+    },
+    "version": {
+      "type": "string"
+    },
+    "entities": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Entity"
+      }
+    },
+    "enums": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Enum"
+      }
+    },
+    "dtos": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/DtoModel"
+      }
+    },
+    "customEndpoints": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CustomEndpoint"
+      }
+    },
+    "workflows": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/WorkflowModel"
+      }
+    },
+    "connectors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ConnectorModel"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "namespace",
+    "entities"
+  ]
+}

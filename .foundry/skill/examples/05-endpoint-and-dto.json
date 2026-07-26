@@ -1,0 +1,40 @@
+{
+  "namespace": "Acme.Billing",
+  "entities": [
+    {
+      "name": "Invoice",
+      "softDelete": true,
+      "enableKafkaOutbox": true,
+      "kafkaTopic": "invoice-events",
+      "properties": [
+        { "name": "Id", "type": "ObjectId", "isKey": true },
+        { "name": "Number", "type": "string", "attributes": ["Required", "Unique"] },
+        { "name": "AmountDue", "type": "decimal" },
+        { "name": "IssuedOn", "type": "DateTime", "attributes": ["Indexed"] }
+      ],
+      "apiBusinessRules": {
+        "POST": ["InvoiceAmountRule"]
+      }
+    }
+  ],
+  "dtos": [
+    {
+      "name": "InvoiceSummaryDto",
+      "properties": [
+        { "name": "Number", "type": "string", "sourceEntity": "Invoice", "sourceProperty": "Number", "isRequired": true },
+        { "name": "AmountDue", "type": "decimal", "sourceEntity": "Invoice", "sourceProperty": "AmountDue" }
+      ]
+    }
+  ],
+  "customEndpoints": [
+    {
+      "route": "/api/v1/invoices/issue",
+      "method": "POST",
+      "operationType": "Insert",
+      "targetEntity": "Invoice",
+      "requestType": "IssueInvoiceCommand",
+      "roles": ["Billing"],
+      "businessRules": ["IssueInvoiceRule"]
+    }
+  ]
+}

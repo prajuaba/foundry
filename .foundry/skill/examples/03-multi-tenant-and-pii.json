@@ -1,0 +1,18 @@
+{
+  "namespace": "Acme.Crm",
+  "entities": [
+    {
+      "name": "Contact",
+      "softDelete": true,
+      "auditable": true,
+      "multiTenant": true,
+      "properties": [
+        { "name": "Id", "type": "ObjectId", "isKey": true },
+        { "name": "TenantId", "type": "string", "isTenantKey": true, "attributes": ["Required", "Indexed"] },
+        { "name": "Email", "type": "string", "attributes": ["Required", "Email", "Encrypt", "MaskEmail", "PiiEmail"] },
+        { "name": "DisplayName", "type": "string", "attributes": ["Required", "MaxLength(200)"] },
+        { "name": "Phone", "type": "string", "attributes": ["Phone"] }
+      ]
+    }
+  ]
+}

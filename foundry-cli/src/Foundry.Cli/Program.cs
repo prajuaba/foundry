@@ -18,7 +18,11 @@ public class Program
         if (args.Length == 0)
         {
             PrintHelp();
-            return 0;
+
+            // Non-zero: no command was requested, so nothing was done. Exiting 0 made
+            // `foundry $COMMAND` with an unset variable print help and report success, which is the
+            // same silent-success shape as a gate that passes without running.
+            return 1;
         }
 
         var command = args[0].ToLowerInvariant();

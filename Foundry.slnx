@@ -70,6 +70,9 @@
   <Folder Name="/foundry-file-io/tests/">
     <Project Path="foundry-file-io/tests/Foundry.FileIO.Tests/Foundry.FileIO.Tests.csproj" />
   </Folder>
+  <Folder Name="/foundry-cli/tests/">
+    <Project Path="foundry-cli/tests/Foundry.Cli.Tests/Foundry.Cli.Tests.csproj" />
+  </Folder>
   <Folder Name="/foundry-schema/" />
   <Folder Name="/foundry-schema/backend/">
     <Project Path="foundry-schema/backend/Foundry.Schema.Backend.csproj" />
