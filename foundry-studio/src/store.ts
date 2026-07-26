@@ -53,7 +53,6 @@ interface StoreState {
   addCustomEndpoint: () => void;
   updateCustomEndpoint: (index: number, updated: Partial<CustomEndpoint>) => void;
   deleteCustomEndpoint: (index: number) => void;
-  exportToApiManifest: () => any;
 
   dtos: DtoModel[];
   addDto: (name?: string) => void;
@@ -1126,210 +1125,18 @@ export const useStore = create<StoreState>((rawSet, get) => {
     };
   },
 
-  exportToApiManifest: () => {
-    const { nodes, edges, namespace, customEndpoints } = get();
-
-    // ---- Build domain model (for Foundry.Mongo DAL) ----
-    const entities: any[] = [];
-    nodes.forEach((node) => {
-      if (node.type === 'classNode') {
-        const entity = (node as ClassNode).data.entity;
-        entities.push({
-          Name: entity.name,
-          BaseClass: entity.baseClass,
-          SoftDelete: entity.softDelete,
-          Auditable: entity.auditable,
-          Indexes: entity.indexes && entity.indexes.length > 0
-            ? entity.indexes.map((idx: Index) => ({ Fields: idx.fields, Unique: idx.unique }))
-            : undefined,
-          ApiBusinessRules: entity.apiBusinessRules || {},
-          RealTime: entity.realTime !== false,
-          RealTimeRoles: entity.realTimeRoles || [],
-        });
-      }
-    });
-
-    // ---- Discover relationships from edges for endpoint dependency hints ----
-    const compositionTargets = new Map<string, string[]>(); // container -> [contained]
-    const associationRefs = new Map<string, string[]>();   // source -> [referenced]
-    edges.forEach((edge) => {
-      if (edge.source && edge.target) {
-        const sourceNode = nodes.find(n => n.id === edge.source);
-        const targetNode = nodes.find(n => n.id === edge.target);
-        if (!sourceNode || !targetNode || sourceNode.type !== 'classNode') return;
-        const relType = (edge.data as any)?.relationshipType;
-        if (relType === 'Composition') {
-          const tName = targetNode.type === 'classNode' ? targetNode.data.entity.name : targetNode.data.enum.name;
-          compositionTargets.set(sourceNode.data.entity.name, [
-            ...(compositionTargets.get(sourceNode.data.entity.name) || []),
-            tName
-          ]);
-        } else if (relType === 'Association') {
-          const tName = targetNode.type === 'classNode' ? targetNode.data.entity.name : targetNode.data.enum.name;
-          associationRefs.set(sourceNode.data.entity.name, [
-            ...(associationRefs.get(sourceNode.data.entity.name) || []),
-            tName
-          ]);
-        }
-      }
-    });
-
-    // ---- Build endpoints (for Foundry.Api engine) ----
-    const pluralize = (word: string): string => {
-      if (!word) return word;
-      const lower = word.toLowerCase();
-      if (lower.endsWith('y') && !['ay', 'ey', 'iy', 'oy', 'uy'].some(v => lower.endsWith(v))) {
-        return word.slice(0, -1) + 'ies';
-      }
-      if (['s', 'x', 'z', 'ch', 'sh'].some(suffix => lower.endsWith(suffix))) {
-        return word + 'es';
-      }
-      return word + 's';
-    };
-
-    const endpoints: any[] = [];
-    nodes.forEach((node) => {
-      if (node.type === 'classNode') {
-        const entity = (node as ClassNode).data.entity;
-
-        // No declared methods means no REST surface was asked for.
-        //
-        // This used to default to full CRUD, which the C# ApiManifestGenerator does not: an entity
-        // that exists only as a workflow target or a DTO source acquired a complete public surface,
-        // DELETE included, purely by being on the canvas. The two producers have to agree, and
-        // "expose nothing unless asked" is the safer of the two behaviours.
-        const enabledMethods = entity.apiEnabledMethods || [];
-        if (enabledMethods.length === 0) return;
-
-        // Route derivation must match ApiManifestGenerator.RouteFor exactly.
-        //
-        // This emitted /api/v1/{plural} while the compiler emits /api/{plural}, so an application
-        // built from a Studio-exported manifest served different URLs from one built by
-        // `foundry compile` — and a client generated against either 404s against the other. Each
-        // manifest is individually valid, so nothing reports the conflict.
-        const routeName = pluralize(entity.name).toLowerCase();
-        const route = `/api/${routeName}`;
-
-        const roles: Record<string, string[]> = {};
-        const caching: Record<string, any> = {};
-
-        enabledMethods.forEach((method) => {
-          if (entity.apiRoles && entity.apiRoles[method]) {
-            roles[method] = entity.apiRoles[method];
-          }
-          if (entity.apiCaching && entity.apiCaching[method] && entity.apiCaching[method].enabled) {
-            caching[method] = {
-              Enabled: true,
-              TtlSeconds: entity.apiCaching[method].ttlSeconds
-            };
-          }
-        });
-
-        const endpointEntry: any = {
-          Route: route,
-          Entity: entity.name,
-          Methods: enabledMethods,
-          Roles: roles,
-          Caching: Object.keys(caching).length > 0 ? caching : undefined,
-          BusinessRules: entity.apiBusinessRules || {},
-        };
-
-        // Include relationship data so the API engine knows about navigation endpoints
-        const contained = compositionTargets.get(entity.name);
-        const refs = associationRefs.get(entity.name);
-        if (contained && contained.length > 0) {
-          endpointEntry.NavigationProperties = contained.map(name => ({ Name: name, Type: 'Composition' }));
-        }
-        if (refs && refs.length > 0) {
-          endpointEntry.ReferenceTargets = refs.map(name => ({ Name: name, Type: 'Association' }));
-        }
-
-        endpoints.push(endpointEntry);
-      }
-    });
-
-    // ---- Include enums from canvas ----
-    const enums: any[] = [];
-    nodes.forEach((node) => {
-      if (node.type === 'enumNode') {
-        enums.push({
-          Name: node.data.enum.name,
-          Values: node.data.enum.values,
-        });
-      }
-    });
-
-    return {
-      // Domain model — consumed by Foundry.Mongo DAL
-      Namespace: namespace,
-      Entities: entities.length > 0 ? entities : undefined,
-      Enums: enums.length > 0 ? enums : undefined,
-
-      // API engine — consumed by Foundry.Api source generator
-      Endpoints: endpoints,
-
-      CustomEndpoints: customEndpoints.map(e => ({
-        Route: e.route,
-        Method: e.method,
-        RequestType: e.requestType,
-        Roles: e.roles,
-        BusinessRules: e.businessRules || []
-      })),
-      Workflows: get().workflows.map(w => ({
-        Id: w.id,
-        Name: w.name,
-        Entity: w.entity,
-        Version: w.version,
-        EffectiveDate: w.effectiveDate,
-        ExpirationDate: w.expirationDate,
-        IsActive: w.isActive,
-        States: w.states.map(s => ({
-          Name: s.name,
-          IsInitial: s.isInitial,
-          IsFinal: s.isFinal,
-          AllowedRoles: s.allowedRoles
-        })),
-        Transitions: w.transitions.map(t => ({
-          Id: t.id,
-          Name: t.name,
-          FromState: t.fromState,
-          ToState: t.toState,
-          Trigger: t.trigger,
-          UseCustomCommand: t.useCustomCommand || false,
-          RequiredRoles: t.requiredRoles,
-          Conditions: t.conditions.map(c => ({
-            Type: c.type,
-            Property: c.property,
-            Operator: c.operator,
-            Value: c.value
-          })),
-          Actions: t.actions.map(a => ({
-            Type: a.type,
-            RequestType: a.type === 'InternalApi' ? a.requestType : undefined,
-            PayloadTemplate: a.type === 'InternalApi' ? a.payloadTemplate : undefined,
-            Method: a.type === 'ExternalApi' ? a.method : undefined,
-            Url: a.type === 'ExternalApi' ? a.url : undefined,
-            Headers: a.type === 'ExternalApi' ? a.headers : undefined,
-            BodyTemplate: a.type === 'ExternalApi' ? a.bodyTemplate : undefined
-          }))
-        })),
-        ChoiceNodes: (w.choiceNodes || []).map(c => ({
-          Id: c.id,
-          Name: c.name,
-          DefaultState: c.defaultState,
-          Branches: c.branches.map(b => ({
-            ToState: b.toState,
-            Conditions: b.conditions.map(cond => ({
-              Type: cond.type,
-              Property: cond.property,
-              Operator: cond.operator,
-              Value: cond.value
-            }))
-          }))
-        }))
-      }))
-    };
-  },
+  // exportToApiManifest was removed.
+  //
+  // It derived api-manifest.json by walking the canvas, making Studio a second producer of a contract
+  // the C# compiler already owns via ApiManifestGenerator -- and the two disagreed: this emitted
+  // /api/v1/{plural} where the compiler emits /api/{plural}, and it defaulted an entity with no
+  // declared methods to full CRUD where the compiler skips it. An application therefore served
+  // different URLs depending on which tool wrote its manifest, and nothing reported the conflict
+  // because each manifest was individually valid.
+  //
+  // The manifest is now always derived from the IR by the compiler. Studio exports the IR
+  // (exportToSchema) and asks the backend to derive the manifest, so there is one implementation of
+  // the contract and one place to test it.
 
   importFromSchema: (schema) => {
     const namespace = schema.Namespace || schema.namespace || 'Paperclip.OrderingSystem.Domain';

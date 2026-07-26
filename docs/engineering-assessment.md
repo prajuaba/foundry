@@ -102,7 +102,7 @@ Every module now has tests, plus the integration suite:
 
 | Has tests | Untested |
 | --------- | --------------- |
-| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-rules` (73) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) · `foundry-testing` (26) · `foundry-cli` (21) · `foundry-studio` (19) | *(none)* |
+| `foundry-schema` (153) · `foundry-integration-tests` (75) · `foundry-rules` (73) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) · `foundry-testing` (26) · `foundry-cli` (21) · `foundry-studio` (20) | *(none)* |
 
 Every module now has at least one test suite. Studio's 7.5k lines of TypeScript were previously verified only by `tsc`; it now has vitest and a CI job.
 
@@ -236,11 +236,38 @@ Registration is explicit (`AddFoundryWorkflows(registry => registry.Register<Ord
 the point: an application that has not declared its workflow entities fails at startup naming what to
 add, rather than at the first transition from inside an assembly scan.
 
-**The duplication itself is the remaining risk.** Aligning the two producers by test stops them
-drifting silently, but it does not remove the second implementation. Every divergence found today in
-`foundry-rules` had the same root cause — two copies of one contract, one of which had quietly fallen
-behind. Studio deriving the manifest from the compiler rather than from its own canvas walk is the
-real fix, and it is not done.
+### The manifest now has one producer
+
+Resolved, and the resolution turned up more of the same problem than the original finding described.
+
+Studio no longer derives `api-manifest.json`. `exportToApiManifest` is deleted; Studio exports the IR
+and the compiler derives the manifest through `ApiManifestGenerator`, either via a new
+`POST /api/manifest` endpoint for downloads or inside `POST /api/save-manifest`, which now takes the IR
+rather than a client-computed manifest. A manifest obtained from Studio is byte-identical to one written
+by `foundry compile`, because the same code produces both.
+
+The 19 Studio tests that encoded the contract were not deleted with the code: **`ApiManifestGenerator`
+had no tests at all**, so the contract existed only in TypeScript, for an implementation that was
+wrong. Those assertions were ported to `ApiManifestGeneratorTests` (22 tests) before the producer was
+removed. Studio's suite now covers what Studio actually owns — the IR it exports, and the client that
+must fail loudly rather than fall back to a local computation.
+
+**Two more copies surfaced while doing it, both worse than the original.** `ApiDesigner` had its own
+pluraliser and displayed `/api/v1/{plural}` routes; `ApiPlayground` built `/api/v1/{entity}` and did
+not pluralise at all, so the playground sent requests to `/api/v1/customer` while the application
+served `/api/customers`. Every request 404'd and looked like a broken application. `ApiDesigner` also
+defaulted its display to full CRUD, showing endpoints the compiler does not generate.
+
+Those two are display paths that need a route without a server round trip per keystroke, so they now
+share one `crudRouteFor` helper pinned to the compiler's behaviour by the same test table used on the
+C# side. **That is a mirrored implementation, not a single one** — a weaker guarantee, taken
+deliberately to keep the editor responsive and offline, with a shared table as the thing that keeps it
+honest. Worth naming as residual risk rather than calling it solved.
+
+**A third duplication remains and is larger than this one:** `StudioWorkspace` generates C# previews in
+TypeScript (`generateCsCode`, `generateEnumCode`) — a browser reimplementation of `PocoGenerator`. Same
+shape, same failure mode, and nothing pins the two together. The backend already exposes
+`POST /api/compile`, so the fix is available; it was out of scope here.
 
 Four areas came back clean, which is worth recording as evidence rather than left unsaid:
 **ambient tenant propagation** held under 50 interleaved flows, the **serialization defaults**
@@ -276,7 +303,7 @@ the piece of evidence this investigation lacked, and without it any further fix 
 No module is now wholly unverified. That is a floor, not a finish: the suites added today
 target the highest-consequence surface of each module, not its whole surface area.
 
-All 581 C# tests pass and there are zero vulnerable NuGet packages. CI
+All 603 C# tests pass and there are zero vulnerable NuGet packages. CI
 (`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
 a Studio typecheck; it **first went green on `bf3e227`**, after the three repository-level
 defects in section 2 were fixed. The seven modules are now vendored into the root

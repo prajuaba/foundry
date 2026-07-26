@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useStore } from '../store';
+import { crudRouteFor } from '../manifest';
 import { Play, Send, AlertCircle, Clock, CheckCircle2, ShieldCheck, Cpu, FileText, Zap, RefreshCw } from 'lucide-react';
 
 interface ProtocolResult {
@@ -51,7 +52,9 @@ export const ApiPlayground: React.FC = () => {
     setLoading(true);
     setResponse(null);
     const startTime = performance.now();
-    const route = `/api/v1/${(selectedEntity || 'sample').toLowerCase()}`;
+    // Must match what the running application serves. This used to build `/api/v1/customer`
+    // -- wrong prefix and not pluralised -- so every request 404'd and looked like a broken app.
+    const route = crudRouteFor(selectedEntity || 'sample');
 
     try {
       const res = await fetch(`http://localhost:5000${route}`, {
@@ -348,7 +351,7 @@ export const ApiPlayground: React.FC = () => {
                   const entName = n.data?.entity?.name || 'Unknown';
                   return (
                     <option key={entName} value={entName}>
-                      /api/v1/{entName.toLowerCase()} (Entity: {entName})
+                      {crudRouteFor(entName)} (Entity: {entName})
                     </option>
                   );
                 })}

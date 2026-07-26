@@ -50,6 +50,30 @@ app.MapPost("/api/compile", (SchemaModel schema) =>
     }
 });
 
+// Derive api-manifest.json from an IR document.
+//
+// Exists so the Studio UI can obtain a manifest without computing one itself. Studio used to derive it
+// in TypeScript by walking its canvas, which made it a second producer of a contract this compiler
+// owns -- and the two disagreed on the route prefix and on whether an entity with no declared methods
+// receives a full CRUD surface. One producer means a manifest downloaded from Studio is identical to
+// one written by `foundry compile`.
+app.MapPost("/api/manifest", (SchemaModel schema) =>
+{
+    try
+    {
+        if (schema == null || string.IsNullOrEmpty(schema.Namespace))
+        {
+            return Results.BadRequest(new { error = "Invalid schema. Namespace is required." });
+        }
+
+        return Results.Text(ApiManifestGenerator.Generate(schema), "application/json");
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Manifest generation failed: {ex.Message}");
+    }
+});
+
 // Generate IR from a natural-language instruction using a local Ollama model.
 //
 // The prompt, the vocabulary and the output grammar all come from the compiler via
@@ -166,6 +190,11 @@ app.MapPost("/api/save-manifest", (SaveManifestRequest request) =>
             return Results.BadRequest(new { error = "Invalid request. OutputPath is required." });
         }
 
+        if (request.Schema == null || string.IsNullOrEmpty(request.Schema.Namespace))
+        {
+            return Results.BadRequest(new { error = "Invalid request. A schema with a namespace is required." });
+        }
+
         // Validate the output path is within an allowed directory to prevent path traversal
         var targetPath = Path.GetFullPath(request.OutputPath);
         var allowedRoot = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "..", ".."));
@@ -180,7 +209,11 @@ app.MapPost("/api/save-manifest", (SaveManifestRequest request) =>
             Directory.CreateDirectory(directory);
         }
 
-        var manifestJson = JsonSerializer.Serialize(request.Manifest, new JsonSerializerOptions { WriteIndented = true });
+        // Derived here, from the IR, rather than accepted from the client. Studio previously computed
+        // the manifest itself and posted the result, making it a second producer of a contract the
+        // compiler owns; the two disagreed on the route prefix and on whether an entity with no
+        // declared methods receives full CRUD.
+        var manifestJson = ApiManifestGenerator.Generate(request.Schema);
         File.WriteAllText(targetPath, manifestJson);
 
         return Results.Ok(new { message = $"Successfully saved api-manifest.json to: {targetPath}" });
@@ -207,9 +240,20 @@ public record SaveRequest
     public string OutputPath { get; init; } = string.Empty;
 }
 
+/// <summary>
+/// Request to derive and persist <c>api-manifest.json</c> from an IR document.
+/// </summary>
+/// <remarks>
+/// Carries the <see cref="SchemaModel"/> rather than a pre-built manifest. The client used to compute
+/// the manifest itself and post the result, which made Studio a second producer of a contract the
+/// compiler already owns -- and the two disagreed on route prefixes and on whether an entity with no
+/// declared methods gets full CRUD. Accepting only the IR makes <c>ApiManifestGenerator</c> the single
+/// producer, so a manifest written from Studio is byte-identical to one written by
+/// <c>foundry compile</c>.
+/// </remarks>
 public record SaveManifestRequest
 {
-    public object Manifest { get; init; } = null!;
+    public SchemaModel Schema { get; init; } = null!;
     public string OutputPath { get; init; } = string.Empty;
 }
 

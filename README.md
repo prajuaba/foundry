@@ -85,12 +85,12 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **581 C# tests passing**: 131 compiler, 75 integration, 73 rules, 63 file-IO, 52 core,
+Expect **603 C# tests passing**: 153 compiler, 75 integration, 73 rules, 63 file-IO, 52 core,
 34 Kafka, 29 MongoDB, 28 connectors, 26 real-time, 26 testing, 23 API, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
 
-Studio is TypeScript and has its own suite (19 tests):
+Studio is TypeScript and has its own suite (20 tests):
 
 ```bash
 cd foundry-studio && npm test

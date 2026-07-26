@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useStore } from '../store';
+import { crudRouteFor } from '../manifest';
 import type { ClassNode, DtoModel, DtoProperty, CustomEndpoint, Assignment } from '../types';
 import { Search, Plus, Trash2, Shield, Globe, Clock, Copy, Check, Link, Type, Braces, Database } from 'lucide-react';
 
@@ -144,19 +145,6 @@ export const ApiDesigner: React.FC = () => {
   const [newAssignProp, setNewAssignProp] = useState<string>('');
   const [newAssignSrcVal, setNewAssignSrcVal] = useState<string>('');
 
-  // Helper to pluralize route names
-  const pluralize = (word: string): string => {
-    if (!word) return word;
-    const lower = word.toLowerCase();
-    if (lower.endsWith('y') && !['ay', 'ey', 'iy', 'oy', 'uy'].some(v => lower.endsWith(v))) {
-      return word.slice(0, -1) + 'ies';
-    }
-    if (['s', 'x', 'z', 'ch', 'sh'].some(suffix => lower.endsWith(suffix))) {
-      return word + 'es';
-    }
-    return word + 's';
-  };
-
   // Helper to get color code for HTTP methods
   const getMethodColor = (method: string) => {
     switch (method.toUpperCase()) {
@@ -180,13 +168,15 @@ export const ApiDesigner: React.FC = () => {
     const query = searchQuery.toLowerCase();
     
     const standard = entitiesList.map(entity => {
-      const routePath = `/api/v1/${pluralize(entity.name).toLowerCase()}`;
+      const routePath = crudRouteFor(entity.name);
       return {
         id: `entity-${entity.name}`,
         type: 'standard' as const,
         name: entity.name,
         route: routePath,
-        methods: entity.apiEnabledMethods || ['GET', 'POST', 'GET_BY_ID', 'PUT', 'DELETE'],
+        // Displayed as declared. Defaulting to full CRUD here showed endpoints the compiler
+        // does not generate, since it skips an entity with no declared methods.
+        methods: entity.apiEnabledMethods || [],
         entity
       };
     });

@@ -10,6 +10,7 @@ import {
   useReactFlow
 } from '@xyflow/react';
 import { useStore } from '../store';
+import { deriveApiManifest } from '../manifest';
 import type { ClassNode } from '../types';
 import UmlClassNode from './UmlClassNode';
 import { UmlEnumNode } from './UmlEnumNode';
@@ -255,7 +256,6 @@ export const StudioWorkspace: React.FC = () => {
     importFromSchema,
     exportProject,
     importProject,
-    exportToApiManifest,
     ollamaHost,
     ollamaModel,
     customEndpoints,
@@ -542,18 +542,23 @@ export const StudioWorkspace: React.FC = () => {
     });
   };
 
-  const downloadManifest = () => {
-    const manifestObj = exportToApiManifest();
-    const blob = new Blob([JSON.stringify(manifestObj, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'api-manifest.json';
-    a.click();
-    URL.revokeObjectURL(url);
+  const downloadManifest = async () => {
+    // Derived by the compiler, not here. See src/manifest.ts for why there is only one producer.
+    try {
+      const manifestJson = await deriveApiManifest(schemaJson);
+      const blob = new Blob([manifestJson], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'api-manifest.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setSaveMessage(error instanceof Error ? error.message : String(error));
+    }
   };
 
-  const downloadAllWithManifest = () => {
+  const downloadAllWithManifest = async () => {
     // Download POCOs
     previewFiles.forEach(file => {
       const blob = new Blob([generatedCsFiles[file]], { type: 'text/plain' });
@@ -563,15 +568,8 @@ export const StudioWorkspace: React.FC = () => {
       a.download = file;
       a.click();
     });
-    // Download manifest
-    const manifestObj = exportToApiManifest();
-    const blob = new Blob([JSON.stringify(manifestObj, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'api-manifest.json';
-    a.click();
-    URL.revokeObjectURL(url);
+    // Download manifest, derived by the compiler.
+    await downloadManifest();
   };
 
   const downloadJson = () => {
@@ -663,12 +661,13 @@ export const StudioWorkspace: React.FC = () => {
         throw new Error(`Failed to save C# classes: ${response.statusText}`);
       }
 
-      const manifestObj = exportToApiManifest();
+      // The IR is posted and the server derives the manifest with ApiManifestGenerator, so a manifest
+      // written from Studio is identical to one written by `foundry compile`.
       const manifestResponse = await fetch('http://localhost:5100/api/save-manifest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          Manifest: manifestObj,
+          Schema: schemaJson,
           OutputPath: manifestPath,
         }),
       });
@@ -681,7 +680,7 @@ export const StudioWorkspace: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          Manifest: manifestObj,
+          Schema: schemaJson,
           OutputPath: '../../tests/Foundry.Api.Tests/api-manifest.json',
         }),
       });
