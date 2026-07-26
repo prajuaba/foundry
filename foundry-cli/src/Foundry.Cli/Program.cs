@@ -890,6 +890,12 @@ var app = builder.Build();
 
 app.UseExceptionHandler();
 
+// Resolves the ambient tenant (X-Tenant-ID header, ?tenantId, or a tenant claim) before any
+// endpoint runs. Without it ITenantContext.HasTenant is false for every request and the
+// repository's tenant filter -- written as `if (HasTenant)` -- never applies, so a multi-tenant
+// application serves every tenant's rows to every caller.
+app.UseMiddleware<Foundry.Api.Middleware.TenantContextMiddleware>();
+
 // Generated REST endpoints for every entity in the manifest.
 app.MapGeneratedEndpoints(manifest);
 

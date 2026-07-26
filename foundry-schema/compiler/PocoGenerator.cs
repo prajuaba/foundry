@@ -649,10 +649,24 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
                 // which ignores the init modreq -- so immutability costs nothing at runtime and
                 // makes it impossible to mutate an entity between an optimistic-concurrency read
                 // and its write.
-                var initKeyword = "get; init";
+                var isTenantKey = prop.IsTenantKey
+                    || prop.Attributes.Contains("TenantKey")
+                    || prop.Name.Equals(entity.TenantProperty, StringComparison.OrdinalIgnoreCase);
+
+                // The tenant key is the one exception, and it is not a style choice: IMultiTenant
+                // declares `string TenantId { get; set; }`, and C# will not accept an `init`
+                // accessor as an implementation of `set` (CS8854). Every multi-tenant entity the
+                // compiler emitted therefore failed to build -- so the framework's headline claim
+                // had never compiled, let alone run, and nothing caught it because no test ever
+                // built a multi-tenant schema.
+                //
+                // `set` is also what the DAL needs here: the repository stamps the tenant from the
+                // ambient context on insert rather than trusting the request body, which it cannot
+                // do through an init-only accessor.
+                var initKeyword = isTenantKey && isMultiTenant ? "get; set" : "get; init";
 
                 var attributes = new List<string>();
-                if (prop.IsTenantKey || prop.Attributes.Contains("TenantKey") || prop.Name.Equals(entity.TenantProperty, StringComparison.OrdinalIgnoreCase))
+                if (isTenantKey)
                 {
                     attributes.Add("[TenantKey]");
                 }

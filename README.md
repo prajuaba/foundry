@@ -85,8 +85,8 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **619 C# tests passing**: 153 compiler, 75 integration, 73 rules, 63 file-IO, 52 core,
-36 API, 34 Kafka, 31 connectors, 29 MongoDB, 26 real-time, 26 testing, 21 CLI. Run it this way
+Expect **636 C# tests passing**: 157 compiler, 75 integration, 73 rules, 63 file-IO, 52 core,
+42 MongoDB, 36 API, 34 Kafka, 31 connectors, 26 real-time, 26 testing, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
 
@@ -94,6 +94,15 @@ Studio is TypeScript and has its own suite (28 tests):
 
 ```bash
 cd foundry-studio && npm test
+```
+
+The suites above check that code is generated and that it compiles. Neither says an application
+*works*, so one gate scaffolds two projects, runs them, and drives them over HTTP — CRUD, validation,
+filtering, optimistic concurrency, a restart, and tenant isolation across two tenants. It needs
+MongoDB on `localhost:27017`:
+
+```bash
+./scripts/runtime-smoke-test.sh
 ```
 
 ### 3. CLI Tooling Commands (`foundry`)

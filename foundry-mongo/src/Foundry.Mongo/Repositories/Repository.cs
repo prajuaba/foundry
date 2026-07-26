@@ -81,7 +81,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     {
         var objectId = ConvertToObjectId(id);
         var filter = Builders<T>.Filter.Eq(e => e.Id, objectId);
-        filter = ApplySoftDeleteFilter(filter);
+        filter = ApplyReadFilters(filter);
         
         var findOptions = new FindOptions<T> { Limit = 1 };
         var cursor = session != null
@@ -104,6 +104,8 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     public async Task InsertAsync(T entity, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(entity);
+
+        StampTenant(entity);
 
         var now = DateTime.UtcNow;
         entity.CreatedAtUtc = now;
@@ -162,6 +164,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         var now = DateTime.UtcNow;
         foreach (var entity in list)
         {
+            StampTenant(entity);
             entity.CreatedAtUtc = now;
             entity.UpdatedAtUtc = now;
             entity.Version = 1;
@@ -222,7 +225,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         IClientSessionHandle? session = null,
         CancellationToken ct = default)
     {
-        var finalFilter = ApplySoftDeleteFilter(filter);
+        var finalFilter = ApplyReadFilters(filter);
         var findOptions = new FindOptions<T> { Limit = limit };
 
         if (!string.IsNullOrWhiteSpace(sortBy))
@@ -248,7 +251,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
     public async Task<long> CountAsync(Expression<Func<T, bool>>? filter = null, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        var finalFilter = ApplySoftDeleteFilter(filter);
+        var finalFilter = ApplyReadFilters(filter);
         return session != null
             ? await _collection.CountDocumentsAsync(session, finalFilter, cancellationToken: ct)
             : await _collection.CountDocumentsAsync(finalFilter, cancellationToken: ct);
@@ -272,7 +275,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                 request.CursorInfo.Order == SortOrder.Ascending);
 
             var mongoFilter = filter != null ? Builders<T>.Filter.Where(filter) : Builders<T>.Filter.Empty;
-            mongoFilter = ApplySoftDeleteFilter(mongoFilter);
+            mongoFilter = ApplyReadFilters(mongoFilter);
             mongoFilter = Builders<T>.Filter.And(mongoFilter, Builders<T>.Filter.Where(seekFilter));
 
             var sortDef = BuildSortDefinition(request);
@@ -329,7 +332,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             }
 
             var mongoFilter = filter != null ? Builders<T>.Filter.Where(filter) : Builders<T>.Filter.Empty;
-            mongoFilter = ApplySoftDeleteFilter(mongoFilter);
+            mongoFilter = ApplyReadFilters(mongoFilter);
 
             var totalRecords = session != null
                 ? await _collection.CountDocumentsAsync(session, mongoFilter, cancellationToken: ct)
@@ -366,7 +369,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ArgumentNullException.ThrowIfNull(request);
 
         var mongoFilter = filter != null ? Builders<T>.Filter.Where(filter) : Builders<T>.Filter.Empty;
-        mongoFilter = ApplySoftDeleteFilter(mongoFilter);
+        mongoFilter = ApplyReadFilters(mongoFilter);
 
         var sortDef = BuildSortDefinition(request);
 
@@ -436,7 +439,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ArgumentNullException.ThrowIfNull(updateSelector);
 
         var objectId = ConvertToObjectId(id);
-        var filter = Builders<T>.Filter.Eq(e => e.Id, objectId);
+        var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId));
 
         var existingCursor = session != null
             ? await _collection.FindAsync(session, filter, new FindOptions<T> { Limit = 1 }, ct)
@@ -480,10 +483,10 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         }
 
         // Optimistic Concurrency Control
-        var occFilter = Builders<T>.Filter.And(
+        var occFilter = ScopeToTenant(Builders<T>.Filter.And(
             Builders<T>.Filter.Eq(e => e.Id, objectId),
             Builders<T>.Filter.Eq(e => e.Version, oldVersion)
-        );
+        ));
 
         var encrypted = EncryptEntityForWrite(entityAfter);
 
@@ -580,8 +583,12 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ArgumentNullException.ThrowIfNull(entity);
         var operatorId = GetCurrentOperatorId();
 
+        // The update is a whole-document replace, so an unstamped tenant in the request body would
+        // be written verbatim -- letting a PUT move a row into another tenant.
+        StampTenant(entity);
+
         var oldVersion = entity.Version;
-        var filter = Builders<T>.Filter.Eq(e => e.Id, entity.Id);
+        var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, entity.Id));
 
         var existingCursor = session != null
             ? await _collection.FindAsync(session, filter, new FindOptions<T> { Limit = 1 }, ct)
@@ -619,10 +626,10 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         }
 
         // Optimistic Concurrency Control
-        var occFilter = Builders<T>.Filter.And(
+        var occFilter = ScopeToTenant(Builders<T>.Filter.And(
             Builders<T>.Filter.Eq(e => e.Id, entity.Id),
             Builders<T>.Filter.Eq(e => e.Version, oldVersion)
-        );
+        ));
 
         var encrypted = EncryptEntityForWrite(entity);
 
@@ -723,7 +730,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ArgumentNullException.ThrowIfNull(filter);
         ArgumentNullException.ThrowIfNull(updateSelector);
 
-        var finalFilter = ApplySoftDeleteFilter(filter);
+        var finalFilter = ApplyReadFilters(filter);
         
         var findOptions = new FindOptions<T>();
         var entitiesCursor = session != null
@@ -887,7 +894,8 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
         foreach (var entity in list)
         {
-            var filter = Builders<T>.Filter.Eq(e => e.Id, entity.Id);
+            StampTenant(entity);
+            var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, entity.Id));
             var findOptions = new FindOptions<T> { Limit = 1 };
             var existingCursor = session != null
                 ? await _collection.FindAsync(session, filter, findOptions, ct)
@@ -1025,7 +1033,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         CancellationToken ct = default)
     {
         var objectId = ConvertToObjectId(id);
-        var filter = Builders<T>.Filter.Eq(e => e.Id, objectId);
+        var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId));
 
         var findOptions = new FindOptions<T> { Limit = 1 };
         var existingCursor = session != null
@@ -1144,7 +1152,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     {
         ArgumentNullException.ThrowIfNull(criteria);
         var expression = BuildExpression(criteria);
-        var finalFilter = ApplySoftDeleteFilter(expression);
+        var finalFilter = ApplyReadFilters(expression);
 
         var cursor = session != null
             ? await _collection.FindAsync(session, finalFilter, null, ct)
@@ -1445,7 +1453,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         DecryptEntity(entity); // Decrypt to plaintext for application-side restore logic
 
         var objectId = ConvertToObjectId(id);
-        var filter = Builders<T>.Filter.Eq(e => e.Id, objectId);
+        var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId));
 
         var existingCursor = session != null
             ? await _collection.FindAsync(session, filter, new FindOptions<T> { Limit = 1 }, ct)
@@ -1506,7 +1514,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         if (!typeof(ISoftDelete).IsAssignableFrom(typeof(T)))
             throw new NotSupportedException($"Entity type '{typeof(T).Name}' does not support soft delete.");
 
-        var filter = Builders<T>.Filter.Eq(e => e.Id, id);
+        var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, id));
 
         // Bypass soft delete filter to fetch the soft-deleted record
         var findOptions = new FindOptions<T> { Limit = 1 };
@@ -1536,10 +1544,10 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         var oldVersion = entity.Version;
         entity.Version = oldVersion + 1;
 
-        var occFilter = Builders<T>.Filter.And(
+        var occFilter = ScopeToTenant(Builders<T>.Filter.And(
             Builders<T>.Filter.Eq(e => e.Id, id),
             Builders<T>.Filter.Eq(e => e.Version, oldVersion)
-        );
+        ));
 
         var encrypted = EncryptEntityForWrite(entity);
 
@@ -1637,7 +1645,75 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
     private string GetCurrentOperatorId() => _userContext?.OperatorId ?? "system";
 
-    private FilterDefinition<T> ApplySoftDeleteFilter(FilterDefinition<T> filter)
+    /// <summary>
+    /// Stamps the ambient tenant onto an entity being written.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The tenant comes from the server's ambient context, never from the request body. Nothing
+    /// stamped it before, so the tenant of a new row was whichever value the caller happened to
+    /// send -- meaning a client could write directly into another tenant's data simply by naming
+    /// it, and a client that sent nothing wrote a row with an empty tenant that later became
+    /// invisible to everyone. The caller-supplied value is overwritten rather than validated,
+    /// because there is no request in which a caller writing to another tenant is correct.
+    /// </para>
+    /// <para>
+    /// A multi-tenant entity written with no tenant context throws. The alternative is a row that
+    /// belongs to no tenant: it is silently unreachable once isolation is switched on, and until
+    /// then it is visible to everybody. Refusing the write names the missing registration while
+    /// there is still something to fix.
+    /// </para>
+    /// </remarks>
+    private void StampTenant(T entity)
+    {
+        if (entity is not Foundry.Core.Tenant.IMultiTenant tenanted) return;
+
+        if (_tenantContext?.HasTenant != true)
+        {
+            throw new InvalidOperationException(
+                $"'{typeof(T).Name}' is multi-tenant, but no tenant is set for this operation, so the "
+                + "row would belong to no tenant. Ensure the request pipeline resolves a tenant "
+                + "(app.UseMiddleware<TenantContextMiddleware>() sets it from the X-Tenant-ID header) "
+                + "or set one explicitly via ITenantContext.SetTenantId before writing.");
+        }
+
+        tenanted.TenantId = _tenantContext.TenantId!;
+    }
+
+    /// <summary>
+    /// Restricts a write targeted by id to the ambient tenant.
+    /// </summary>
+    /// <remarks>
+    /// Reads were tenant-scoped; writes addressed by id were not. An id is not a secret -- it is
+    /// handed out in every Location header and list response -- so a caller in one tenant could
+    /// update, soft-delete or restore another tenant's row by naming it, and the write succeeded.
+    /// With the filter applied the row is simply not found, which is also the right answer to give:
+    /// a 404 does not confirm that the id exists somewhere else.
+    /// </remarks>
+    private FilterDefinition<T> ScopeToTenant(FilterDefinition<T> filter)
+    {
+        if (!typeof(Foundry.Core.Tenant.IMultiTenant).IsAssignableFrom(typeof(T))
+            || _tenantContext?.HasTenant != true)
+        {
+            return filter;
+        }
+
+        return Builders<T>.Filter.And(
+            filter,
+            Builders<T>.Filter.Eq("TenantId", _tenantContext.TenantId));
+    }
+
+    /// <summary>
+    /// Narrows a read to the rows the caller is allowed to see: not soft-deleted, and belonging to
+    /// the ambient tenant.
+    /// </summary>
+    /// <remarks>
+    /// Named for what it does to every read, not for one of the two filters it applies. Both
+    /// overloads were previously called <c>ApplySoftDeleteFilter</c>, and that is how the tenant
+    /// filter came to be missing from the expression overload for as long as it existed: the call
+    /// sites read as if soft delete were the only concern, so nothing looked wrong.
+    /// </remarks>
+    private FilterDefinition<T> ApplyReadFilters(FilterDefinition<T> filter)
     {
         if (typeof(ISoftDelete).IsAssignableFrom(typeof(T)))
         {
@@ -1654,27 +1730,41 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         return filter;
     }
 
-    private static Expression<Func<T, bool>> ApplySoftDeleteFilter(Expression<Func<T, bool>>? filter)
+    /// <summary>
+    /// Expression-tree equivalent of <see cref="ApplyReadFilters(FilterDefinition{T})"/>.
+    /// </summary>
+    /// <remarks>
+    /// This overload applied soft delete and nothing else, while the <see cref="FilterDefinition{T}"/>
+    /// one applied soft delete *and* the tenant filter. The methods behind the generated list and
+    /// count endpoints -- <c>FindManyAsync</c>, <c>CountAsync</c>, <c>FindByCriteriaAsync</c> and
+    /// <c>BulkUpdateManyAsync</c> -- all take an expression, so the primary read path of every
+    /// multi-tenant application returned every tenant's rows with a 200 and no indication that
+    /// isolation had not been applied. It could not have been noticed in passing: it was `static`,
+    /// which put <c>_tenantContext</c> out of reach and made the omission look deliberate.
+    /// </remarks>
+    private Expression<Func<T, bool>> ApplyReadFilters(Expression<Func<T, bool>>? filter)
     {
+        var parameter = filter?.Parameters[0] ?? Expression.Parameter(typeof(T), "x");
+        Expression? body = filter?.Body;
+
+        void And(Expression predicate) =>
+            body = body is null ? predicate : Expression.AndAlso(body, predicate);
+
         if (typeof(ISoftDelete).IsAssignableFrom(typeof(T)))
         {
-            if (filter == null)
-            {
-                var parameter = Expression.Parameter(typeof(T), "x");
-                var property = Expression.Property(parameter, nameof(ISoftDelete.IsDeleted));
-                var notExpression = Expression.Not(property);
-                return Expression.Lambda<Func<T, bool>>(notExpression, parameter);
-            }
-            else
-            {
-                var parameter = filter.Parameters[0];
-                var property = Expression.Property(parameter, nameof(ISoftDelete.IsDeleted));
-                var notExpression = Expression.Not(property);
-                var combined = Expression.AndAlso(filter.Body, notExpression);
-                return Expression.Lambda<Func<T, bool>>(combined, parameter);
-            }
+            And(Expression.Not(Expression.Property(parameter, nameof(ISoftDelete.IsDeleted))));
         }
-        return filter ?? (x => true);
+
+        if (typeof(Foundry.Core.Tenant.IMultiTenant).IsAssignableFrom(typeof(T)) && _tenantContext?.HasTenant == true)
+        {
+            And(Expression.Equal(
+                Expression.Property(parameter, nameof(Foundry.Core.Tenant.IMultiTenant.TenantId)),
+                Expression.Constant(_tenantContext.TenantId, typeof(string))));
+        }
+
+        if (body is null) return filter ?? (x => true);
+
+        return Expression.Lambda<Func<T, bool>>(body, parameter);
     }
 
     private static void SetProperty(object obj, string propertyName, object? value)

@@ -93,10 +93,10 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 619 C# tests across 12 suites |
+| `Build and test` | 636 C# tests across 12 suites |
 | `Studio tests and typecheck` | 28 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
-| `Runtime smoke test` | A scaffolded app boots, serves generated REST endpoints, persists, **restarts**, and serves the record back from MongoDB |
+| `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP: the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
 
 CI first went green on `bf3e227`. The runtime smoke test is the one that matters most, because it is the
 only gate that runs a generated application rather than compiling one — and reaching it required six
@@ -118,6 +118,38 @@ collaborators by scanning `AppDomain` for simple-name matches and invoking metho
 Two interfaces preserve the `Foundry.Rules` → `Foundry.Api` layering constraint that the reflection was
 working around, with compile-time contracts instead. It now has 24 tests.
 
+### Tenant isolation now exists
+
+It did not before, in four independent ways, and extending the smoke test is what surfaced them. The
+first is the one that reframes the rest:
+
+> **No multi-tenant Foundry application had ever compiled.** `IMultiTenant` declares
+> `string TenantId { get; set; }`; the compiler emitted the tenant key as `init` like every other
+> property, and C# will not accept `init` as an implementation of `set` (CS8854). Every multi-tenant
+> schema produced a project that failed to build.
+
+Nothing caught it because no test had ever *built* a multi-tenant schema — the showcase IR declares none,
+and the compiler's own tests assert on generated text, which looked perfectly correct. Behind it sat
+three more breaks that only a running application could show:
+
+| Break | Effect |
+| ----- | ------ |
+| `TenantContextMiddleware` was never wired into any template, sample or scaffold | `HasTenant` was false on every request ever served, and the repository's filter is written `if (HasTenant)` — so it never applied |
+| Nothing stamped the tenant on write | The tenant of a new row was whatever the caller's request body said, so a client could write into another tenant by naming it |
+| The expression overload of the read filter applied soft delete and *not* the tenant | `FindManyAsync`, `CountAsync` and `FindByCriteriaAsync` — the methods behind every generated list endpoint — returned every tenant's rows |
+
+That last one is worth dwelling on. There were two overloads, both named `ApplySoftDeleteFilter`; the
+`FilterDefinition` one applied the tenant, the expression one did not, and it was `static`, which put
+`_tenantContext` out of reach and made the omission look deliberate. The name is why it survived: every
+call site read as though soft delete were the only concern. They are now `ApplyReadFilters`.
+
+Writes addressed by id were unscoped too — an id is not a secret, it is handed out in every `Location`
+header — so knowing one was enough to update, delete or restore another tenant's row.
+
+Isolation is covered at both levels: 13 repository tests against a real MongoDB, and the smoke test
+driving two tenants over HTTP through a scaffolded application. Both were confirmed load-bearing by
+reverting each fix and watching the right tests fail.
+
 ---
 
 ## 4. Coverage and what covering it found
@@ -126,13 +158,13 @@ Every module has tests:
 
 | Suite | Tests |
 | ----- | ----: |
-| `foundry-schema` | 153 |
+| `foundry-schema` | 157 |
 | `foundry-integration-tests` | 75 |
 | `foundry-rules` | 73 |
 | `foundry-file-io` | 63 |
 | `foundry-core` | 52 |
 | `foundry-kafka` | 34 |
-| `foundry-mongo` | 29 |
+| `foundry-mongo` | 42 |
 | `foundry-connectors` | 31 |
 | `foundry-studio` | 28 |
 | `foundry-realtime` | 26 |
@@ -247,8 +279,30 @@ But the specific failure remains unexplained: the original assertion message was
 several candidate mechanisms were eliminated by reading the code. **If it recurs, capture the assertion
 message before anything else.**
 
-**The 64 catch sites in product code have not been audited.** The default was flipped to failing loudly where defects
-were found, not systematically.
+**Workflow transitions are not reachable from a scaffolded application, so the smoke test cannot cover
+them.** This was meant to be part of extending it, and the attempt found the reason it could not be:
+`ApiManifestGenerator` emits `Namespace`, `Endpoints` and `CustomEndpoints` and **never emits
+`Workflows`**, though both the IR and `ApiManifest` carry them. `ApiManifestWorkflowDefinitionProvider`
+therefore always finds an empty list. The scaffolder also never calls `AddFoundryWorkflows`, and no HTTP
+route triggers a transition. The orchestrator itself is well covered by unit tests — but a workflow
+declared in a schema does not reach a running application at all. That is a feature gap, not a test gap,
+and it is now the clearest one.
+
+**The Kafka outbox is still unexercised end to end.** The CI job provisions MongoDB only, so a real
+broker round trip has nowhere to run. Worth doing as a separate job rather than by weakening the
+assertion to something a missing broker would still pass.
+
+**A multi-tenant write with no tenant returns 500.** Deliberate — an application that declares
+multi-tenant entities and cannot resolve a tenant is misconfigured, and refusing is much better than
+writing a row that belongs to nobody. But once authentication exists the tenant should come from a
+claim, and this should become a 401/403. The smoke test asserts the exact status so that change has to
+be made deliberately.
+
+**`TenantContextMiddleware` accepts a tenant from a request header or query parameter.** In a scaffolded
+app with no authentication the tenant is therefore caller-asserted: isolation holds *between* declared
+tenants, but nothing stops a caller declaring a different one. That is adequate for a header set by a
+trusted gateway and not adequate on its own. It is pre-existing behaviour and was left alone rather than
+redesigned mid-change, but it should not be mistaken for an access control.
 
 **MongoDB is still the only data provider.** That is the commercial ceiling for enterprise .NET shops.
 
@@ -256,15 +310,18 @@ were found, not systematically.
 
 ## 6. Recommended priority for the next cycle
 
-1. **Audit the 64 `catch` sites** across `foundry-*/src` for swallowed failures. This is the direct attack on the bug class in
-   section 2, and it is now the highest-value remaining work: every module has tests, so the change is
-   safe to make and its effects are observable.
+Items 1 and 3 of the previous cycle's list are done — the catch-site audit, and extending the runtime
+smoke test to multi-tenant isolation and an OCC conflict. The two halves of item 3 that remain are now
+better understood, and one of them turned out not to be test work at all.
+
+1. **Make workflows reach a running application.** Emit `Workflows` into `api-manifest.json`, have the
+   scaffolder register `AddFoundryWorkflows`, and expose a route that triggers a transition. Today a
+   workflow declared in a schema is compiled, validated and then goes nowhere — the same shape as the
+   defect class in section 2, at feature scale. Once it runs, the smoke test can cover it in a few lines.
 2. **Deepen coverage on the paths that talk to the outside world** — the connectors' HTTP and SOAP
    paths, the workflow engine's `ExecuteActionAsync`, the Excel import end to end. These are where
    untrusted input meets the framework and where the remaining silent failures most likely live.
-3. **Extend the runtime smoke test.** It proves one entity, one create, one restart. Multi-tenant
-   isolation, an OCC conflict, a workflow transition and an outbox round trip through Kafka are all
-   claims the framework makes and nothing yet executes.
+3. **Add a Kafka job to CI** and take the outbox round trip end to end.
 4. **Remove the last mirrored implementation** by having the designer and playground read routes from a
    cached manifest rather than deriving them.
 5. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
@@ -285,6 +342,15 @@ lose a regulated-industry buyer is a silent failure in tenant isolation or audit
 contained exactly that: a cross-tenant broadcast of changed values, an audit trail that misdescribed
 changes, and a test report that certified passes it had never observed. None of them would have
 announced themselves.
+
+The sharpest example arrived last. **Tenant isolation — named in the paragraph above as core
+differentiation, and the first thing a regulated buyer would ask about — had never compiled, let alone
+run.** Everything around it was in place and looked convincing: the validator was meticulous about
+half-configured tenancy in the IR, the compiler emitted the interface, the repository carried a filter.
+Only nothing had ever executed the path, and each layer's correctness made the next layer's absence
+harder to see. That is the strongest argument in this document for the priority order: features that
+have never run are worth less than features that are checked, and the difference is invisible from the
+inside.
 
 What has changed is not that the code is now correct, but that it can now tell you when it is not. That
 is the prerequisite for everything else.

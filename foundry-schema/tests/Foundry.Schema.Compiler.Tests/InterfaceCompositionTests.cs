@@ -197,4 +197,63 @@ public class InterfaceCompositionTests
         Assert.Contains("IVersionable", code);
         Assert.Contains("ISoftDelete", code);
     }
+
+    // ── Multi-tenancy ───────────────────────────────────────────────────────
+
+    private static Entity MultiTenantEntity() => new()
+    {
+        Name = "Invoice",
+        MultiTenant = true,
+        Properties = new List<Property>
+        {
+            new() { Name = "Id", Type = "ObjectId", IsKey = true },
+            new() { Name = "TenantId", Type = "string", IsTenantKey = true },
+            new() { Name = "Reference", Type = "string" }
+        }
+    };
+
+    [Fact]
+    public void MultiTenantEntity_ImplementsIMultiTenant()
+    {
+        Assert.Contains("IMultiTenant", TestHelpers.GenerateForSingleEntity(MultiTenantEntity()));
+    }
+
+    [Fact]
+    public void MultiTenantEntity_EmitsTheTenantKeyWithASetter()
+    {
+        // Not a style preference. IMultiTenant declares `string TenantId { get; set; }`, and an
+        // `init` accessor cannot implement `set` (CS8854) -- so while every other emitted property
+        // is correctly init-only, this one made the entity fail to compile. `set` is also what lets
+        // the repository stamp the tenant from the ambient context instead of trusting the caller.
+        var code = TestHelpers.GenerateForSingleEntity(MultiTenantEntity());
+
+        Assert.Contains("public string TenantId { get; set; }", code);
+    }
+
+    [Fact]
+    public void MultiTenantEntity_LeavesOrdinaryPropertiesInitOnly()
+    {
+        // The setter is granted to the tenant key alone; caller-supplied data stays immutable.
+        var code = TestHelpers.GenerateForSingleEntity(MultiTenantEntity());
+
+        Assert.Contains("public string Reference { get; init; }", code);
+    }
+
+    [Fact]
+    public void EntityWithoutTenancy_HasNoTenantSetter()
+    {
+        var entity = new Entity
+        {
+            Name = "Note",
+            Properties = new List<Property>
+            {
+                new() { Name = "TenantId", Type = "string" }
+            }
+        };
+
+        var code = TestHelpers.GenerateForSingleEntity(entity);
+
+        Assert.DoesNotContain("IMultiTenant", code);
+        Assert.Contains("public string TenantId { get; init; }", code);
+    }
 }

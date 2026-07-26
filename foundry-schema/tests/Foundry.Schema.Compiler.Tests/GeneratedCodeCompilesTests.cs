@@ -70,6 +70,22 @@ public class GeneratedCodeCompilesTests
                 File.WriteAllText(target, file.Content);
             }
 
+            // A multi-tenant entity, compiled into the same project so it costs no extra build.
+            //
+            // The showcase declares none, and neither did anything else, so no multi-tenant entity
+            // the compiler emitted had ever been built. None of them compiled: IMultiTenant declares
+            // `string TenantId { get; set; }` and the emitted tenant key was `init`, which C# will
+            // not accept as an implementation of `set` (CS8854). The framework's headline claim had
+            // never reached a running application, and a text-level assertion would not have shown
+            // it -- only a real compile against the real interface does.
+            // Only the entity file: the generator also emits a JsonSerializerContext per schema,
+            // and two of those in one project collide inside System.Text.Json's own generator. The
+            // entity is what carries the IMultiTenant implementation, which is what needs compiling.
+            var tenantEntity = PocoGenerator.GenerateFiles(MultiTenantSchema())
+                .Single(f => f.Path == "TenantScopedInvoice");
+
+            File.WriteAllText(Path.Combine(work, "TenantScopedInvoice.cs"), tenantEntity.Content);
+
             // A library project referencing the same runtime libraries a scaffolded app would.
             var csproj = $"""
 <Project Sdk="Microsoft.NET.Sdk">
@@ -107,6 +123,29 @@ public class GeneratedCodeCompilesTests
             try { Directory.Delete(work, recursive: true); } catch { /* best effort */ }
         }
     }
+
+    /// <summary>
+    /// A minimal multi-tenant document, in its own namespace so it cannot collide with the showcase.
+    /// </summary>
+    private static SchemaModel MultiTenantSchema() => new()
+    {
+        Namespace = "Foundry.CompileCheck.Tenancy",
+        Entities = new List<Entity>
+        {
+            new()
+            {
+                Name = "TenantScopedInvoice",
+                MultiTenant = true,
+                SoftDelete = true,
+                Properties = new List<Property>
+                {
+                    new() { Name = "Id", Type = "ObjectId", IsKey = true },
+                    new() { Name = "TenantId", Type = "string", IsTenantKey = true },
+                    new() { Name = "Reference", Type = "string", Attributes = new List<string> { "Required" } }
+                }
+            }
+        }
+    };
 
     private static (int ExitCode, string Output) RunDotnetBuild(string workingDirectory)
     {

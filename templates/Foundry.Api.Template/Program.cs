@@ -111,6 +111,14 @@ public class Program
 
         app.UseExceptionHandler();
 
+        // Resolves the ambient tenant for the request, before anything reads or writes.
+        //
+        // Nothing in the framework, the templates or the scaffolder ever added this, so
+        // ITenantContext.HasTenant was false on every request ever served. The repository's tenant
+        // filter is written as `if (HasTenant)`, so it never applied: every multi-tenant read
+        // returned every tenant's rows with a 200 and no sign that isolation had been skipped.
+        app.UseMiddleware<Foundry.Api.Middleware.TenantContextMiddleware>();
+
         // Enable documentation endpoints for dev environment
         app.UseSwagger();
         app.UseSwaggerUI();
