@@ -1,55 +1,90 @@
 # 🏛️ Foundry Framework Project
 
-Foundry is a high-performance, developer-centric rapid application development framework built on C# (.NET 10) and TypeScript (React 19 + Vite). It features visual domain schema compilation, automatic C# code generation, a robust data access layer (supporting partitioning, OCC, auditing, and security), and a pipeline-validated API service layer.
+Foundry is a high-performance, developer-centric rapid application development framework built on C# (.NET 10) and TypeScript (React 19 + Vite). It features visual domain schema compilation, automatic C# code generation, multi-protocol integration (REST, GraphQL, Kafka, WebSockets, FileIO, Connectors), multi-tenant isolation, native client SDK generation, and an autonomous multi-protocol testing engine.
 
 ---
 
 ## 🗺️ Project Architecture & Components
 
-The repository is structured into isolated, high-cohesion libraries and applications:
+The repository is structured into isolated, high-cohesion libraries, tools, and applications:
 
 ```mermaid
 graph TD
-    Studio[React Studio Visual IDE] -->|Saves Manifest| Backend[C# Compiler Backend]
-    Backend -->|Generates POCOs| Core[Foundry.Core]
-    Core -->|Domain Abstractions| FileIO[Foundry.FileIO]
-    Core -->|Domain Abstractions| Mongo[Foundry.Mongo]
-    FileIO -->|Streaming File Processing| Api[Foundry.Api Gateway]
-    Mongo -->|Advanced Data Access Layer| Api
+    Studio[React Studio Visual IDE] -->|Schema JSON| Compiler[Foundry.Schema.Compiler]
+    Compiler -->|Generates Code & SDKs| CLI[Foundry CLI Tooling]
+    Compiler -->|Domain Models| Core[Foundry.Core]
+    Core -->|Tenant & Auditing| Mongo[Foundry.Mongo]
+    Core -->|Connectors & Resilience| Connectors[Foundry.Connectors]
+    Core -->|Streaming File Processing| FileIO[Foundry.FileIO]
+    Core -->|Event Outbox| Kafka[Foundry.Kafka]
+    Core -->|WebSockets / SSE| RealTime[Foundry.RealTime]
+    Mongo -->|Data Access Layer| Api[Foundry.Api Gateway]
+    Connectors -->|External SOAP / REST / GraphQL| Api
+    Compiler -->|Automated Suites| Testing[Foundry.Testing Engine]
 ```
 
 | Component | Directory | Description |
 | :--- | :--- | :--- |
-| **`Foundry.Core`** | [`foundry-core/`](file:///Users/prajuab/Workspace/foundry/foundry-core/) | Shared domain entity interfaces (`IEntity`, `ISoftDelete`, `IVersionable`), paging wrappers, core model definitions, and shared audit models. |
-| **`Foundry.Mongo`** | [`foundry-mongo/`](file:///Users/prajuab/Workspace/foundry/foundry-mongo/) | Advanced MongoDB data access layer (`IRepository`, OCC, dynamic seek pagination, background archival worker, hot/cold partitioned repositories). |
-| **`Foundry.FileIO`** | [`foundry-file-io/`](file:///Users/prajuab/Workspace/foundry/foundry-file-io/) | Pluggable file processing library (CSV parser, Excel streaming reader, CSV exporter, file signature validator, and traversal path sanitiser). |
-| **`Foundry.Rules`** | [`foundry-rules/`](file:///Users/prajuab/Workspace/foundry/foundry-rules/) | Decoupled, lightweight business rules and policy validation engine (contracts, dynamic rules orchestrator, custom exceptions) for domain-level consistency checks. |
-| **`Foundry.Api`** | [`foundry-api/`](file:///Users/prajuab/Workspace/foundry/foundry-api/) | API Gateway with MediatR pipeline behaviors (Security, Caching, Audit, Validation, and multi-stage Business Rules validation). |
-| **`Foundry.RealTime`** | [`foundry-realtime/`](file:///Users/prajuab/Workspace/foundry/foundry-realtime/) | Event-streaming and real-time communications broker (SignalR notification hubs, raw WebSockets, Server-Sent Events) integrated transparently at the repository audit sink level. |
-| **`Foundry.Schema`** | [`foundry-schema/`](file:///Users/prajuab/Workspace/foundry/foundry-schema/) | Schema Compiler, API Backend Server, and React Studio Visual IDE (featuring light/dark theme toggling, undo/redo state history, navigable minimap, and fit-to-page diagram printing). |
+| **`Foundry.Core`** | [`foundry-core/`](file:///Users/prajuab/Workspace/foundry/foundry-core/) | Shared domain entity interfaces (`IEntity`, `ISoftDelete`, `IMultiTenant`, `IVersionable`), `TenantContext` ambient propagation, and core models. |
+| **`Foundry.Mongo`** | [`foundry-mongo/`](file:///Users/prajuab/Workspace/foundry/foundry-mongo/) | Advanced MongoDB data access layer (`IRepository`, tenant isolation filter injection, OCC, dynamic seek pagination, background archival worker, hot/cold partitioned repositories). |
+| **`Foundry.FileIO`** | [`foundry-file-io/`](file:///Users/prajuab/Workspace/foundry/foundry-file-io/) | Pluggable file processing library (CSV parser, Excel streaming reader, CSV exporter, file signature validator, and path sanitiser). |
+| **`Foundry.Rules`** | [`foundry-rules/`](file:///Users/prajuab/Workspace/foundry/foundry-rules/) | Decoupled, lightweight business rules and policy validation engine (contracts, dynamic rules orchestrator, custom exceptions). |
+| **`Foundry.Kafka`** | [`foundry-kafka/`](file:///Users/prajuab/Workspace/foundry/foundry-kafka/) | Transactional outbox event streaming with trace propagation over Kafka message headers. |
+| **`Foundry.RealTime`** | [`foundry-realtime/`](file:///Users/prajuab/Workspace/foundry/foundry-realtime/) | Event-streaming and real-time communications broker (SignalR notification hubs, WebSockets, SSE) integrated at repository audit sink level. |
+| **`Foundry.Connectors`** | [`foundry-connectors/`](file:///Users/prajuab/Workspace/foundry/foundry-connectors/) | Enterprise external service connectors (REST, SOAP 1.1/1.2, GraphQL) with Polly v8 resilience pipelines, authentication, and health checks. |
+| **`Foundry.Testing`** | [`foundry-testing/`](file:///Users/prajuab/Workspace/foundry/foundry-testing/) | Autonomous multi-protocol testing engine generating schema-driven mock data, xUnit test suites, and interactive HTML execution reports. |
+| **`Foundry.Api`** | [`foundry-api/`](file:///Users/prajuab/Workspace/foundry/foundry-api/) | API Gateway with MediatR pipeline behaviors (Security, Tenant Middleware, Sliding Window Rate Limiting, Caching, Audit, Rules Validation). |
+| **`Foundry.Cli`** | [`foundry-cli/`](file:///Users/prajuab/Workspace/foundry/foundry-cli/) | Unified command-line CLI tool (`foundry new`, `compile`, `export`, `sdk`, `doctor`, `test`, `lsp`, `studio`). |
+| **`Foundry.Studio`** | [`foundry-studio/`](file:///Users/prajuab/Workspace/foundry/foundry-studio/) | React 19 + Vite Visual Studio IDE featuring domain modeling, DTO composition, workflow designer, external connector setup, API playground, and autonomous test suite runner. |
+| **`foundry-vscode`** | [`foundry-vscode/`](file:///Users/prajuab/Workspace/foundry/foundry-vscode/) | Native VS Code Extension & LSP Server integration embedding Foundry Studio canvas into editor tabs with native schema sync. |
 
 ---
 
 ## 🚀 Getting Started
 
-### 1. Build and Compile the Entire Solution
+### 1. Build and Compile the Solution
 To build all projects across the workspace:
 ```bash
 dotnet build
 ```
 
-### 2. Launch the Studio Designer & Compiler API
-Boot both the C# compiler backend service and the React Studio Visual IDE, and launch it in your web browser:
+### 2. Run Solution Integration Tests
+To execute all 75 integration tests across all modules:
 ```bash
-cd foundry-schema
-./start-studio.sh
+dotnet test foundry-integration-tests/Foundry.IntegrationTests.csproj
 ```
+
+### 3. CLI Tooling Commands (`foundry`)
+Run the unified `Foundry.Cli` executable:
+```bash
+# Export multi-spec documentation (OpenAPI 3.1, AsyncAPI 3.0, Postman, Mermaid)
+foundry export schema.json --format openapi --output docs/
+
+# Generate client SDKs for frontend/backend integration
+foundry sdk schema.json --language ts --output sdk/
+foundry sdk schema.json --language cs --output sdk/
+foundry sdk schema.json --language py --output sdk/
+
+# Run autonomous multi-protocol test suite
+foundry test schema.json --output-dir tests/
+
+# Boot visual Studio IDE in browser
+foundry studio --port 5100
+```
+
+### 4. VS Code Extension Integration
+Build and launch the Studio IDE directly inside VS Code:
+```bash
+cd foundry-vscode
+npm run build:all
+```
+Double-click any `.foundry.json` or `.foundry` file in VS Code to open the visual Studio canvas!
 
 ---
 
 ## 🔌 Infrastructure & Docker Orchestration
 
-Foundry includes a pre-configured Docker Compose orchestrator stack to boot local development and testing services instantly:
+Foundry includes a pre-configured Docker Compose orchestrator stack:
 
 ```bash
 # Spin up MongoDB, Mongo Express, Kafka, and Kafka UI
@@ -59,50 +94,28 @@ docker compose up -d
 - **MongoDB** (`localhost:27017`): Core transactional and event outbox database.
 - **Mongo Express** (`localhost:8081`): Web UI console to inspect document collections.
 - **Kafka Broker** (`localhost:9092`): Event streaming messaging platform.
-- **Kafka UI** (`localhost:8080`): Visual console to inspect topic logs, partitions, and message payloads.
+- **Kafka UI** (`localhost:8080`): Visual console to inspect topic logs and partitions.
 
 ---
 
 ## 🛡️ Enterprise-Grade Architectural Features
 
-The framework is enhanced with enterprise-level security, resiliency, and performance architectures:
-
-1. **Central Package Management (CPM)**: Package versions are governed solution-wide at the root level via `Directory.Packages.props`.
-2. **KMS Envelope Encryption**: AES-256 field-level data protection using startup Data Encryption Key (DEK) decryption via a secure KMS client.
-3. **Microsoft.RulesEngine Sandboxing**: Execution boundary limits on dynamic query strings inside the rules evaluator to prevent RCE vectors.
-4. **MediatR Request Idempotency**: Pipeline behavior deduplicating commands based on unique keys, throwing client conflicts (`409 Conflict`) on duplicate requests.
-5. **Transactional Outbox Pattern**: Automatic capture of domain mutation events in MongoDB, with tracing context propagation (Correlation ID and W3C `traceparent` headers) over Kafka message headers.
-6. **Active Cluster Health Checks**: Direct metadata queries for Kafka broker and MongoDB database liveness.
-7. **Native AOT Route Generation**: Static route generation and compile-time query filter expression builders in `ApiRouteGenerator` to eliminate reflection and support Native AOT.
-8. **Commercial Studio UI**: Upgraded React Studio layout featuring Glassmorphic styling, custom Inter typography, fit-to-page visual schema exporter, and local Ollama model options.
+1. **Multi-Tenancy & Data Isolation**: `ITenantContext` and `[TenantKey]` attribute with automatic tenant filter injection at the repository level.
+2. **External Service Connectors (`Foundry.Connectors`)**: Built-in REST, SOAP 1.1/1.2, and GraphQL connectors with Polly v8 exponential backoff, circuit breakers, and health checks.
+3. **Autonomous Testing Engine (`Foundry.Testing`)**: Automated generation of schema-driven synthetic mock datasets, protocol unit/integration tests, and HTML execution reports.
+4. **Multi-Format Specification Exporters**: Standardized exporters for OpenAPI 3.1.0, AsyncAPI 3.0.0, Postman Collection 2.1, and Mermaid class/ERD diagrams.
+5. **Language Server Protocol (LSP)**: Integrated LSP server (`foundry lsp`) providing diagnostic linting, autocomplete, and code actions for VS Code.
+6. **Central Package Management (CPM)**: Package versions are governed solution-wide at the root level via `Directory.Packages.props`.
+7. **Transactional Outbox Pattern**: Automatic capture of domain mutation events in MongoDB, with tracing context propagation (Correlation ID and W3C `traceparent` headers) over Kafka message headers.
+8. **Sliding Window Rate Limiting**: Built-in ASP.NET Core sliding window rate limiter per tenant and API endpoint.
 
 ---
 
-## 🧪 Running Tests
+## 🧪 Testing & Verification
 
-The test suite covers partitioning logic, soft-delete transactions, caching, file processing, idempotency, envelope encryption, outbox dispatching, and pipeline behaviors.
+The integration test suite verifies partitioning logic, multi-tenancy, soft-delete transactions, caching, file processing, idempotency, envelope encryption, outbox dispatching, external connectors, and pipeline behaviors.
 
-### Run All Integration & Unit Tests
+To run all unit and integration tests:
 ```bash
-dotnet test foundry-integration-tests/Foundry.IntegrationTests.csproj
+dotnet test
 ```
-All **75/75** tests are verified passing green.
-
----
-
-## 📖 Sub-Project Documentation
-
-For details on configuration and APIs in specific layers:
-*   [**Data Access Layer (MongoDB) Manual**](file:///Users/prajuab/Workspace/foundry/foundry-mongo/docs/developer_reference.md)
-*   [**API & Business Rules validation Manual**](file:///Users/prajuab/Workspace/foundry/foundry-api/docs/developer_reference.md)
-*   [**FileIO Processing Library Manual**](file:///Users/prajuab/Workspace/foundry/foundry-file-io/README.md)
-
----
-
-## 🔀 Workflow & UML State Transition Engine
-
-Foundry integrates a state-of-the-art hybrid workflow transition and sequential DAG orchestration engine:
-
-*   **UML Choice Nodes (Decision Gates)**: Supports dynamic condition-based routing at gate vertices (e.g. `check_amount_choice`). Evaluates property comparisons recursively (with recursion limit guards) to route the entity to the correct target state or fallback (`Else`) destination.
-*   **Pipeline Auditing & Historical Logs**: Every transition maps claim validations, security checks, state alterations, and logs actions into `WorkflowActivityLog` documents automatically.
-*   **Visual UML Canvas**: Integrated into the React Studio, featuring a full React Flow drag-and-drop canvas supporting node positions save/load, direct click selection, connection draws, and dynamic light/dark theme styling.

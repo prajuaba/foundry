@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "permissions": {
+    "allow": [
+      "Bash(ollama:*)",
+      "Bash(dotnet:*)",
+      "Bash(git:*)",
+      "Bash(curl http://localhost:11434/*)",
+      "Bash(curl -s http://localhost:11434/*)",
+      "Bash(curl http://edgexpert-c1ad.local:11434/*)",
+      "Bash(curl -s http://edgexpert-c1ad.local:11434/*)"
+    ]
+  }
+}

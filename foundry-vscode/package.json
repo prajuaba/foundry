@@ -1,0 +1,94 @@
+{
+  "name": "foundry-vscode",
+  "displayName": "Foundry Studio IDE",
+  "description": "Visual Domain Schema Compiler and RAD Studio for Foundry Framework (.NET 10 & React 19)",
+  "version": "1.0.0",
+  "publisher": "foundry",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Designers",
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onCustomEditor:foundry.studioEditor",
+    "onCommand:foundry.openStudio",
+    "onCommand:foundry.compileSchema",
+    "onView:foundry.explorerView"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "foundry-sidebar",
+          "title": "Foundry Studio",
+          "icon": "$(symbol-structure)"
+        }
+      ]
+    },
+    "views": {
+      "foundry-sidebar": [
+        {
+          "id": "foundry.explorerView",
+          "name": "Foundry Studio",
+          "type": "tree"
+        }
+      ]
+    },
+    "customEditors": [
+      {
+        "viewType": "foundry.studioEditor",
+        "displayName": "Foundry Studio Designer",
+        "selector": [
+          {
+            "filenamePattern": "*.foundry.json"
+          },
+          {
+            "filenamePattern": "*.foundry"
+          },
+          {
+            "filenamePattern": "foundry.json"
+          },
+          {
+            "filenamePattern": "*foundry*.json"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "foundry.openStudio",
+        "title": "Foundry: Open Studio Visual Editor",
+        "icon": "$(layout)"
+      },
+      {
+        "command": "foundry.compileSchema",
+        "title": "Foundry: Compile Active Schema to C# Code",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "foundry.newSchema",
+        "title": "Foundry: Create New Schema Manifest",
+        "icon": "$(add)"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build:all",
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./",
+    "build": "node esbuild.js",
+    "build:all": "cd ../foundry-studio && npm run build && cd ../foundry-vscode && rm -rf ./dist-studio && mkdir -p ./dist-studio && cp -r ../foundry-studio/dist/* ./dist-studio/ && node esbuild.js",
+    "package": "npx -y @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.19.8",
+    "typescript": "^5.3.3"
+  }
+}

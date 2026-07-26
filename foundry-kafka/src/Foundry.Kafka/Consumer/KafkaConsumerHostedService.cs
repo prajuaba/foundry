@@ -112,16 +112,49 @@ public class KafkaConsumerHostedService : BackgroundService
             headers[header.Key] = header.GetValueBytes() is byte[] bytes ? System.Text.Encoding.UTF8.GetString(bytes) : string.Empty;
         }
 
-        try
+        // Set ambient correlation context if available
+        var correlationContext = scope.ServiceProvider.GetService<Foundry.Core.Telemetry.ICorrelationContext>();
+        if (correlationContext != null)
         {
-            await handler.HandleAsync(consumeResult.Topic, consumeResult.Message.Key, consumeResult.Message.Value, headers, ct);
-            _consumer.Commit(consumeResult); // Commit offset on successful handling
+            if (headers.TryGetValue("x-correlation-id", out var corrId) && !string.IsNullOrWhiteSpace(corrId))
+            {
+                correlationContext.SetCorrelationId(corrId);
+            }
+            else if (headers.TryGetValue("X-Correlation-ID", out var corrIdUpper) && !string.IsNullOrWhiteSpace(corrIdUpper))
+            {
+                correlationContext.SetCorrelationId(corrIdUpper);
+            }
         }
-        catch (Exception ex)
+
+        const int maxRetries = 3;
+        for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            _logger.LogError(ex, "Error handling message from topic {Topic}", consumeResult.Topic);
-            // Do not commit offset to retry the message
-            throw; // Re-throw to prevent committing offset
+            try
+            {
+                await handler.HandleAsync(consumeResult.Topic, consumeResult.Message.Key, consumeResult.Message.Value, headers, ct);
+                _consumer.Commit(consumeResult); // Commit offset on successful handling
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Attempt {Attempt}/{MaxRetries} failed for topic {Topic}", attempt, maxRetries, consumeResult.Topic);
+                if (attempt == maxRetries)
+                {
+                    _logger.LogError(ex,
+                        "Exhausted retries ({MaxRetries}) for topic {Topic}. Committing offset to prevent poison-message loop. " +
+                        "Message Key={Key}, Partition={Partition}, Offset={Offset}",
+                        maxRetries, consumeResult.Topic, consumeResult.Message.Key,
+                        consumeResult.Partition.Value, consumeResult.Offset.Value);
+
+                    // Commit the offset to skip this poison message and prevent infinite re-consumption
+                    _consumer.Commit(consumeResult);
+
+                    // TODO: Forward to Dead Letter Queue topic (e.g., "{topic}.dlq") via IProducer<string, string>
+                    return;
+                }
+                var backoffDelay = TimeSpan.FromMilliseconds(500 * Math.Pow(2, attempt - 1));
+                await Task.Delay(backoffDelay, ct);
+            }
         }
     }
 

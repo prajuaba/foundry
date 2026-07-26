@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\foundry-core\src\Foundry.Core\Foundry.Core.csproj" />
+    <ProjectReference Include="..\..\foundry-mongo\src\Foundry.Mongo\Foundry.Mongo.csproj" />
+    <ProjectReference Include="..\..\foundry-file-io\src\Foundry.FileIO\Foundry.FileIO.csproj" />
+    <ProjectReference Include="..\..\foundry-rules\src\Foundry.Rules\Foundry.Rules.csproj" />
+    <ProjectReference Include="..\..\foundry-realtime\src\Foundry.RealTime\Foundry.RealTime.csproj" />
+    <ProjectReference Include="..\..\foundry-api\src\Foundry.Api\Foundry.Api.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" />
+    <PackageReference Include="FluentValidation.DependencyInjectionExtensions" />
+    <PackageReference Include="MediatR" />
+    <PackageReference Include="MongoDB.Bson" />
+    <PackageReference Include="MongoDB.Driver" />
+    <PackageReference Include="Swashbuckle.AspNetCore" />
+  </ItemGroup>
+
+</Project>

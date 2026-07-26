@@ -6,7 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using MediatR;
 using FluentValidation;
-using FoundryMongo.DependencyInjection;
+using Foundry.Mongo.DependencyInjection;
 using Foundry.Core.Audit;
 using Foundry.Core.User;
 using Foundry.Api.Manifest;

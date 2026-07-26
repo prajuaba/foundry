@@ -1,0 +1,73 @@
+{
+  "namespace": "Foundry.E2E.Showcase",
+  "version": "1.0.0",
+  "enums": [
+    { "name": "CustomerTier", "values": ["Standard", "Silver", "Gold", "Platinum"] },
+    { "name": "OrderStatus", "values": ["Pending", "Approved", "Shipped", "Cancelled"] }
+  ],
+  "entities": [
+    {
+      "name": "Customer",
+      "softDelete": true,
+      "auditable": true,
+      "properties": [
+        { "name": "Id", "type": "ObjectId", "isKey": true },
+        { "name": "Email", "type": "string", "attributes": ["Unique", "Required", "Encrypt", "MaskEmail"] },
+        { "name": "FullName", "type": "string", "attributes": ["Required"] },
+        { "name": "CreditLimit", "type": "decimal" },
+        { "name": "Tier", "type": "CustomerTier", "isEnum": true }
+      ],
+      "indexes": [
+        { "fields": ["Email"], "unique": true }
+      ]
+    },
+    {
+      "name": "Product",
+      "softDelete": true,
+      "properties": [
+        { "name": "Id", "type": "ObjectId", "isKey": true },
+        { "name": "Sku", "type": "string", "attributes": ["Unique", "Required"] },
+        { "name": "Name", "type": "string", "attributes": ["Required", "TextIndex"] },
+        { "name": "UnitPrice", "type": "decimal" },
+        { "name": "StockQuantity", "type": "int" }
+      ],
+      "indexes": [
+        { "fields": ["Sku"], "unique": true }
+      ]
+    },
+    {
+      "name": "Order",
+      "softDelete": true,
+      "auditable": true,
+      "enableKafkaOutbox": true,
+      "kafkaTopic": "order-events",
+      "properties": [
+        { "name": "Id", "type": "ObjectId", "isKey": true },
+        { "name": "CustomerId", "type": "ObjectId", "attributes": ["Indexed"] },
+        { "name": "OrderNumber", "type": "string", "attributes": ["Unique", "Required"] },
+        { "name": "TotalAmount", "type": "decimal" },
+        { "name": "Status", "type": "OrderStatus", "isEnum": true, "attributes": ["Indexed"] },
+        { "name": "OrderDate", "type": "DateTime", "attributes": ["Indexed"] }
+      ],
+      "indexes": [
+        { "fields": ["CustomerId", "OrderDate"], "unique": false }
+      ],
+      "apiBusinessRules": {
+        "POST": ["OrderCreditLimitRule"]
+      }
+    }
+  ],
+  "customEndpoints": [
+    {
+      "route": "/api/v1/orders/submit",
+      "method": "POST",
+      "operationType": "Insert",
+      "targetEntity": "Order",
+      "requestType": "SubmitOrderCommand",
+      "roles": ["Customer", "Admin"],
+      "businessRules": ["SubmitOrderRule"]
+    }
+  ],
+  "dtos": [],
+  "workflows": []
+}

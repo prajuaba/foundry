@@ -1,0 +1,47 @@
+# ---- .NET build output ----
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# ---- Published / distributed binaries ----
+dist-bin/
+publish/
+artifacts/
+
+# ---- Node / frontend ----
+node_modules/
+dist/
+dist-studio/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# ---- VS Code extension packaging ----
+*.vsix
+
+# ---- Foundry generated output ----
+# Generated code is a build artifact: regenerate it, never commit it.
+# Hand-written business logic lives in *.Custom.cs, which IS committed.
+**/obj/Foundry/generated/
+test_out/
+
+# ---- Tooling / OS ----
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vs/
+
+# ---- Test + coverage output ----
+TestResults/
+coverage/
+*.trx
+*.coverage

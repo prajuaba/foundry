@@ -9,7 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../foundry-api/src/Foundry.Api/Foundry.Api.csproj" />
-    <ProjectReference Include="../../foundry-mongo/src/FoundryMongo.csproj" />
+    <ProjectReference Include="../../foundry-mongo/src/Foundry.Mongo/Foundry.Mongo.csproj" />
     <ProjectReference Include="../../foundry-api/src/Foundry.Api.SourceGenerators/Foundry.Api.SourceGenerators.csproj" 
                       OutputItemType="Analyzer" 
                       ReferenceOutputAssembly="false" />

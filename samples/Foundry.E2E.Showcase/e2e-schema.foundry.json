@@ -1,0 +1,108 @@
+{
+  "namespace": "Foundry.E2E.Showcase",
+  "nodes": [
+    {
+      "id": "node-customer",
+      "type": "classNode",
+      "position": { "x": 100, "y": 100 },
+      "data": {
+        "Name": "Customer",
+        "BaseClass": "",
+        "SoftDelete": true,
+        "Properties": [
+          { "Name": "Id", "Type": "ObjectId", "IsKey": true, "Attributes": [] },
+          { "Name": "Email", "Type": "string", "IsKey": false, "Attributes": ["Unique", "Required", "Encrypt", "MaskEmail"] },
+          { "Name": "FullName", "Type": "string", "IsKey": false, "Attributes": ["Required"] },
+          { "Name": "CreditLimit", "Type": "decimal", "IsKey": false, "Attributes": [] },
+          { "Name": "Tier", "Type": "CustomerTier", "IsKey": false, "IsEnum": true, "Attributes": [] }
+        ],
+        "Indexes": [
+          { "Fields": ["Email"], "Unique": true }
+        ]
+      }
+    },
+    {
+      "id": "node-product",
+      "type": "classNode",
+      "position": { "x": 500, "y": 100 },
+      "data": {
+        "Name": "Product",
+        "BaseClass": "",
+        "SoftDelete": true,
+        "Properties": [
+          { "Name": "Id", "Type": "ObjectId", "IsKey": true, "Attributes": [] },
+          { "Name": "Sku", "Type": "string", "IsKey": false, "Attributes": ["Unique", "Required"] },
+          { "Name": "Name", "Type": "string", "IsKey": false, "Attributes": ["Required", "TextIndex"] },
+          { "Name": "UnitPrice", "Type": "decimal", "IsKey": false, "Attributes": [] },
+          { "Name": "StockQuantity", "Type": "int", "IsKey": false, "Attributes": [] }
+        ],
+        "Indexes": [
+          { "Fields": ["Sku"], "Unique": true }
+        ]
+      }
+    },
+    {
+      "id": "node-order",
+      "type": "classNode",
+      "position": { "x": 300, "y": 400 },
+      "data": {
+        "Name": "Order",
+        "BaseClass": "",
+        "SoftDelete": true,
+        "Properties": [
+          { "Name": "Id", "Type": "ObjectId", "IsKey": true, "Attributes": [] },
+          { "Name": "CustomerId", "Type": "ObjectId", "IsKey": false, "Attributes": ["Indexed"] },
+          { "Name": "OrderNumber", "Type": "string", "IsKey": false, "Attributes": ["Unique", "Required"] },
+          { "Name": "TotalAmount", "Type": "decimal", "IsKey": false, "Attributes": [] },
+          { "Name": "Status", "Type": "OrderStatus", "IsKey": false, "IsEnum": true, "Attributes": ["Indexed"] },
+          { "Name": "OrderDate", "Type": "DateTime", "IsKey": false, "Attributes": ["Indexed"] }
+        ],
+        "Indexes": [
+          { "Fields": ["CustomerId", "OrderDate"], "Unique": false }
+        ]
+      }
+    },
+    {
+      "id": "enum-customer-tier",
+      "type": "enumNode",
+      "position": { "x": 100, "y": 450 },
+      "data": {
+        "name": "CustomerTier",
+        "values": ["Standard", "Silver", "Gold", "Platinum"]
+      }
+    },
+    {
+      "id": "enum-order-status",
+      "type": "enumNode",
+      "position": { "x": 600, "y": 450 },
+      "data": {
+        "name": "OrderStatus",
+        "values": ["Pending", "Approved", "Shipped", "Cancelled"]
+      }
+    }
+  ],
+  "edges": [
+    { "id": "edge-1", "source": "node-customer", "target": "node-order", "type": "orthogonal" },
+    { "id": "edge-2", "source": "node-product", "target": "node-order", "type": "orthogonal" }
+  ],
+  "customEndpoints": [
+    {
+      "name": "SubmitOrder",
+      "route": "/api/v1/orders/submit",
+      "httpMethod": "POST",
+      "operationType": "Insert",
+      "targetEntity": "Order",
+      "requestType": "SubmitOrderCommand",
+      "responseType": "SubmitOrderResult",
+      "handlerName": "SubmitOrderCommandHandler",
+      "requireAuthentication": true,
+      "requiredRoles": ["Customer", "Admin"],
+      "enableCache": false,
+      "enableIdempotency": true,
+      "idempotencyHeaderName": "X-Idempotency-Key",
+      "enableBusinessRules": true
+    }
+  ],
+  "dtos": [],
+  "workflows": []
+}
