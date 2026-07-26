@@ -1,23 +1,63 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Net;
 using System.Text;
 
 namespace Foundry.Testing.Reports;
 
 /// <summary>
-/// Generates visual HTML and Markdown test execution reports summarizing pass/fail metrics across all protocols.
+/// The outcome of one protocol's or subsystem's test suite.
 /// </summary>
+/// <param name="Name">Protocol or subsystem name, e.g. "REST API".</param>
+/// <param name="Passed">Whether its suite passed.</param>
+/// <param name="Details">What the suite covered.</param>
+public sealed record ProtocolResult(string Name, bool Passed, string Details);
+
+/// <summary>
+/// Renders test-run reports in HTML and Markdown.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Every claim in the output is derived from an argument. Both formats previously embedded a fixed
+/// seven-row "Protocol Coverage Matrix" in which every row read <c>PASSED</c>, alongside strings such
+/// as "100% Endpoint Coverage", "Zero Breach" and "KRaft Verified" — none of which was measured, and
+/// none of which changed when tests failed. A run with fifty failures produced a document stating
+/// that every protocol had passed.
+/// </para>
+/// <para>
+/// A report is read as evidence, so fabricated claims are worse than a missing report. Per-protocol
+/// status is now rendered only when it is supplied; with nothing supplied, nothing is said.
+/// </para>
+/// </remarks>
 public static class TestReportGenerator
 {
-    public static string GenerateHtmlReport(string namespaceName, int totalTests, int passedTests, int failedTests, double durationSeconds)
+    /// <summary>Renders an HTML report.</summary>
+    public static string GenerateHtmlReport(
+        string namespaceName,
+        int totalTests,
+        int passedTests,
+        int failedTests,
+        double durationSeconds,
+        IReadOnlyList<ProtocolResult>? protocols = null)
     {
-        var passRate = totalTests > 0 ? (passedTests * 100.0 / totalTests) : 100.0;
+        // Escaped: the namespace originates in a schema, which may be AI- or user-authored, and this
+        // output is opened in a browser.
+        var safeNamespace = WebUtility.HtmlEncode(namespaceName ?? string.Empty);
+        var overall = OverallStatus(totalTests, failedTests);
+
+        var protocolRows = protocols is { Count: > 0 }
+            ? string.Join("\n", protocols.Select(p =>
+                $@"                <tr><td>{WebUtility.HtmlEncode(p.Name)}</td>"
+                + $@"<td><span class=""{(p.Passed ? "pass" : "fail")}"">{(p.Passed ? "✔ PASSED" : "✘ FAILED")}</span></td>"
+                + $@"<td>{WebUtility.HtmlEncode(p.Details)}</td></tr>"))
+            : @"                <tr><td colspan=""3"" style=""color: #94a3b8;"">No per-protocol results were supplied for this run.</td></tr>";
 
         return $@"<!DOCTYPE html>
 <html lang=""en"">
 <head>
     <meta charset=""UTF-8"">
-    <title>Foundry Test Suite Report - {namespaceName}</title>
+    <title>Foundry Test Suite Report - {safeNamespace}</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; }}
         .card {{ background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 24px; margin-bottom: 24px; }}
@@ -35,13 +75,14 @@ public static class TestReportGenerator
 <body>
     <div class=""card"">
         <h1 style=""margin: 0; font-size: 24px; color: #38bdf8;"">⚡ Foundry Autonomous Test Execution Report</h1>
-        <p style=""color: #94a3b8; margin: 4px 0 0 0;"">Target Namespace: <strong>{namespaceName}</strong> | Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC</p>
-        
+        <p style=""color: #94a3b8; margin: 4px 0 0 0;"">Target Namespace: <strong>{safeNamespace}</strong> | Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC | Duration: {durationSeconds:F2}s</p>
+        <p style=""margin: 12px 0 0 0;"" class=""{(overall.IsGood ? "pass" : "fail")}""><strong>{overall.Label}</strong></p>
+
         <div class=""metric-grid"">
             <div class=""metric""><span style=""color: #94a3b8; font-size: 12px;"">TOTAL TESTS</span><div class=""metric-val info"">{totalTests}</div></div>
             <div class=""metric""><span style=""color: #94a3b8; font-size: 12px;"">PASSED</span><div class=""metric-val pass"">{passedTests}</div></div>
             <div class=""metric""><span style=""color: #94a3b8; font-size: 12px;"">FAILED</span><div class=""metric-val fail"">{failedTests}</div></div>
-            <div class=""metric""><span style=""color: #94a3b8; font-size: 12px;"">PASS RATE</span><div class=""metric-val pass"">{passRate:F1}%</div></div>
+            <div class=""metric""><span style=""color: #94a3b8; font-size: 12px;"">PASS RATE</span><div class=""metric-val {(overall.IsGood ? "pass" : "fail")}"">{PassRateText(totalTests, passedTests)}</div></div>
         </div>
     </div>
 
@@ -52,18 +93,11 @@ public static class TestReportGenerator
                 <tr>
                     <th>Protocol / Subsystem</th>
                     <th>Status</th>
-                    <th>Test Suites</th>
                     <th>Coverage Details</th>
                 </tr>
             </thead>
             <tbody>
-                <tr><td>REST API</td><td><span class=""pass"">✔ PASSED</span></td><td>CRUD, Tenant Headers, PII Masking</td><td>100% Endpoint Coverage</td></tr>
-                <tr><td>GraphQL</td><td><span class=""pass"">✔ PASSED</span></td><td>HotChocolate Queries & Mutations</td><td>Schema Validated</td></tr>
-                <tr><td>Kafka Outbox</td><td><span class=""pass"">✔ PASSED</span></td><td>Transactional Outbox & Consumer Retry Loop</td><td>KRaft Verified</td></tr>
-                <tr><td>Real-Time WebSockets</td><td><span class=""pass"">✔ PASSED</span></td><td>SignalR & SSE Mutation Broadcasts</td><td>Channel Push Verified</td></tr>
-                <tr><td>FileIO Service</td><td><span class=""pass"">✔ PASSED</span></td><td>Upload, Extension Whitelist, Streaming</td><td>Security Enforced</td></tr>
-                <tr><td>Business Rules</td><td><span class=""pass"">✔ PASSED</span></td><td>MediatR Pipeline Validation & Customs</td><td>Zero Breach</td></tr>
-                <tr><td>Workflow State Machine</td><td><span class=""pass"">✔ PASSED</span></td><td>State Transition Journey & Stateful Audit</td><td>Full Transition Matrix</td></tr>
+{protocolRows}
             </tbody>
         </table>
     </div>
@@ -71,32 +105,65 @@ public static class TestReportGenerator
 </html>";
     }
 
-    public static string GenerateMarkdownReport(string namespaceName, int totalTests, int passedTests, int failedTests, double durationSeconds)
+    /// <summary>Renders a Markdown report.</summary>
+    public static string GenerateMarkdownReport(
+        string namespaceName,
+        int totalTests,
+        int passedTests,
+        int failedTests,
+        double durationSeconds,
+        IReadOnlyList<ProtocolResult>? protocols = null)
     {
+        var overall = OverallStatus(totalTests, failedTests);
         var sb = new StringBuilder();
-        sb.AppendLine($"# ⚡ Foundry Autonomous Test Execution Report");
+
+        sb.AppendLine("# ⚡ Foundry Autonomous Test Execution Report");
         sb.AppendLine($"**Namespace**: `{namespaceName}`  ");
         sb.AppendLine($"**Generated**: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC  ");
-        sb.AppendLine($"**Duration**: {durationSeconds:F2} seconds\n");
+        sb.AppendLine($"**Duration**: {durationSeconds:F2} seconds  ");
+        sb.AppendLine($"**Result**: {overall.Label}\n");
 
         sb.AppendLine("| Metric | Value |");
         sb.AppendLine("| :--- | :---: |");
         sb.AppendLine($"| **Total Tests** | `{totalTests}` |");
-        sb.AppendLine($"| **Passed** | `{passedTests}` ✅ |");
-        sb.AppendLine($"| **Failed** | `{failedTests}` ❌ |");
-        sb.AppendLine($"| **Pass Rate** | `{(totalTests > 0 ? (passedTests * 100.0 / totalTests) : 100.0):F1}%` |\n");
+        sb.AppendLine($"| **Passed** | `{passedTests}` |");
+        sb.AppendLine($"| **Failed** | `{failedTests}` |");
+        sb.AppendLine($"| **Pass Rate** | `{PassRateText(totalTests, passedTests)}` |\n");
 
         sb.AppendLine("### Protocol Coverage Matrix");
-        sb.AppendLine("| Protocol | Status | Coverage |");
-        sb.AppendLine("| :--- | :---: | :--- |");
-        sb.AppendLine("| REST API | ✅ PASSED | CRUD, Tenant Headers, PII Masking |");
-        sb.AppendLine("| GraphQL | ✅ PASSED | HotChocolate Queries & Mutations |");
-        sb.AppendLine("| Kafka Outbox | ✅ PASSED | Transactional Outbox & Poison Loop |");
-        sb.AppendLine("| Real-Time WebSockets | ✅ PASSED | SignalR & SSE Mutation Broadcasts |");
-        sb.AppendLine("| FileIO Service | ✅ PASSED | Upload, Extension Whitelist, Streaming |");
-        sb.AppendLine("| Business Rules | ✅ PASSED | MediatR Pipeline Validation |");
-        sb.AppendLine("| Workflow State Machine | ✅ PASSED | Multi-step Transition Journeys |");
+
+        if (protocols is { Count: > 0 })
+        {
+            sb.AppendLine("| Protocol | Status | Coverage |");
+            sb.AppendLine("| :--- | :---: | :--- |");
+            foreach (var protocol in protocols)
+            {
+                sb.AppendLine($"| {protocol.Name} | {(protocol.Passed ? "✅ PASSED" : "❌ FAILED")} | {protocol.Details} |");
+            }
+        }
+        else
+        {
+            sb.AppendLine("No per-protocol results were supplied for this run.");
+        }
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Derives the overall verdict from the only two facts available.
+    /// </summary>
+    /// <remarks>
+    /// A run with no tests is not a pass. It used to render as a 100% pass rate, which is the same
+    /// falsehood as the hardcoded matrix expressed numerically.
+    /// </remarks>
+    private static (string Label, bool IsGood) OverallStatus(int totalTests, int failedTests)
+    {
+        if (totalTests <= 0) return ("INCONCLUSIVE — no tests were executed", false);
+        return failedTests > 0
+            ? ($"FAILED — {failedTests} of {totalTests} test(s) did not pass", false)
+            : ($"PASSED — all {totalTests} test(s) passed", true);
+    }
+
+    private static string PassRateText(int totalTests, int passedTests)
+        => totalTests > 0 ? $"{passedTests * 100.0 / totalTests:F1}%" : "n/a";
 }

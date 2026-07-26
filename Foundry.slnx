@@ -73,6 +73,9 @@
   <Folder Name="/foundry-cli/tests/">
     <Project Path="foundry-cli/tests/Foundry.Cli.Tests/Foundry.Cli.Tests.csproj" />
   </Folder>
+  <Folder Name="/foundry-testing/tests/">
+    <Project Path="foundry-testing/tests/Foundry.Testing.Tests/Foundry.Testing.Tests.csproj" />
+  </Folder>
   <Folder Name="/foundry-schema/" />
   <Folder Name="/foundry-schema/backend/">
     <Project Path="foundry-schema/backend/Foundry.Schema.Backend.csproj" />

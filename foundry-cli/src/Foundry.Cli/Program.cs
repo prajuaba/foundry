@@ -1395,16 +1395,30 @@ jobs:
             Console.WriteLine($"  ✓ Generated test suite: {path}");
         }
 
-        // 2. Generate Execution Summary Reports
-        var htmlReport = Foundry.Testing.Reports.TestReportGenerator.GenerateHtmlReport(schema.Namespace, generatedTests.Count * 2, generatedTests.Count * 2, 0, 0.45);
-        var mdReport = Foundry.Testing.Reports.TestReportGenerator.GenerateMarkdownReport(schema.Namespace, generatedTests.Count * 2, generatedTests.Count * 2, 0, 0.45);
+        // 2. Generate the report.
+        //
+        // This command generates test suites; it does not execute them. It used to pass
+        // generatedTests.Count * 2 as both the total and the passed count with zero failures and a
+        // hardcoded 0.45s duration, producing a document that claimed a full green run for tests that
+        // had never been executed -- invented numbers on top of an invented coverage matrix.
+        //
+        // Zeroes are passed deliberately, so the report reads "no tests were executed", which is
+        // exactly what happened. Real counts belong here once the command can run what it generates.
+        var htmlReport = Foundry.Testing.Reports.TestReportGenerator.GenerateHtmlReport(
+            schema.Namespace, totalTests: 0, passedTests: 0, failedTests: 0, durationSeconds: 0);
+        var mdReport = Foundry.Testing.Reports.TestReportGenerator.GenerateMarkdownReport(
+            schema.Namespace, totalTests: 0, passedTests: 0, failedTests: 0, durationSeconds: 0);
 
         File.WriteAllText(reportPath, htmlReport);
         File.WriteAllText(Path.ChangeExtension(reportPath, ".md"), mdReport);
 
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"\n  ✓ Generated HTML Test Execution Report at '{reportPath}'");
-        Console.WriteLine($"  ✓ Generated Markdown Test Report at '{Path.ChangeExtension(reportPath, ".md")}'");
+        Console.WriteLine($"\n  ✓ Generated {generatedTests.Count} test suite file(s) in '{outputDir}'");
+        Console.ResetColor();
+        Console.WriteLine($"  ✓ Report scaffold written to '{reportPath}' and '{Path.ChangeExtension(reportPath, ".md")}'");
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine("  Note: the suites were generated, not executed. Run them with 'dotnet test'");
+        Console.WriteLine("  to produce real results; the report currently records no executed tests.");
         Console.ResetColor();
         return 0;
     }

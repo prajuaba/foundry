@@ -98,15 +98,15 @@ Three defects, stacked, each masked by the one above it. The generalisable lesso
 
 ## 3. Coverage reality
 
-Ten modules have tests, plus the integration suite:
+Eleven modules have tests, plus the integration suite:
 
 | Has tests | No tests at all |
 | --------- | --------------- |
-| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) · `foundry-cli` (21) | `foundry-testing` · `foundry-studio` |
+| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) · `foundry-testing` (26) · `foundry-cli` (21) | `foundry-studio` |
 
 The still-untested list includes ~7.5k lines of Studio TypeScript verified only by `tsc`.
 
-**The prediction held in six of the seven modules covered on 2026-07-26**, and the defect count per
+**The prediction held in seven of the eight modules covered on 2026-07-26**, and the defect count per
 module has not declined:
 
 - `foundry-rules` — **five**, four in guard-condition evaluation, each failing by *silently
@@ -174,6 +174,21 @@ module has not declined:
   followed by a second request proves the stream does not desynchronise, which inspection alone
   could not establish.
 
+- `foundry-testing` — **five**, and the first is the purest expression of the pattern in the whole
+  codebase: **the test report reported success unconditionally.** Both the HTML and Markdown
+  generators embedded a fixed seven-row "Protocol Coverage Matrix" in which every row read `PASSED`,
+  next to strings like "100% Endpoint Coverage", "Zero Breach" and "KRaft Verified" — none measured,
+  none affected by the results passed in. A run with fifty failures produced a clean bill of health.
+  A zero-test run additionally rendered a "100.0%" pass rate. And one level up, `foundry test` fed it
+  `generatedTests.Count * 2` as both the total *and* the passed count with zero failures and a
+  hardcoded 0.45s duration — for suites it had generated and never executed. Per-protocol status is
+  now rendered only when supplied; a zero-test run reads "INCONCLUSIVE"; and the command states
+  plainly that it generated rather than ran. Also in the mock-data generator: keys were 32-character
+  Guids where an ObjectId is 24, so every generated test that posted or fetched by id was broken
+  before it ran; `MaxLength` and `Range` constraints were ignored, so fixtures violated the schema
+  they came from and the API's own validation rejected them; and a shared non-thread-safe `Random`
+  could degrade to returning zeros under concurrent generation.
+
 Four areas came back clean, which is worth recording as evidence rather than left unsaid:
 **ambient tenant propagation** held under 50 interleaved flows, the **serialization defaults**
 were correct on every property including the deliberately-writable OCC token, `AddFoundryRules`
@@ -189,10 +204,10 @@ dependence on global MongoDB driver state, which this suite has exhibited before
 rather than closed — a suite that fails one run in ten undermines every other claim in this
 document, and it must be reproduced before it is called fixed.
 
-Two modules remain, and nothing yet contradicts the assumption that they carry comparable
+One module remains, and nothing yet contradicts the assumption that they carry comparable
 defect density.
 
-All 531 tests pass and there are zero vulnerable NuGet packages. CI
+All 557 tests pass and there are zero vulnerable NuGet packages. CI
 (`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
 a Studio typecheck; it **first went green on `bf3e227`**, after the three repository-level
 defects in section 2 were fixed. The seven modules are now vendored into the root
