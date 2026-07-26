@@ -1,0 +1,72 @@
+<Solution>
+  <Folder Name="/foundry-api/" />
+  <Folder Name="/foundry-api/samples/">
+    <Project Path="foundry-api/samples/Foundry.Api.Sample/Foundry.Api.Sample.csproj" />
+  </Folder>
+  <Folder Name="/foundry-api/src/">
+    <Project Path="foundry-api/src/Foundry.Api.SourceGenerators/Foundry.Api.SourceGenerators.csproj" />
+    <Project Path="foundry-api/src/Foundry.Api/Foundry.Api.csproj" />
+  </Folder>
+  <Folder Name="/foundry-api/tests/">
+    <Project Path="foundry-api/tests/Foundry.Api.Tests/Foundry.Api.Tests.csproj" />
+  </Folder>
+  <Folder Name="/foundry-cli/" />
+  <Folder Name="/foundry-cli/src/">
+    <Project Path="foundry-cli/src/Foundry.Cli/Foundry.Cli.csproj" />
+  </Folder>
+  <Folder Name="/foundry-connectors/" />
+  <Folder Name="/foundry-connectors/src/">
+    <Project Path="foundry-connectors/src/Foundry.Connectors/Foundry.Connectors.csproj" />
+  </Folder>
+  <Folder Name="/foundry-core/" />
+  <Folder Name="/foundry-core/src/">
+    <Project Path="foundry-core/src/Foundry.Core/Foundry.Core.csproj" />
+  </Folder>
+  <Folder Name="/foundry-file-io/" />
+  <Folder Name="/foundry-file-io/src/">
+    <Project Path="foundry-file-io/src/Foundry.FileIO/Foundry.FileIO.csproj" />
+  </Folder>
+  <Folder Name="/foundry-integration-tests/">
+    <Project Path="foundry-integration-tests/Foundry.IntegrationTests.csproj" />
+  </Folder>
+  <Folder Name="/foundry-kafka/" />
+  <Folder Name="/foundry-kafka/src/">
+    <Project Path="foundry-kafka/src/Foundry.Kafka/Foundry.Kafka.csproj" />
+  </Folder>
+  <Folder Name="/foundry-mongo/" />
+  <Folder Name="/foundry-mongo/samples/">
+    <Project Path="foundry-mongo/samples/FoundryMongo.Benchmark/FoundryMongo.Benchmark.csproj" />
+    <Project Path="foundry-mongo/samples/FoundryMongo.Sample/FoundryMongo.Sample.csproj" />
+  </Folder>
+  <Folder Name="/foundry-mongo/src/">
+    <Project Path="foundry-mongo/src/Foundry.Mongo/Foundry.Mongo.csproj" />
+  </Folder>
+  <Folder Name="/foundry-mongo/tests/">
+    <Project Path="foundry-mongo/tests/FoundryMongo.Tests/FoundryMongo.Tests.csproj" />
+  </Folder>
+  <Folder Name="/foundry-realtime/" />
+  <Folder Name="/foundry-realtime/src/">
+    <Project Path="foundry-realtime/src/Foundry.RealTime/Foundry.RealTime.csproj" />
+  </Folder>
+  <Folder Name="/foundry-rules/" />
+  <Folder Name="/foundry-rules/src/">
+    <Project Path="foundry-rules/src/Foundry.Rules/Foundry.Rules.csproj" />
+  </Folder>
+  <Folder Name="/foundry-schema/" />
+  <Folder Name="/foundry-schema/backend/">
+    <Project Path="foundry-schema/backend/Foundry.Schema.Backend.csproj" />
+  </Folder>
+  <Folder Name="/foundry-schema/compiler/">
+    <Project Path="foundry-schema/compiler/Foundry.Schema.Compiler.csproj" />
+  </Folder>
+  <Folder Name="/foundry-schema/tests/">
+    <Project Path="foundry-schema/tests/Foundry.Schema.Compiler.Tests/Foundry.Schema.Compiler.Tests.csproj" />
+  </Folder>
+  <Folder Name="/foundry-testing/" />
+  <Folder Name="/foundry-testing/src/">
+    <Project Path="foundry-testing/src/Foundry.Testing/Foundry.Testing.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Foundry.E2E.Showcase/Foundry.E2E.Showcase.csproj" />
+  </Folder>
+</Solution>

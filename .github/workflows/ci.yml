@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, 'feature/**']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    services:
+      # FoundryMongo.Tests and the API tests talk to a real MongoDB rather than a
+      # mock, so one is provisioned here instead of letting those tests fail.
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore Foundry.slnx
+
+      - name: Build
+        run: dotnet build Foundry.slnx --no-restore --configuration Release
+
+      # Runs the whole suite, including GeneratedCodeCompilesTests, which shells out
+      # to `dotnet build` over freshly generated code. That test is the only thing
+      # that catches emitted C# which is textually plausible but does not compile.
+      - name: Test
+        run: dotnet test Foundry.slnx --no-build --configuration Release --verbosity normal
+
+  schema-gates:
+    name: Schema gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build CLI
+        run: dotnet build foundry-cli/src/Foundry.Cli/Foundry.Cli.csproj --configuration Release
+
+      # Non-zero exit on any error, so a schema that would generate broken or empty
+      # output fails the build rather than being discovered later.
+      - name: Validate sample schemas
+        run: |
+          CLI="foundry-cli/src/Foundry.Cli/bin/Release/net10.0/foundry.dll"
+          dotnet "$CLI" validate samples/Foundry.E2E.Showcase/e2e-schema.ir.json
+
+      # The bundle is generated from compiler source. Regenerating it here proves the
+      # generator still runs and that every shipped golden example still validates —
+      # a stale example teaches a model to emit IR the compiler rejects.
+      - name: Regenerate AI skill bundle and validate its examples
+        run: |
+          CLI="foundry-cli/src/Foundry.Cli/bin/Release/net10.0/foundry.dll"
+          dotnet "$CLI" ai-spec --out /tmp/foundry-skill
+          for f in /tmp/foundry-skill/examples/*.json; do
+            echo "validating $f"
+            dotnet "$CLI" validate "$f"
+          done
+
+  studio:
+    name: Studio typecheck
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: foundry-studio
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck and build
+        run: npm run build
+
+# The local-model eval (`foundry eval`) is deliberately not run here. It needs an
+# Ollama host with the model resident, which a hosted runner does not have. Run it
+# locally against a real model before changing the IR schema, the vocabulary or the
+# system prompt:
+#
+#     foundry eval --runs 3 --min-pass 0.9 --out eval.md
+#
+# Prompt and schema edits do not compose freely — a change that fixes one construct
+# can measurably degrade another, so re-measure rather than assuming.
