@@ -38,6 +38,17 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Foundry.Cli embeds foundry-studio/dist/index.html. That bundle is a build
+      # artifact and is not committed, so it has to be produced before the CLI is
+      # compiled -- otherwise CI would silently validate a binary with no Studio in it.
+      - name: Build Studio bundle for embedding
+        working-directory: foundry-studio
+        run: npm ci && npm run build
+
       - name: Restore
         run: dotnet restore Foundry.slnx
 

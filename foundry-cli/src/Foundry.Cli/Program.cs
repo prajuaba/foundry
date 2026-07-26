@@ -724,8 +724,14 @@ app.Run();
         if (resourceName == null)
         {
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine("[Error] Embedded Studio UI ('index.html') not found in executable binary!");
+            Console.WriteLine("[Error] Embedded Studio UI ('index.html') not found in this build.");
             Console.ResetColor();
+            Console.WriteLine("  The Studio bundle is a build artifact and is not committed, so it must be built");
+            Console.WriteLine("  before it can be embedded:");
+            Console.WriteLine();
+            Console.WriteLine("      cd foundry-studio && npm ci && npm run build");
+            Console.WriteLine("      dotnet build foundry-cli/src/Foundry.Cli/Foundry.Cli.csproj");
+            Console.WriteLine();
             return 1;
         }
 

@@ -14,10 +14,25 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
 
-  <!-- Embed Studio IDE Web UI Singlefile Asset -->
-  <ItemGroup>
-    <EmbeddedResource Include="../../../foundry-studio/dist/index.html" Link="Resources/index.html" />
+  <!-- Embed Studio IDE Web UI Singlefile Asset.
+
+       dist/ is a build artifact and is deliberately not committed, so on a fresh clone
+       this file does not exist yet. Embedding it unconditionally made the whole solution
+       unbuildable until someone had run the Studio build, which is not a discoverable
+       prerequisite. It is conditional instead, and the `foundry studio` command reports
+       the missing asset with the command that produces it. -->
+  <PropertyGroup>
+    <StudioBundlePath>$(MSBuildThisFileDirectory)../../../foundry-studio/dist/index.html</StudioBundlePath>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(StudioBundlePath)')">
+    <EmbeddedResource Include="$(StudioBundlePath)" Link="Resources/index.html" />
   </ItemGroup>
+
+  <!-- Warn rather than fail: every other command works without the Studio bundle. -->
+  <Target Name="WarnOnMissingStudioBundle" BeforeTargets="CoreCompile" Condition="!Exists('$(StudioBundlePath)')">
+    <Warning Text="Studio UI bundle not found at $(StudioBundlePath) - the 'foundry studio' command will be unavailable in this build. Run 'npm ci &amp;&amp; npm run build' in foundry-studio to include it." />
+  </Target>
 
   <!-- Include Core Foundry Framework Engines -->
   <ItemGroup>
