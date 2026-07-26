@@ -102,11 +102,11 @@ Six modules have tests, plus the integration suite:
 
 | Has tests | No tests at all |
 | --------- | --------------- |
-| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-api` (23) | `foundry-realtime` · `foundry-connectors` · `foundry-file-io` · `foundry-testing` · `foundry-cli` · `foundry-studio` |
+| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-realtime` (26) · `foundry-api` (23) | `foundry-connectors` · `foundry-file-io` · `foundry-testing` · `foundry-cli` · `foundry-studio` |
 
 The still-untested list includes ~7.5k lines of Studio TypeScript verified only by `tsc`.
 
-**The prediction held in all three modules covered on 2026-07-26**, and the defect count per
+**The prediction held in all four modules covered on 2026-07-26**, and the defect count per
 module has not declined:
 
 - `foundry-rules` — **five**, four in guard-condition evaluation, each failing by *silently
@@ -125,17 +125,37 @@ module has not declined:
   the outbox has already marked processed. Plus an unvalidated `int`-to-`Acks` cast and a topic
   name that could degrade to `-events` and publish there successfully.
 
-Three areas came back clean, which is worth recording as evidence rather than left unsaid:
-**ambient tenant propagation** held under 50 interleaved flows, the **serialization defaults**
-were correct on every property including the deliberately-writable OCC token, and
-`AddFoundryRules` produced a valid container under `ValidateOnBuild`/`ValidateScopes`. Tenant
-isolation is the highest-consequence surface in the framework, so a negative result there is a
-real finding.
+- `foundry-realtime` — **four**, and the first one is the most serious defect found anywhere in
+  the codebase. Every mutation was sent to SignalR's `Clients.All` *in addition* to the
+  subscription groups, so any connected client received every entity's changes — bypassing the
+  `[RealTime(roles: ...)]` RBAC that `NotificationHub` carefully validates on subscribe, and, in
+  a multi-tenant deployment, delivering one tenant's mutations to another tenant's clients. An
+  `AuditLogEntry` carries `PropertyDiffs`, so what leaked was the changed *values*, not merely
+  metadata. Alongside it: entity subscription groups never matched (subscribers joined under the
+  simple type name, delivery targeted the assembly-qualified one) which the firehose masked;
+  record subscriptions were authorised against a client-supplied entity name but keyed on the
+  record id alone, so a caller could name an entity they may read and then join the record group
+  of one they may not; and an unresolvable entity name failed *open*.
 
-Six modules remain, and nothing yet contradicts the assumption that they carry comparable
+Four areas came back clean, which is worth recording as evidence rather than left unsaid:
+**ambient tenant propagation** held under 50 interleaved flows, the **serialization defaults**
+were correct on every property including the deliberately-writable OCC token, `AddFoundryRules`
+produced a valid container under `ValidateOnBuild`/`ValidateScopes`, and the **real-time audit
+sink** correctly honours `[RealTime(false)]` while still writing audit records. Tenant isolation
+is the highest-consequence surface in the framework, so a negative result there is a real finding.
+
+**One unresolved flake.** Two tests in `FoundryMongo.Tests.RepositoryAuditTests` failed once
+during a solution-wide run and could not be reproduced in eight subsequent runs (five isolated,
+one paired with the integration suite, two solution-wide). Both use mocks rather than the real
+database, so contention is not the obvious explanation; the leading hypothesis is order
+dependence on global MongoDB driver state, which this suite has exhibited before. It is recorded
+rather than closed — a suite that fails one run in ten undermines every other claim in this
+document, and it must be reproduced before it is called fixed.
+
+Five modules remain, and nothing yet contradicts the assumption that they carry comparable
 defect density.
 
-All 393 tests pass and there are zero vulnerable NuGet packages. CI
+All 419 tests pass and there are zero vulnerable NuGet packages. CI
 (`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
 a Studio typecheck; it **first went green on `bf3e227`**, after the three repository-level
 defects in section 2 were fixed. The seven modules are now vendored into the root

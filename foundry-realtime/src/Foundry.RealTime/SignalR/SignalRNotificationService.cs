@@ -21,18 +21,29 @@ public class SignalRNotificationService : INotificationService
 
     public async Task SendMutationAsync(AuditLogEntry entry, CancellationToken ct = default)
     {
-        // 1. Broadcast globally to all listeners
-        await _hubContext.Clients.All.SendAsync("OnMutationReceived", entry, cancellationToken: ct);
+        // Delivery goes only to subscription groups.
+        //
+        // There used to be an additional unconditional `Clients.All` send, which handed every
+        // mutation to every connected client. NotificationHub validates [RealTime(roles: ...)] on
+        // subscribe, and that firehose bypassed the check entirely -- and, in a multi-tenant
+        // deployment, delivered one tenant's mutations to another's clients. An AuditLogEntry
+        // carries PropertyDiffs, so what leaked was the changed values, not just metadata. Every
+        // send reported success, so nothing surfaced it.
+        var entityName = NotificationHub.ToSubscriptionName(entry.EntityType);
 
-        // 2. Broadcast to specific entity subscription group (e.g. entity:Invoice)
-        string entityGroup = $"entity:{entry.EntityType}";
-        await _hubContext.Clients.Group(entityGroup).SendAsync("OnEntityMutationReceived", entry, cancellationToken: ct);
+        // Must match the group NotificationHub.SubscribeToEntity joins. Delivery used
+        // entry.EntityType, which is the assembly-qualified name, while subscribers join under the
+        // simple name the client asked for -- so the two never matched and entity subscriptions
+        // received nothing. The Clients.All send above masked it.
+        await _hubContext.Clients
+            .Group($"entity:{entityName}")
+            .SendAsync("OnEntityMutationReceived", entry, cancellationToken: ct);
 
-        // 3. Broadcast to specific record subscription group (e.g. record:64b1f48e...)
         if (!string.IsNullOrWhiteSpace(entry.EntityId))
         {
-            string recordGroup = $"record:{entry.EntityId}";
-            await _hubContext.Clients.Group(recordGroup).SendAsync("OnRecordMutationReceived", entry, cancellationToken: ct);
+            await _hubContext.Clients
+                .Group(NotificationHub.RecordGroupName(entityName, entry.EntityId))
+                .SendAsync("OnRecordMutationReceived", entry, cancellationToken: ct);
         }
     }
 }

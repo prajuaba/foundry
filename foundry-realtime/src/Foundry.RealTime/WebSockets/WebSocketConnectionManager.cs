@@ -89,6 +89,12 @@ public class WebSocketConnectionManager
     /// <summary>
     /// Broadcasts a message to all active sockets.
     /// </summary>
+    /// <remarks>
+    /// Each socket is isolated. A connection can report <c>Open</c> and still throw on write — the
+    /// peer may vanish between the state check and the send — and an unisolated failure propagated
+    /// out of <c>Task.WhenAll</c>, so one dead client suppressed the broadcast for every other client
+    /// on this transport. The SSE channel already isolated per client; this one did not.
+    /// </remarks>
     public async Task BroadcastMessageAsync(object message, CancellationToken ct = default)
     {
         var tasks = new List<Task>();
@@ -96,7 +102,7 @@ public class WebSocketConnectionManager
         {
             if (socket.State == WebSocketState.Open)
             {
-                tasks.Add(SendMessageAsync(socket, message, ct));
+                tasks.Add(SendWithCleanupAsync(id, socket, message, ct));
             }
             else
             {
@@ -104,5 +110,20 @@ public class WebSocketConnectionManager
             }
         }
         await Task.WhenAll(tasks);
+    }
+
+    private async Task SendWithCleanupAsync(string id, WebSocket socket, object message, CancellationToken ct)
+    {
+        try
+        {
+            await SendMessageAsync(socket, message, ct);
+        }
+        catch (Exception ex)
+        {
+            // The write failed, so this connection is gone. Drop it rather than retrying it on every
+            // subsequent mutation.
+            _logger.LogDebug(ex, "Dropping WebSocket {Id} after a failed send.", id);
+            await RemoveSocketAsync(id, "Send failed");
+        }
     }
 }
