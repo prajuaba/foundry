@@ -1,0 +1,18 @@
+## Build outputs
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+
+## IDE and editor configurations
+.vs/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+## Temporary files & OS items
+.DS_Store
+Thumbs.db
+*.log

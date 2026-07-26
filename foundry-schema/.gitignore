@@ -1,0 +1,26 @@
+## Ignore Visual Studio/dotnet build folders
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+test_out/
+
+## Ignore Node/Vite folders
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+## Ignore User Specific Files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Ignore IDE files
+.vs/
+.vscode/
+.idea/
+
+## OS Metadata
+.DS_Store
+Thumbs.db

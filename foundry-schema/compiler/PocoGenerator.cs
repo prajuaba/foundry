@@ -1,0 +1,1237 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace Foundry.Schema.Compiler
+{
+    /// <summary>
+    /// How the compiler treats an emitted file on subsequent runs.
+    /// </summary>
+    public enum EmitKind
+    {
+        /// <summary>
+        /// Pure compiler output. Overwritten on every run. Never edit by hand.
+        /// </summary>
+        Generated,
+
+        /// <summary>
+        /// A starting point for hand-written logic. Written once and never overwritten,
+        /// because the developer's business rules live in it.
+        /// </summary>
+        Scaffold
+    }
+
+    /// <summary>
+    /// One file produced by the compiler, with the write policy that applies to it.
+    /// </summary>
+    /// <param name="Path">Output path relative to the output directory, without extension.</param>
+    /// <param name="Content">Complete file contents, including the leading header.</param>
+    /// <param name="Kind">Whether the file may be overwritten.</param>
+    public sealed record GeneratedFile(string Path, string Content, EmitKind Kind);
+
+    public static class PocoGenerator
+    {
+        /// <summary>
+        /// Generates the full output set, classified by write policy.
+        /// </summary>
+        /// <remarks>
+        /// Prefer this over <see cref="Generate"/>. Business-rule stubs contain the developer's
+        /// own logic, so they are marked <see cref="EmitKind.Scaffold"/> and must be written
+        /// only when absent. Overwriting them — which the compiler previously did on every run
+        /// via an unconditional write — silently destroys hand-written code.
+        /// </remarks>
+        public static IReadOnlyList<GeneratedFile> GenerateFiles(SchemaModel schema)
+        {
+            var raw = Generate(schema, out var scaffoldPaths);
+
+            return raw.Select(entry =>
+            {
+                var kind = scaffoldPaths.Contains(entry.Key) ? EmitKind.Scaffold : EmitKind.Generated;
+                var header = kind == EmitKind.Scaffold ? CodeGen.ScaffoldHeader : CodeGen.GeneratedHeader;
+                return new GeneratedFile(entry.Key, header + "\n" + entry.Value, kind);
+            }).ToList();
+        }
+
+        /// <summary>
+        /// Generates the full output set as a path-to-content map.
+        /// </summary>
+        /// <remarks>
+        /// Retained for callers that do not need write-policy information. Callers that write
+        /// to disk should use <see cref="GenerateFiles"/> instead so scaffolds are preserved.
+        /// </remarks>
+        public static Dictionary<string, string> Generate(SchemaModel schema)
+            => GenerateFiles(schema).ToDictionary(f => f.Path, f => f.Content);
+
+        private static Dictionary<string, string> Generate(SchemaModel schema, out HashSet<string> scaffoldPaths)
+        {
+            var result = new Dictionary<string, string>();
+
+            // Paths whose contents are the developer's, not the compiler's.
+            scaffoldPaths = new HashSet<string>(StringComparer.Ordinal);
+
+            // Generate enums
+            if (schema.Enums != null)
+            {
+                foreach (var enumDef in schema.Enums)
+                {
+                    var enumCode = GenerateEnum(enumDef, schema.Namespace);
+                    result[enumDef.Name] = enumCode;
+                }
+            }
+
+            // Generate entities
+            if (schema.Entities != null)
+            {
+                foreach (var entity in schema.Entities)
+                {
+                    var entityCode = GenerateEntity(entity, schema.Namespace, schema.Workflows);
+                    result[entity.Name] = entityCode;
+                }
+            }
+
+            // Generate DTOs
+            if (schema.Dtos != null)
+            {
+                foreach (var dto in schema.Dtos)
+                {
+                    var dtoCode = GenerateDto(dto, schema.Namespace);
+                    result[dto.Name] = dtoCode;
+                }
+            }
+
+            // Generate Custom Endpoint Handlers
+            if (schema.CustomEndpoints != null)
+            {
+                foreach (var ep in schema.CustomEndpoints)
+                {
+                    if (string.IsNullOrEmpty(ep.RequestType) || ep.RequestType.Equals("Void", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    // The request type the handler and its rules are typed against. Without this
+                    // the emitted handler referenced a type nothing declared, so a generated
+                    // project failed to build with CS0246 on every custom endpoint.
+                    result[$"Commands/{ep.RequestType}"] = GenerateCustomEndpointRequest(ep, schema.Namespace);
+
+                    // The custom-endpoint handler body is a starting point the developer
+                    // completes, so it is a scaffold rather than compiler output.
+                    var handlerPath = $"Handlers/{ep.RequestType}Handler";
+                    result[handlerPath] = GenerateHandler(ep, schema.Namespace);
+                    scaffoldPaths.Add(handlerPath);
+
+                    if (ep.BusinessRules != null)
+                    {
+                        foreach (var rule in ep.BusinessRules)
+                        {
+                            if (string.IsNullOrWhiteSpace(rule)) continue;
+                            var rulePath = $"Rules/{rule}";
+                            result[rulePath] = GenerateCustomEndpointRuleStub(rule, ep.RequestType, schema.Namespace);
+                            scaffoldPaths.Add(rulePath);
+                        }
+                    }
+                }
+            }
+
+            // Generate Entity-level CRUD Rules stubs
+            if (schema.Entities != null)
+            {
+                foreach (var entity in schema.Entities)
+                {
+                    if (entity.ApiBusinessRules == null) continue;
+                    foreach (var pair in entity.ApiBusinessRules)
+                    {
+                        var method = pair.Key;
+                        var rules = pair.Value;
+                        if (rules == null) continue;
+                        foreach (var rule in rules)
+                        {
+                            if (string.IsNullOrWhiteSpace(rule)) continue;
+                            var rulePath = $"Rules/{rule}";
+                            result[rulePath] = GenerateEntityRuleStub(rule, method, entity.Name, schema.Namespace);
+                            scaffoldPaths.Add(rulePath);
+                        }
+                    }
+                }
+            }
+
+            // Generate Workflow Transition Trigger Commands & Handlers
+            if (schema.Workflows != null)
+            {
+                foreach (var wf in schema.Workflows)
+                {
+                    if (string.IsNullOrEmpty(wf.Entity)) continue;
+                    var boundEntity = schema.Entities?.FirstOrDefault(e => e.Name.Equals(wf.Entity, StringComparison.OrdinalIgnoreCase));
+                    if (boundEntity == null) continue;
+
+                    foreach (var trans in wf.Transitions)
+                    {
+                        if (string.IsNullOrEmpty(trans.Trigger)) continue;
+                        
+                        var cmdCode = GenerateTransitionCommand(trans, boundEntity, schema.Namespace);
+                        result[$"Commands/{trans.Trigger}"] = cmdCode;
+
+                        var handlerCode = GenerateTransitionHandler(trans, schema.Namespace);
+                        result[$"Handlers/{trans.Trigger}Handler"] = handlerCode;
+                    }
+                }
+            }
+
+            // --- Work Item 1.1: Kafka Consumers & Registration ---
+            var kafkaEntities = (schema.Entities ?? new List<Entity>())
+                .Where(e => e.KafkaOutboxEnabled || !string.IsNullOrEmpty(e.KafkaTopic))
+                .Select(e => new { e.Name, Topic = !string.IsNullOrEmpty(e.KafkaTopic) ? e.KafkaTopic : $"{e.Name.ToLowerInvariant()}-events" })
+                .Concat(
+                    (schema.Dtos ?? new List<DtoModel>())
+                        .Where(d => d.KafkaOutboxEnabled || !string.IsNullOrEmpty(d.KafkaTopic))
+                        .Select(d => new { d.Name, Topic = !string.IsNullOrEmpty(d.KafkaTopic) ? d.KafkaTopic : $"{d.Name.ToLowerInvariant()}-events" })
+                ).ToList();
+
+            if (kafkaEntities.Any())
+            {
+                foreach (var kTarget in kafkaEntities)
+                {
+                    result[$"Kafka/{kTarget.Name}KafkaConsumer"] = $@"using System;
+using System.Threading;
+using System.Threading.Tasks;
+using Confluent.Kafka;
+using Foundry.Kafka.Consumer;
+using {schema.Namespace};
+
+namespace {schema.Namespace}.Kafka;
+
+/// <summary>
+/// Auto-generated Kafka consumer for {kTarget.Name} events.
+/// </summary>
+public partial class {CodeGen.Ident(kTarget.Name, "Entity name")}KafkaConsumer : IKafkaMessageHandler
+{{
+    public string Topic => ""{CodeGen.Lit(kTarget.Topic)}"";
+
+    public Task HandleAsync(string topic, string key, string value, System.Collections.Generic.IDictionary<string, string> headers, CancellationToken ct)
+    {{
+        // Auto-generated consumer handler for {kTarget.Name} Kafka events
+        return Task.CompletedTask;
+    }}
+}}
+";
+                }
+
+                var handlerRegistrations = string.Join("\n        ", kafkaEntities.Select(e => $"services.AddSingleton<IKafkaMessageHandler, {e.Name}KafkaConsumer>();"));
+                result["Kafka/KafkaRegistrations"] = $@"using Microsoft.Extensions.DependencyInjection;
+using Foundry.Kafka.Consumer;
+
+namespace {schema.Namespace}.Kafka;
+
+public static class KafkaRegistrations
+{{
+    public static IServiceCollection AddGeneratedKafkaHandlers(this IServiceCollection services)
+    {{
+        {handlerRegistrations}
+        return services;
+    }}
+}}
+";
+            }
+
+            // --- Work Item 1.2: GraphQL Query & Mutation Registrations ---
+            if (schema.Entities != null)
+            {
+                var gqlEntities = schema.Entities.Where(e => e.GraphQlEnabled).ToList();
+                if (gqlEntities.Any())
+                {
+                    var queries = string.Join("\n\n    ", gqlEntities.Select(e => $@"    [UseFiltering] [UseSorting]
+    public IQueryable<{e.Name}> Get{e.Name}s([Service] IRepository<{e.Name}> repo)
+        => repo.AsQueryable();"));
+
+                    var mutations = string.Join("\n\n    ", gqlEntities.Select(e => $@"    public async Task<{e.Name}> Create{e.Name}([Service] IRepository<{e.Name}> repo, {e.Name} input)
+    {{
+        await repo.AddAsync(input);
+        return input;
+    }}"));
+
+                    result["GraphQL/GraphQLRegistration"] = $@"using System.Linq;
+using System.Threading.Tasks;
+using HotChocolate;
+using HotChocolate.Data;
+using HotChocolate.Types;
+using Foundry.Mongo.Repositories;
+using {schema.Namespace};
+
+namespace {schema.Namespace}.GraphQL;
+
+[ExtendObjectType(""Query"")]
+public class GeneratedQueries
+{{
+{queries}
+}}
+
+[ExtendObjectType(""Mutation"")]
+public class GeneratedMutations
+{{
+{mutations}
+}}
+";
+                }
+            }
+
+            // --- Work Item 1.3: FileIO Services (Entities & Composite DTOs) ---
+            var fileTargets = (schema.Entities ?? new List<Entity>())
+                .Where(e => e.FileIoEnabled)
+                .Select(e => new { e.Name, AllowedExtensions = e.FileIoAllowedExtensions })
+                .Concat(
+                    (schema.Dtos ?? new List<DtoModel>())
+                        .Where(d => d.FileIoEnabled)
+                        .Select(d => new { d.Name, AllowedExtensions = d.FileIoAllowedExtensions })
+                ).ToList();
+
+            foreach (var target in fileTargets)
+            {
+                // Use schema-defined allowed extensions or fall back to defaults
+                var allowedExts = target.AllowedExtensions != null && target.AllowedExtensions.Count > 0
+                    ? target.AllowedExtensions.Select(e => e.StartsWith(".") ? e.ToLowerInvariant() : $".{e.ToLowerInvariant()}").ToList()
+                    : new List<string> { ".csv", ".xlsx", ".xls" };
+
+                // Build switch arms from allowed extensions
+                var switchArms = new List<string>();
+                if (allowedExts.Contains(".csv"))
+                    switchArms.Add($"            \"\".csv\"\" => await _csvParser.ParseAsync(fileStream),");
+                if (allowedExts.Contains(".xlsx") || allowedExts.Contains(".xls"))
+                {
+                    var excelExts = new List<string>();
+                    if (allowedExts.Contains(".xlsx")) excelExts.Add("\"\".xlsx\"\"");
+                    if (allowedExts.Contains(".xls")) excelExts.Add("\"\".xls\"\"");
+                    switchArms.Add($"            {string.Join(" or ", excelExts)} => await _excelParser.ParseAsync(fileStream),");
+                }
+                if (allowedExts.Contains(".json"))
+                    switchArms.Add($"            \"\".json\"\" => throw new NotSupportedException(\"\"JSON import requires JsonDataParser (see Foundry.FileIO)\"\"),");
+                if (allowedExts.Contains(".xml"))
+                    switchArms.Add($"            \"\".xml\"\" => throw new NotSupportedException(\"\"XML import requires XmlDataParser (see Foundry.FileIO)\"\"),");
+
+                var allowedExtsList = string.Join(", ", allowedExts.Select(e => $"\"\"{e}\"\""));
+                var switchBody = string.Join("\n", switchArms);
+
+                result[$"Services/{target.Name}FileService"] = $@"using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Threading.Tasks;
+using Foundry.FileIO;
+using {schema.Namespace};
+
+namespace {schema.Namespace}.Services;
+
+/// <summary>
+/// Auto-generated FileIO streaming import and export service for {target.Name}.
+/// Allowed extensions: {string.Join(", ", allowedExts)}
+/// </summary>
+public class {target.Name}FileService
+{{
+    private static readonly HashSet<string> AllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {{
+        {allowedExtsList}
+    }};
+
+    private readonly CsvDataParser<{target.Name}> _csvParser = new();
+    private readonly ExcelDataParser<{target.Name}> _excelParser = new();
+    private readonly CsvDataExporter<{target.Name}> _csvExporter = new();
+
+    public async Task<IEnumerable<{target.Name}>> ImportAsync(Stream fileStream, string fileName)
+    {{
+        var ext = Path.GetExtension(fileName).ToLowerInvariant();
+        if (!AllowedExtensions.Contains(ext))
+            throw new NotSupportedException($""File extension '{{ext}}' is not allowed for {target.Name}. Allowed: {string.Join(", ", allowedExts)}"");
+
+        return ext switch
+        {{
+{switchBody}
+            _ => throw new NotSupportedException($""File extension '{{ext}}' has no registered parser for {target.Name}."")
+        }};
+    }}
+
+    public async Task ExportToCsvAsync(IEnumerable<{target.Name}> items, Stream outputStream)
+    {{
+        await _csvExporter.ExportAsync(items, outputStream);
+    }}
+}}
+";
+            }
+
+            // --- Work Item 1.4: Workflow Configurations ---
+            if (schema.Workflows != null && schema.Workflows.Count > 0)
+            {
+                var workflowEntries = new List<string>();
+                foreach (var wf in schema.Workflows)
+                {
+                    // Generate state configs
+                    var stateConfigs = string.Join(",\n                    ", wf.States.Select(s =>
+                        $@"new WorkflowStateConfig {{ Name = ""{s.Name}"", IsInitial = {s.IsInitial.ToString().ToLower()}, IsFinal = {s.IsFinal.ToString().ToLower()}, AllowedRoles = new List<string> {{ {string.Join(", ", s.AllowedRoles.Select(r => $@"""{r}"""))} }} }}"));
+
+                    // Generate transition configs
+                    var transitionConfigs = string.Join(",\n                    ", wf.Transitions.Select(t =>
+                    {
+                        var conditionConfigs = t.Conditions.Count > 0
+                            ? string.Join(", ", t.Conditions.Select(c =>
+                                $@"new WorkflowConditionConfig {{ Type = ""{c.Type}"", Property = ""{c.Property}"", Operator = ""{c.Operator}"", Value = ""{c.Value}"" }}"))
+                            : "";
+                        var actionConfigs = t.Actions.Count > 0
+                            ? string.Join(", ", t.Actions.Select(a =>
+                            {
+                                var props = new List<string> { $@"Type = ""{a.Type}""" };
+                                if (a.RequestType != null) props.Add($@"RequestType = ""{a.RequestType}""");
+                                if (a.Method != null) props.Add($@"Method = ""{a.Method}""");
+                                if (a.Url != null) props.Add($@"Url = ""{a.Url}""");
+                                if (a.PayloadTemplate != null) props.Add($@"PayloadTemplate = ""{a.PayloadTemplate.Replace("\"", "\\\"")}""");
+                                if (a.BodyTemplate != null) props.Add($@"BodyTemplate = ""{a.BodyTemplate.Replace("\"", "\\\"")}""");
+                                return $"new WorkflowActionConfig {{ {string.Join(", ", props)} }}";
+                            }))
+                            : "";
+                        var rolesList = t.RequiredRoles.Count > 0
+                            ? string.Join(", ", t.RequiredRoles.Select(r => $@"""{r}"""))
+                            : "";
+
+                        return $@"new WorkflowTransitionConfig
+                    {{
+                        Id = ""{t.Id}"", Name = ""{t.Name}"", FromState = ""{t.FromState}"", ToState = ""{t.ToState}"",
+                        Trigger = ""{t.Trigger}"", UseCustomCommand = {t.UseCustomCommand.ToString().ToLower()},
+                        RequiredRoles = new List<string> {{ {rolesList} }},
+                        Conditions = new List<WorkflowConditionConfig> {{ {conditionConfigs} }},
+                        Actions = new List<WorkflowActionConfig> {{ {actionConfigs} }}
+                    }}";
+                    }));
+
+                    // Generate choice node configs
+                    var choiceConfigs = string.Join(",\n                    ", wf.ChoiceNodes.Select(cn =>
+                    {
+                        var branches = string.Join(", ", cn.Branches.Select(b =>
+                        {
+                            var branchConditions = b.Condition != null
+                                ? $@"new WorkflowConditionConfig {{ Type = ""{b.Condition.Type}"", Property = ""{b.Condition.Property}"", Operator = ""{b.Condition.Operator}"", Value = ""{b.Condition.Value}"" }}"
+                                : "";
+                            return $@"new WorkflowChoiceBranchConfig {{ ToState = ""{b.TargetState}"", Conditions = new List<WorkflowConditionConfig> {{ {branchConditions} }} }}";
+                        }));
+                        return $@"new WorkflowChoiceNodeConfig {{ Id = ""{cn.Id}"", Name = ""{cn.Name}"", Branches = new List<WorkflowChoiceBranchConfig> {{ {branches} }} }}";
+                    }));
+
+                    var entry = $@"new WorkflowConfig
+                {{
+                    Id = ""{wf.Id}"", Name = ""{wf.Name}"", Entity = ""{wf.Entity}"",
+                    Version = ""{wf.Version}"", EffectiveDate = ""{wf.EffectiveDate}"",
+                    ExpirationDate = ""{wf.ExpirationDate}"", IsActive = {wf.IsActive.ToString().ToLower()},
+                    States = new List<WorkflowStateConfig>
+                    {{
+                        {stateConfigs}
+                    }},
+                    Transitions = new List<WorkflowTransitionConfig>
+                    {{
+                        {transitionConfigs}
+                    }},
+                    ChoiceNodes = new List<WorkflowChoiceNodeConfig>
+                    {{
+                        {choiceConfigs}
+                    }}
+                }}";
+                    workflowEntries.Add(entry);
+                }
+
+                var allWorkflows = string.Join(",\n            ", workflowEntries);
+                result["Workflow/WorkflowConfigurations"] = $@"using System.Collections.Generic;
+using Foundry.Rules;
+
+namespace {schema.Namespace}.Workflow;
+
+/// <summary>
+/// Auto-generated workflow configurations parsed from visual state machine schema.
+/// </summary>
+public static class WorkflowConfigurations
+{{
+    public static List<WorkflowConfig> GetConfigurations()
+    {{
+        return new List<WorkflowConfig>
+        {{
+            {allWorkflows}
+        }};
+    }}
+}}
+";
+            }
+
+            // --- System.Text.Json source-generated serialization context ---
+            //
+            // Reflection-based STJ is the default and costs a metadata walk per type on first use,
+            // plus it is trim/AOT-hostile. A generated JsonSerializerContext moves that to compile
+            // time. Every entity, enum and DTO the schema declares is registered, so applications
+            // can opt in with JsonSerializerOptions.TypeInfoResolver = FoundryJsonContext.Default.
+            {
+                var serializableTypes = new List<string>();
+
+                foreach (var e in schema.Entities ?? new List<Entity>())
+                    serializableTypes.Add(CodeGen.Ident(e.Name, "Entity name"));
+
+                foreach (var d in schema.Dtos ?? new List<DtoModel>())
+                    serializableTypes.Add(CodeGen.Ident(d.Name, "DTO name"));
+
+                if (serializableTypes.Count > 0)
+                {
+                    var attributes = string.Join("\n", serializableTypes
+                        .SelectMany(t => new[]
+                        {
+                            $"[JsonSerializable(typeof({t}))]",
+                            $"[JsonSerializable(typeof(System.Collections.Generic.List<{t}>))]"
+                        }));
+
+                    result["Serialization/FoundryJsonContext"] = $@"using System.Text.Json.Serialization;
+
+namespace {CodeGen.Ns(schema.Namespace)}.Serialization;
+
+/// <summary>
+/// Source-generated System.Text.Json contracts for this domain.
+/// </summary>
+/// <remarks>
+/// Assign <c>FoundryJsonContext.Default</c> to
+/// <c>JsonSerializerOptions.TypeInfoResolver</c> to serialize without reflection.
+/// </remarks>
+{attributes}
+public partial class FoundryJsonContext : JsonSerializerContext
+{{
+}}
+";
+                }
+            }
+
+            // --- Startup index verification ---
+            //
+            // Declared indexes are created by EntityIndexManager at startup, but nothing proved
+            // they exist afterwards. A missing index does not fail anything — it silently turns
+            // an indexed lookup into a collection scan, which is the most expensive kind of
+            // quiet failure in a MongoDB application.
+            if ((schema.Entities?.Count ?? 0) > 0)
+            {
+                var entityNames = (schema.Entities ?? new List<Entity>())
+                    .Select(e => CodeGen.Ident(e.Name, "Entity name"))
+                    .ToList();
+
+                var registrations = string.Join("\n", entityNames.Select(n =>
+                    $"        await EnsureAsync<{n}>(provider, ct);"));
+
+                result["Diagnostics/IndexVerification"] = $@"using System;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Foundry.Mongo.Repositories;
+using {CodeGen.Ns(schema.Namespace)};
+
+namespace {CodeGen.Ns(schema.Namespace)}.Diagnostics;
+
+/// <summary>
+/// Creates every declared index at startup and logs the outcome per entity.
+/// </summary>
+public static partial class IndexVerification
+{{
+    /// <summary>
+    /// Ensures declared indexes exist for every entity in this domain.
+    /// </summary>
+    public static async Task EnsureIndexesAsync(IServiceProvider provider, CancellationToken ct = default)
+    {{
+{registrations}
+    }}
+
+    private static async Task EnsureAsync<T>(IServiceProvider provider, CancellationToken ct)
+        where T : class, Foundry.Core.Entities.IEntity<MongoDB.Bson.ObjectId>
+    {{
+        var logger = provider.GetService<ILoggerFactory>()?.CreateLogger(""Foundry.IndexVerification"");
+
+        try
+        {{
+            var repository = provider.GetService<IRepository<T>>();
+            if (repository is null)
+            {{
+                logger?.LogWarning(""No IRepository<{{Entity}}> registered; indexes not verified."", typeof(T).Name);
+                return;
+            }}
+
+            await repository.CreateIndexesAsync(ct);
+            logger?.LogInformation(""Indexes ensured for {{Entity}}."", typeof(T).Name);
+        }}
+        catch (Exception ex)
+        {{
+            // Surfaced rather than swallowed: a failed index build is a performance cliff that
+            // otherwise only shows up as unexplained latency in production.
+            logger?.LogError(ex, ""Failed to ensure indexes for {{Entity}}."", typeof(T).Name);
+            throw;
+        }}
+    }}
+}}
+";
+            }
+
+            // --- Work Item 1.5: RealTime Endpoint Mapping ---
+            if (schema.Entities != null && schema.Entities.Any(e => e.RealTime))
+            {
+                result["RealTime/RealTimeConfiguration"] = $@"using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Routing;
+using Foundry.RealTime;
+
+namespace {schema.Namespace}.RealTime;
+
+/// <summary>
+/// Auto-generated real-time SignalR, WebSockets, and SSE route configuration.
+/// </summary>
+public static class RealTimeConfiguration
+{{
+    public static IEndpointRouteBuilder MapGeneratedRealTimeEndpoints(this IEndpointRouteBuilder endpoints)
+    {{
+        endpoints.MapFoundryRealTime();
+        return endpoints;
+    }}
+}}
+";
+            }
+
+            return result;
+        }
+
+        private static string GenerateEnum(Enum enumDef, string @namespace)
+        {
+            var values = string.Join(",\n    ", enumDef.Values.Select(v => CodeGen.Ident(v, "Enum value")));
+            return $@"namespace {CodeGen.Ns(@namespace)};
+
+public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
+{{
+    {values}
+}}";
+        }
+
+        private static string GenerateEntity(Entity entity, string @namespace, List<WorkflowModel> workflows)
+        {
+            var keyProperty = entity.Properties.FirstOrDefault(p => p.IsKey);
+            var keyType = keyProperty?.Type ?? "ObjectId";
+
+            // Map ObjectId to C# type name
+            if (keyType.Equals("ObjectId", StringComparison.OrdinalIgnoreCase))
+                keyType = "ObjectId";
+
+            var interfaces = new List<string>();
+            if (!string.IsNullOrEmpty(entity.BaseClass))
+                interfaces.Add(entity.BaseClass);
+            else
+                interfaces.Add("BaseEntity<" + keyType + ">");
+
+            interfaces.Add("IVersionable");
+            if (entity.SoftDelete)
+                interfaces.Add("ISoftDelete");
+
+            var hasWorkflow = workflows != null && workflows.Any(w => w.Entity.Equals(entity.Name, StringComparison.OrdinalIgnoreCase));
+            if (hasWorkflow)
+                interfaces.Add("IWorkflowStateful");
+
+            var isMultiTenant = entity.MultiTenant 
+                || !string.IsNullOrEmpty(entity.TenantProperty)
+                || entity.Properties.Any(p => p.IsTenantKey || p.Attributes.Contains("TenantKey"));
+
+            if (isMultiTenant)
+                interfaces.Add("IMultiTenant");
+
+            var interfaceList = string.Join(", ", interfaces);
+
+            var properties = new List<string>();
+            foreach (var prop in entity.Properties)
+            {
+                if (prop.IsKey)
+                    continue;
+
+                var type = MapType(prop.Type);
+                var requiredKeyword = prop.Attributes.Contains("Required") ? "required " : "";
+                // init, not set. Generated entities are records, and BaseEntity<TId> already
+                // sets the house rule: `init` for caller-supplied data (Id), `set` only for the
+                // fields the DAL itself stamps (CreatedAtUtc, UpdatedAtUtc, Version). Domain
+                // properties are caller-supplied.
+                //
+                // The DAL never assigns to these directly -- soft delete goes through
+                // Builders<T>.Update.Set server-side, and encryption write-back uses reflection,
+                // which ignores the init modreq -- so immutability costs nothing at runtime and
+                // makes it impossible to mutate an entity between an optimistic-concurrency read
+                // and its write.
+                var initKeyword = "get; init";
+
+                var attributes = new List<string>();
+                if (prop.IsTenantKey || prop.Attributes.Contains("TenantKey") || prop.Name.Equals(entity.TenantProperty, StringComparison.OrdinalIgnoreCase))
+                {
+                    attributes.Add("[TenantKey]");
+                }
+
+                foreach (var attr in prop.Attributes)
+                {
+                    if (attr == "UniqueIndex" || attr == "Unique")
+                        attributes.Add("[Indexed(Unique = true)]");
+                    // "Indexed" is the canonical spelling; "Index" is accepted as an alias.
+                    // Only "Index" used to be handled, so schemas written with "Indexed" —
+                    // including the shipped showcase sample — silently lost their indexes.
+                    else if (attr == "Indexed" || attr == "Index")
+                        attributes.Add("[Indexed]");
+                    else if (attr == "TextIndex")
+                        attributes.Add("[TextIndexed]");
+                    else if (attr == "Required")
+                        attributes.Add("[Required]");
+                    // Encrypt/Mask/MaskEmail all map to [SensitiveData], which is AllowMultiple=false
+                    // and carries a single ProtectionType. Emitting one per attribute produced
+                    // "Duplicate 'SensitiveData' attribute" (CS0579) whenever a property combined
+                    // them — as the showcase's Customer.Email did. They are resolved together
+                    // below instead.
+                    else if (attr is "Encrypt" or "Mask" or "MaskEmail")
+                    {
+                        // handled after the loop
+                    }
+                    else if (attr == "PiiEmail")
+                        attributes.Add("[PiiData(PiiType.Email)]");
+                    else if (attr == "PiiCreditCard")
+                        attributes.Add("[PiiData(PiiType.CreditCard)]");
+                    else if (attr.Equals("Email", StringComparison.OrdinalIgnoreCase))
+                        attributes.Add("[EmailAddress]");
+                    else if (attr.Equals("Url", StringComparison.OrdinalIgnoreCase))
+                        attributes.Add("[Url]");
+                    else if (attr.Equals("Phone", StringComparison.OrdinalIgnoreCase))
+                        attributes.Add("[Phone]");
+                    else
+                        TryEmitValidationAttribute(attr, attributes);
+                }
+
+                // Exactly one [SensitiveData]. Encryption wins over masking when both are asked
+                // for: it is the stronger at-rest guarantee, and ProtectionType is not a flags
+                // enum so the two cannot be combined.
+                var wantsEncrypt = prop.Attributes.Contains("Encrypt");
+                var wantsMaskEmail = prop.Attributes.Contains("MaskEmail");
+                var wantsMask = prop.Attributes.Contains("Mask");
+
+                if (wantsEncrypt)
+                    attributes.Add("[SensitiveData(Protection = ProtectionType.Encrypt)]");
+                else if (wantsMaskEmail)
+                    attributes.Add("[SensitiveData(Protection = ProtectionType.Mask, MaskingType = MaskingType.Email)]");
+                else if (wantsMask)
+                    attributes.Add("[SensitiveData(Protection = ProtectionType.Mask)]");
+
+                var attributeLines = string.Join("\n    ", attributes);
+                var attributeLine = string.IsNullOrEmpty(attributeLines) ? "" : $"    {attributeLines}\n";
+
+                var defaultValue = "";
+                if (type == "string")
+                    defaultValue = " = string.Empty;";
+                else if (type == "bool")
+                    defaultValue = " = false;";
+                else if (type == "int" || type == "decimal" || type == "double" || type == "float")
+                    defaultValue = " = 0;";
+                else if (prop.IsEnum)
+                    defaultValue = $" = default({type});";
+
+                properties.Add($"{attributeLine}    public {requiredKeyword}{type} {CodeGen.Ident(prop.Name, "Property name")} {{ {initKeyword}; }}{defaultValue}");
+            }
+
+            if (entity.SoftDelete)
+            {
+                // [JsonIgnore] keeps soft-delete bookkeeping off the wire. It is a storage
+                // concern: a caller never needs to see it, since the repository already filters
+                // deleted rows out of every read, and a caller must not be able to *set* it —
+                // otherwise a PUT carrying "isDeleted": true deletes a record through the update
+                // route, skipping whatever roles the schema put on DELETE.
+                //
+                // This only affects System.Text.Json. The MongoDB driver serialises via its own
+                // BSON class map and ignores these attributes, so the fields are still persisted
+                // and the soft-delete filter still works.
+                properties.Add("    [Indexed]\n    [JsonIgnore]\n    public bool IsDeleted { get; init; } = false;");
+                properties.Add("    [JsonIgnore]\n    public DateTime? DeletedAt { get; init; }");
+            }
+
+            if (hasWorkflow)
+            {
+                // Deliberately `set` while domain properties are `init`: IWorkflowStateful
+                // declares `string CurrentState { get; set; }`, and WorkflowTransitionBehavior
+                // assigns these directly when advancing an instance. Making them init-only would
+                // fail to satisfy the interface and break the workflow engine. Narrowing this
+                // means reworking the engine to produce a new instance via `with`.
+                properties.Add("    public string CurrentState { get; set; } = string.Empty;");
+                properties.Add("    public string WorkflowId { get; set; } = string.Empty;");
+                properties.Add("    public string WorkflowVersion { get; set; } = string.Empty;");
+            }
+
+            var propertyLines = string.Join("\n\n", properties);
+            if (!string.IsNullOrEmpty(propertyLines))
+                propertyLines = "\n" + propertyLines + "\n";
+
+            var partitionAttribute = entity.Partitioned
+                ? $"[Partitioned({entity.ArchiveThresholdYears})]\n"
+                : "";
+
+            var realTimeAttribute = "";
+            if (!entity.RealTime)
+            {
+                realTimeAttribute = "[RealTime(false)]\n";
+            }
+            else if (entity.RealTimeRoles != null && entity.RealTimeRoles.Count > 0)
+            {
+                var rolesList = string.Join(", ", entity.RealTimeRoles.Select(r => $"\"{r}\""));
+                realTimeAttribute = $"[RealTime(true, new[] {{ {rolesList} }})]\n";
+            }
+
+            // Entity-level indexes. Previously parsed, validated and then dropped on the floor:
+            // nothing in the emitter referenced entity.Indexes, so a declared composite index was
+            // never created and queries silently fell back to collection scans.
+            var compoundIndexAttribute = BuildCompoundIndexAttributes(entity);
+
+            var needAttributes = entity.Partitioned || !entity.RealTime || (entity.RealTimeRoles != null && entity.RealTimeRoles.Count > 0) || !string.IsNullOrEmpty(compoundIndexAttribute);
+            var extraImports = needAttributes
+                ? "\nusing Foundry.Core.Attributes;"
+                : "";
+            if (hasWorkflow)
+                extraImports += "\nusing Foundry.Rules;";
+            if (isMultiTenant)
+                extraImports += "\nusing Foundry.Core.Tenant;";
+            extraImports += "\nusing Foundry.Core.Security;";
+
+            return $@"using System;
+using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
+using MongoDB.Bson;
+using Foundry.Core.Entities;{extraImports}
+
+namespace {CodeGen.Ns(@namespace)};
+
+{partitionAttribute}{realTimeAttribute}{compoundIndexAttribute}public partial record {CodeGen.Ident(entity.Name, "Entity name")} : {interfaceList}
+{{{propertyLines}}}";
+        }
+
+        private static string MapType(string schemaType) => Vocabulary.MapType(schemaType);
+
+        /// <summary>
+        /// Emits one <c>[CompoundIndex]</c> per entity-level index declaration.
+        /// </summary>
+        /// <remarks>
+        /// A single-field entity index whose property already carries <c>Indexed</c> or
+        /// <c>Unique</c> is skipped. Emitting both would ask MongoDB to create two indexes over
+        /// the same key pattern under different names, which the server rejects at startup — so
+        /// the redundant declaration is dropped in favour of the property attribute.
+        /// </remarks>
+        private static string BuildCompoundIndexAttributes(Entity entity)
+        {
+            var indexes = entity.Indexes ?? new List<Index>();
+            if (indexes.Count == 0) return string.Empty;
+
+            var properties = entity.Properties ?? new List<Property>();
+            var lines = new List<string>();
+
+            foreach (var index in indexes)
+            {
+                var fields = (index.Fields ?? new List<string>())
+                    .Where(f => !string.IsNullOrWhiteSpace(f))
+                    .ToList();
+
+                if (fields.Count == 0) continue;
+
+                if (fields.Count == 1)
+                {
+                    var covered = properties.Any(p =>
+                        string.Equals(p.Name, fields[0], StringComparison.OrdinalIgnoreCase)
+                        && (p.Attributes ?? new List<string>()).Any(a =>
+                            a is "Indexed" or "Index" or "Unique" or "UniqueIndex"));
+
+                    if (covered) continue;
+                }
+
+                var fieldArgs = string.Join(", ", fields.Select(f => $"\"{CodeGen.Lit(f)}\""));
+                var options = new List<string>();
+
+                if (index.Unique) options.Add("Unique = true");
+                if (!string.IsNullOrWhiteSpace(index.Name)) options.Add($"Name = \"{CodeGen.Lit(index.Name)}\"");
+
+                var optionText = options.Count > 0 ? $", {string.Join(", ", options)}" : "";
+                lines.Add($"[CompoundIndex({fieldArgs}{optionText})]");
+            }
+
+            return lines.Count == 0 ? string.Empty : string.Join("\n", lines) + "\n";
+        }
+
+        /// <summary>
+        /// Emits a validation attribute if <paramref name="attr"/> is a recognised,
+        /// safely-renderable parameterised attribute.
+        /// </summary>
+        /// <returns>True when the attribute was handled and appended to <paramref name="attributes"/>.</returns>
+        /// <remarks>
+        /// This replaces the previous <c>attributes.Add($"[{attr}]")</c> pass-through. That form
+        /// spliced raw schema text into generated source: an attribute of
+        /// <c>X)] public class Evil {{ }} [Obsolete(</c> closed the attribute and opened a new
+        /// type declaration. Because the schema can be authored by a local AI model, every
+        /// argument list is now parsed and constrained before emission, and anything that does
+        /// not parse is dropped rather than emitted.
+        /// </remarks>
+        private static bool TryEmitValidationAttribute(string attr, List<string> attributes)
+        {
+            if (!CodeGen.TryParseAttribute(attr, out var name, out var args))
+                return false;
+
+            if (string.IsNullOrEmpty(args))
+                return false;
+
+            switch (name.ToLowerInvariant())
+            {
+                case "minlength":
+                    attributes.Add($"[MinLength({args})]");
+                    return true;
+
+                case "maxlength":
+                    attributes.Add($"[MaxLength({args})]");
+                    return true;
+
+                case "range":
+                    attributes.Add($"[Range({args})]");
+                    return true;
+
+                case "regex":
+                    // The parser guarantees args is a quoted string with no embedded quote,
+                    // backslash or brace, so it is safe to place inside the attribute.
+                    //
+                    // [GeneratedRegex] would compile the pattern at build time rather than
+                    // interpreting it per validation, but it requires a partial method on a
+                    // partial type and cannot be applied to a property. Emitting the compiled
+                    // regex is therefore a change to the validation pipeline, not to this
+                    // attribute — tracked separately rather than faked here.
+                    attributes.Add($"[RegularExpression({args})]");
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        private static string GenerateDto(DtoModel dto, string @namespace)
+        {
+            var properties = new List<string>();
+            foreach (var prop in dto.Properties)
+            {
+                var type = MapType(prop.Type);
+                var requiredKeyword = prop.IsRequired ? "required " : "";
+                var initKeyword = "get; init";
+
+                var attributes = new List<string>();
+                foreach (var attr in prop.Attributes)
+                {
+                    if (attr == "Required")
+                        attributes.Add("[Required]");
+                    else if (attr.Equals("Email", StringComparison.OrdinalIgnoreCase))
+                        attributes.Add("[EmailAddress]");
+                    else if (attr.Equals("Url", StringComparison.OrdinalIgnoreCase))
+                        attributes.Add("[Url]");
+                    else if (attr.Equals("Phone", StringComparison.OrdinalIgnoreCase))
+                        attributes.Add("[Phone]");
+                    else
+                        TryEmitValidationAttribute(attr, attributes);
+                }
+
+                var attributeLines = string.Join("\n    ", attributes);
+                var attributeLine = string.IsNullOrEmpty(attributeLines) ? "" : $"    {attributeLines}\n";
+
+                var defaultValue = "";
+                if (type == "string")
+                    defaultValue = " = string.Empty;";
+                else if (type == "bool")
+                    defaultValue = " = false;";
+                else if (type == "int" || type == "decimal" || type == "double" || type == "float")
+                    defaultValue = " = 0;";
+
+                properties.Add($"{attributeLine}    public {requiredKeyword}{type} {CodeGen.Ident(prop.Name, "DTO property name")} {{ {initKeyword}; }}{defaultValue}");
+            }
+
+            var propertyLines = string.Join("\n\n", properties);
+            if (!string.IsNullOrEmpty(propertyLines))
+                propertyLines = "\n" + propertyLines + "\n";
+
+            return $@"using System;
+using System.ComponentModel.DataAnnotations;
+using MongoDB.Bson;
+
+namespace {CodeGen.Ns(@namespace)};
+
+public partial record {CodeGen.Ident(dto.Name, "DTO name")}
+{{{propertyLines}}}";
+        }
+
+        /// <summary>
+        /// Computes the MediatR response type for a custom endpoint.
+        /// </summary>
+        private static string ResponseTypeFor(CustomEndpoint ep)
+            => ep.Method.Equals("GET", StringComparison.OrdinalIgnoreCase)
+                ? "System.Collections.Generic.IReadOnlyList<" + (string.IsNullOrEmpty(ep.TargetEntity) ? "object" : ep.TargetEntity) + ">"
+                : "bool";
+
+        /// <summary>
+        /// Emits the MediatR request record a custom endpoint's handler and rules are typed against.
+        /// </summary>
+        /// <remarks>
+        /// Properties are derived from what the generated handler actually reads — the filter
+        /// source value and any assignment sources — so the scaffolded body compiles as written.
+        /// </remarks>
+        private static string GenerateCustomEndpointRequest(CustomEndpoint ep, string @namespace)
+        {
+            var properties = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            void Add(string? name, string type)
+            {
+                if (string.IsNullOrWhiteSpace(name) || !seen.Add(name!)) return;
+                properties.Add($"    public {type} {CodeGen.Ident(name, "Request property")} {{ get; init; }}"
+                               + (type == "string" ? " = string.Empty;" : ""));
+            }
+
+            if (!string.IsNullOrWhiteSpace(ep.FilterSourceValue))
+                Add(ep.FilterSourceValue, "string");
+
+            foreach (var assignment in ep.Assignments ?? new List<AssignmentRule>())
+                Add(assignment.SourceValue, "string");
+
+            var body = properties.Count == 0
+                ? "\n    // Add request properties here, or in a *.Custom.cs partial.\n"
+                : "\n" + string.Join("\n\n", properties) + "\n";
+
+            return $@"using System;
+using MediatR;
+
+namespace {CodeGen.Ns(@namespace)};
+
+/// <summary>
+/// Request for the '{CodeGen.Lit(ep.Route)}' endpoint.
+/// </summary>
+public partial record {CodeGen.Ident(ep.RequestType, "Request type")} : IRequest<{ResponseTypeFor(ep)}>
+{{{body}}}
+";
+        }
+
+        private static string GenerateHandler(CustomEndpoint ep, string @namespace)
+        {
+            var handlerName = ep.RequestType + "Handler";
+
+            // Previously this derived a response type by string-replacing "Query"/"Request" with
+            // "Response" — a type the compiler never emitted, so every GET endpoint produced a
+            // handler that could not build. The response is now a projection of the target entity.
+            var responseType = ResponseTypeFor(ep);
+
+            var repoType = !string.IsNullOrEmpty(ep.TargetEntity) ? $"IRepository<{ep.TargetEntity}>" : null;
+
+            var newResponseExpr = $"new {responseType}";
+            var newDtoExpr = $"new {ep.TargetEntity}Dto";
+            var newEntityExpr = $"new {ep.TargetEntity}";
+
+            string body = "";
+            if (ep.OperationType.Equals("Query", StringComparison.OrdinalIgnoreCase))
+            {
+                body = $@"        var items = await _repository.FindManyAsync(
+            x => x.{ep.FilterField ?? "Id"}.ToString() == request.{ep.FilterSourceValue ?? "Id"},
+            ct: cancellationToken);
+
+        // Returning the entities directly. Project them into a DTO here if the API should not
+        // expose the full entity shape — declare that DTO in the schema's ""dtos"" section.
+        return items;";
+            }
+            else if (ep.OperationType.Equals("Update", StringComparison.OrdinalIgnoreCase))
+            {
+                // Generated properties are init-only, so mutation goes through a `with`
+                // expression rather than assignment. This is also the safer shape under
+                // optimistic concurrency: the entity read from the repository is never altered
+                // in place, so nothing can observe it half-updated.
+                var assignments = (ep.Assignments ?? new List<AssignmentRule>())
+                    .Select(a =>
+                        $"            {CodeGen.Ident(a.EntityProperty, "Entity property")} = "
+                        + $"request.{CodeGen.Ident(a.SourceValue, "Request property")},")
+                    .ToList();
+
+                var withBlock = assignments.Count > 0
+                    ? $@"        entity = entity with
+        {{
+{string.Join("\n", assignments)}
+        }};"
+                    : "        // No assignments declared on this endpoint; set the properties to update here.";
+
+                body = $@"        var entity = await _repository.GetByIdAsync(request.{ep.FilterSourceValue ?? "Id"});
+        if (entity == null)
+        {{
+            return false;
+        }}
+
+        // Apply visual assignments
+{withBlock}
+
+        await _repository.UpdateAsync(entity);
+        return true;";
+            }
+            else if (ep.OperationType.Equals("Insert", StringComparison.OrdinalIgnoreCase))
+            {
+                // Deliberately not constructing the entity inline: entities with [Required]
+                // properties compile to `required` members, so an empty object initializer is a
+                // guaranteed CS9035. This is a scaffold the developer owns, so it states the work
+                // plainly and compiles as written.
+                body = $@"        // TODO: map the request onto a {ep.TargetEntity} and insert it, for example:
+        //
+        //     var entity = new {ep.TargetEntity} {{ /* set required properties */ }};
+        //     await _repository.InsertAsync(entity, ct: cancellationToken);
+        //     return true;
+
+        throw new NotImplementedException(
+            ""Map {ep.RequestType} onto {ep.TargetEntity} and insert it."");";
+            }
+            else
+            {
+                body = @"        // Write your custom MediatR query/command logic here
+        throw new NotImplementedException(""Custom logic handler."");";
+            }
+
+            var fieldDeclaration = repoType != null ? $"    private readonly {repoType} _repository;\n" : "";
+            
+            var constructor = repoType != null 
+                ? $@"    public {handlerName}({repoType} repository)
+    {{
+        _repository = repository;
+    }}"
+                : $@"    public {handlerName}()
+    {{
+    }}";
+
+            return $@"using System;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using MediatR;
+using MongoDB.Bson;
+using Foundry.Core.Entities;
+using Foundry.Mongo.Repositories;
+using {@namespace};
+
+namespace {@namespace}.Handlers;
+
+public class {handlerName} : IRequestHandler<{ep.RequestType}, {responseType}>
+{{
+{fieldDeclaration}
+{constructor}
+
+    public async Task<{responseType}> Handle({ep.RequestType} request, CancellationToken cancellationToken)
+    {{
+{body}
+    }}
+}}";
+        }
+
+        private static string GenerateCustomEndpointRuleStub(string ruleName, string requestType, string ns)
+        {
+            return $@"using System.Threading;
+using System.Threading.Tasks;
+using Foundry.Rules;
+
+namespace {ns}.Rules;
+
+/// <summary>
+/// Custom business rule validator for {requestType}.
+/// </summary>
+public class {ruleName} : IBusinessRule<{ns}.{requestType}>
+{{
+    public Task<RuleResult> ValidateAsync({ns}.{requestType} request, CancellationToken ct)
+    {{
+        // TODO: Implement custom business policy validation logic
+        return Task.FromResult(RuleResult.Success());
+    }}
+}}
+";
+        }
+
+        private static string GenerateEntityRuleStub(string ruleName, string method, string entityName, string ns)
+        {
+            var requestType = method.ToUpperInvariant() switch
+            {
+                "POST" => $"InsertCommand<{ns}.{entityName}>",
+                "PUT" => $"UpdateCommand<{ns}.{entityName}>",
+                "DELETE" => $"DeleteCommand<{ns}.{entityName}>",
+                "GET_BY_ID" => $"GetByIdQuery<{ns}.{entityName}>",
+                "GET" => $"FindManyQuery<{ns}.{entityName}>",
+                _ => "object"
+            };
+
+            return $@"using System.Threading;
+using System.Threading.Tasks;
+using Foundry.Rules;
+using Foundry.Api.MediatR;
+
+namespace {ns}.Rules;
+
+/// <summary>
+/// Entity CRUD business rule validator for {entityName} on {method}.
+/// </summary>
+public class {ruleName} : IBusinessRule<{requestType}>
+{{
+    public Task<RuleResult> ValidateAsync({requestType} request, CancellationToken ct)
+    {{
+        // TODO: Implement custom business policy validation logic
+        return Task.FromResult(RuleResult.Success());
+    }}
+}}
+";
+        }
+
+        private static string GenerateTransitionCommand(WorkflowTransitionModel transition, Entity entity, string @namespace)
+        {
+            var keyProperty = entity.Properties.FirstOrDefault(p => p.IsKey);
+            var keyType = keyProperty?.Type ?? "ObjectId";
+            if (keyType.Equals("ObjectId", StringComparison.OrdinalIgnoreCase))
+                keyType = "MongoDB.Bson.ObjectId";
+
+            return $@"using System;
+using MediatR;
+using Foundry.Rules;
+using MongoDB.Bson;
+
+namespace {@namespace}.Commands;
+
+/// <summary>
+/// Command to trigger the workflow transition '{transition.Name}' from '{transition.FromState}' to '{transition.ToState}'.
+/// </summary>
+public partial record {CodeGen.Ident(transition.Trigger, "Transition trigger")} : IRequest, IWorkflowTransitionRequest
+{{
+    /// <summary>
+    /// Gets the unique ID of the target entity document.
+    /// </summary>
+    public string EntityId {{ get; init; }} = string.Empty;
+
+    /// <inheritdoc />
+    string IWorkflowTransitionRequest.EntityId => EntityId;
+
+    /// <inheritdoc />
+    public string EntityType => ""{CodeGen.Lit(entity.Name)}"";
+
+    /// <inheritdoc />
+    public string TransitionId => ""{CodeGen.Lit(transition.Id)}"";
+
+    /// <inheritdoc />
+    public string FromState => ""{CodeGen.Lit(transition.FromState)}"";
+
+    /// <inheritdoc />
+    public string ToState => ""{CodeGen.Lit(transition.ToState)}"";
+}}
+";
+        }
+
+        private static string GenerateTransitionHandler(WorkflowTransitionModel transition, string @namespace)
+        {
+            return $@"using System;
+using System.Threading;
+using System.Threading.Tasks;
+using MediatR;
+
+namespace {@namespace}.Handlers;
+
+/// <summary>
+/// Handler for {transition.Trigger} workflow state transition command.
+/// </summary>
+public partial class {CodeGen.Ident(transition.Trigger, "Transition trigger")}Handler : IRequestHandler<{CodeGen.Ident(transition.Trigger, "Transition trigger")}>
+{{
+    /// <inheritdoc />
+    public Task Handle({transition.Trigger} request, CancellationToken ct)
+    {{
+        // State updates, roles audits, guard evaluation, and logging are automatically processed by WorkflowTransitionBehavior.
+        return Task.CompletedTask;
+    }}
+}}
+";
+        }
+    }
+}

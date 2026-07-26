@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="NSubstitute" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="coverlet.collector">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <!-- Explicit package refs for types not in SDK implicit usings -->
+    <PackageReference Include="System.Text.Json" />
+  </ItemGroup>
+
+  <!-- Reference the layers we're bridging -->
+  <ItemGroup>
+    <ProjectReference Include="..\foundry-api\src\Foundry.Api\Foundry.Api.csproj" />
+    <ProjectReference Include="..\foundry-api\samples\Foundry.Api.Sample\Foundry.Api.Sample.csproj" />
+    <ProjectReference Include="..\foundry-schema\compiler\Foundry.Schema.Compiler.csproj" />
+    <ProjectReference Include="..\foundry-file-io\src\Foundry.FileIO\Foundry.FileIO.csproj" />
+    <ProjectReference Include="..\foundry-realtime\src\Foundry.RealTime\Foundry.RealTime.csproj" />
+    <ProjectReference Include="..\foundry-rules\src\Foundry.Rules\Foundry.Rules.csproj" />
+    <ProjectReference Include="..\foundry-kafka\src\Foundry.Kafka\Foundry.Kafka.csproj" />
+  </ItemGroup>
+
+  <!-- Embed the existing manifests as test fixtures -->
+  <ItemGroup>
+    <None Update="fixtures\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

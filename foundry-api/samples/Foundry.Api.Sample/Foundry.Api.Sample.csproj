@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" />
+    <ProjectReference Include="..\..\src\Foundry.Api\Foundry.Api.csproj" />
+    <ProjectReference Include="..\..\..\foundry-realtime\src\Foundry.RealTime\Foundry.RealTime.csproj" />
+    <ProjectReference Include="..\..\src\Foundry.Api.SourceGenerators\Foundry.Api.SourceGenerators.csproj" 
+                      OutputItemType="Analyzer" 
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AdditionalFiles Include="api-manifest.json" />
+  </ItemGroup>
+
+</Project>

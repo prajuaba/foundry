@@ -1,0 +1,25 @@
+{
+  "Namespace": "Paperclip.OrderingSystem.Domain",
+  "Entities": [
+    {
+      "Name": "Order",
+      "SoftDelete": true,
+      "Auditable": true,
+      "Indexes": [ { "Fields": ["CustomerId"], "Unique": false } ],
+      "Properties": [
+        { "Name": "CustomerId", "Type": "string", "Attributes": ["Index"] },
+        { "Name": "OrderNumber", "Type": "string", "Attributes": ["Required", "UniqueIndex", "TextIndex"] },
+        { "Name": "TotalAmount", "Type": "decimal" },
+        { "Name": "Status", "Type": "OrderStatus", "IsEnum": true },
+        { "Name": "SecretToken", "Type": "string", "Attributes": ["Encrypt"] },
+        { "Name": "UserEmail", "Type": "string", "Attributes": ["MaskEmail"] }
+      ]
+    }
+  ],
+  "Enums": [
+    {
+      "Name": "OrderStatus",
+      "Values": ["Pending", "Completed", "Cancelled"]
+    }
+  ]
+}

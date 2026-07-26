@@ -1,0 +1,14 @@
+**/.git/
+**/bin/
+**/obj/
+**/out/
+**/.vs/
+**/.vscode/
+**/.idea/
+**/node_modules/
+**/dist/
+Dockerfile
+.dockerignore
+*.user
+*.suo
+*.userosscache
