@@ -99,6 +99,14 @@ public class Program
         builder.Services.AddExceptionHandler<Foundry.Api.Middleware.GlobalExceptionHandler>();
         builder.Services.AddProblemDetails();
 
+        // Foundry entity ids are MongoDB ObjectIds, which System.Text.Json cannot round-trip on its
+        // own: it writes the struct's members and decodes them back to ObjectId.Empty. The driver then
+        // treats an empty id as unset and assigns a new one at insert, so a POSTed entity is stored
+        // under an id the caller never saw. Registering the converter fixes request binding; generated
+        // endpoints serialize responses through the same FoundryJsonDefaults options.
+        builder.Services.ConfigureHttpJsonOptions(options =>
+            Foundry.Core.Serialization.FoundryJsonDefaults.Apply(options.SerializerOptions));
+
         var app = builder.Build();
 
         app.UseExceptionHandler();
