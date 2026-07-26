@@ -44,9 +44,10 @@ jobs:
       - name: Build
         run: dotnet build Foundry.slnx --no-restore --configuration Release
 
-      # Runs the whole suite, including GeneratedCodeCompilesTests, which shells out
-      # to `dotnet build` over freshly generated code. That test is the only thing
-      # that catches emitted C# which is textually plausible but does not compile.
+      # Covers every suite in the solution: compiler, integration, MongoDB and API. The
+      # integration and MongoDB suites talk to the service above rather than mocking it, and
+      # GeneratedCodeCompilesTests shells out to a real `dotnet build` over generated output --
+      # the only gate that catches emitted C# which reads correctly but does not compile.
       - name: Test
         run: dotnet test Foundry.slnx --no-build --configuration Release --verbosity normal
 

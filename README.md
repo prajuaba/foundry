@@ -34,7 +34,7 @@ graph TD
 | **`Foundry.Connectors`** | [`foundry-connectors/`](file:///Users/prajuab/Workspace/foundry/foundry-connectors/) | Enterprise external service connectors (REST, SOAP 1.1/1.2, GraphQL) with Polly v8 resilience pipelines, authentication, and health checks. |
 | **`Foundry.Testing`** | [`foundry-testing/`](file:///Users/prajuab/Workspace/foundry/foundry-testing/) | Autonomous multi-protocol testing engine generating schema-driven mock data, xUnit test suites, and interactive HTML execution reports. |
 | **`Foundry.Api`** | [`foundry-api/`](file:///Users/prajuab/Workspace/foundry/foundry-api/) | API Gateway with MediatR pipeline behaviors (Security, Tenant Middleware, Sliding Window Rate Limiting, Caching, Audit, Rules Validation). |
-| **`Foundry.Cli`** | [`foundry-cli/`](file:///Users/prajuab/Workspace/foundry/foundry-cli/) | Unified command-line CLI tool (`foundry new`, `compile`, `export`, `sdk`, `doctor`, `test`, `lsp`, `studio`). |
+| **`Foundry.Cli`** | [`foundry-cli/`](foundry-cli/) | Unified CLI: `new`, `compile`, `validate`, `export`, `sdk`, `doctor`, `test`, `lsp`, `studio`, `api`, plus the AI toolchain (`ai`, `ai-spec`, `eval`). |
 | **`Foundry.Studio`** | [`foundry-studio/`](file:///Users/prajuab/Workspace/foundry/foundry-studio/) | React 19 + Vite Visual Studio IDE featuring domain modeling, DTO composition, workflow designer, external connector setup, API playground, and autonomous test suite runner. |
 | **`foundry-vscode`** | [`foundry-vscode/`](file:///Users/prajuab/Workspace/foundry/foundry-vscode/) | Native VS Code Extension & LSP Server integration embedding Foundry Studio canvas into editor tabs with native schema sync. |
 
@@ -43,16 +43,18 @@ graph TD
 ## 🚀 Getting Started
 
 ### 1. Build and Compile the Solution
-To build all projects across the workspace:
+All 21 projects are covered by a solution file at the repository root:
 ```bash
-dotnet build
+dotnet build Foundry.slnx
 ```
 
-### 2. Run Solution Integration Tests
-To execute all 75 integration tests across all modules:
+### 2. Run the Test Suites
 ```bash
-dotnet test foundry-integration-tests/Foundry.IntegrationTests.csproj
+dotnet test Foundry.slnx
 ```
+Current state: 131 compiler, 75 integration, 29 MongoDB, 23 API. The MongoDB and
+API suites talk to a real database — start one with `docker compose up -d` first,
+or those tests will fail rather than skip.
 
 ### 3. CLI Tooling Commands (`foundry`)
 Run the unified `Foundry.Cli` executable:
@@ -70,7 +72,37 @@ foundry test schema.json --output-dir tests/
 
 # Boot visual Studio IDE in browser
 foundry studio --port 5100
+
+# Validate a schema; exits non-zero on error, so it works as a CI gate
+foundry validate schema.json
 ```
+
+### 4. AI-Assisted Modelling (Local Models Only)
+
+Foundry's AI toolchain runs against a local [Ollama](https://ollama.com) instance —
+no domain model leaves the machine. The model authors **IR**, never C#; the compiler
+turns IR into code, so infrastructure concerns (tenancy, encryption, indexing, outbox)
+cannot be got wrong by the model, because it does not write that layer.
+
+```bash
+# Emit the skill bundle a local model needs: IR JSON Schema, vocabulary,
+# diagnostics catalogue and verified golden examples
+foundry ai-spec --out .foundry/skill
+
+# Generate a validated IR document from natural language
+foundry ai "Model a clinic with multi-tenant patients and an encrypted email" --out schema.json
+
+# Measure how reliably your model authors IR, per construct
+foundry eval --runs 3 --difficulty Hard
+```
+
+Configure via `FOUNDRY_OLLAMA_HOST` and `FOUNDRY_OLLAMA_MODEL` (defaults:
+`http://localhost:11434`, `qwen3-coder:30b`). Generation is grammar-constrained to
+the IR schema and validated, with failures fed back to the model for repair.
+
+Measured accuracy for `qwen3-coder:30b`: **100%** on the 30 core cases, **40%** on
+the 10 hard cases (business phrasing, buried requirements, multi-entity domains),
+with **100% schema-valid output in both bands**.
 
 ### 4. VS Code Extension Integration
 Build and launch the Studio IDE directly inside VS Code:
