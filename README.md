@@ -42,19 +42,52 @@ graph TD
 
 ## 🚀 Getting Started
 
-### 1. Build and Compile the Solution
-All 21 projects are covered by a solution file at the repository root:
+### Prerequisites
+
+- **.NET 10 SDK** — `dotnet --version` should report `10.0.x`
+- **Node.js 20+** — required to build the Studio bundle, which the CLI embeds
+- **Docker** — the MongoDB and API test suites talk to a real database
+
+### 1. Clone and Build
+
+```bash
+git clone https://github.com/prajuaba/foundry.git
+cd foundry
+```
+
+Build the Studio bundle **before** the solution. `Foundry.Cli` embeds
+`foundry-studio/dist/index.html` as a resource, and `dist/` is a build artifact that is
+deliberately not committed. Skipping this step is not fatal — the build warns and only the
+`foundry studio` command becomes unavailable — but the CLI is incomplete without it:
+
+```bash
+cd foundry-studio && npm ci && npm run build && cd ..
+```
+
+Then build all 21 projects via the solution file at the repository root:
+
 ```bash
 dotnet build Foundry.slnx
 ```
 
 ### 2. Run the Test Suites
+
+Start the infrastructure first. The MongoDB and API suites talk to a real database and
+**fail rather than skip** without it:
+
+```bash
+docker compose up -d
+```
+
+Then run the whole solution in one command:
+
 ```bash
 dotnet test Foundry.slnx
 ```
-Current state: 131 compiler, 75 integration, 29 MongoDB, 23 API. The MongoDB and
-API suites talk to a real database — start one with `docker compose up -d` first,
-or those tests will fail rather than skip.
+
+Expect **258 passing**: 131 compiler, 75 integration, 29 MongoDB, 23 API. Run it this way
+rather than per-project — a solution-wide run exercises project interactions that
+individual runs miss, and it is exactly what CI does.
 
 ### 3. CLI Tooling Commands (`foundry`)
 Run the unified `Foundry.Cli` executable:
@@ -104,7 +137,7 @@ Measured accuracy for `qwen3-coder:30b`: **100%** on the 30 core cases, **40%** 
 the 10 hard cases (business phrasing, buried requirements, multi-entity domains),
 with **100% schema-valid output in both bands**.
 
-### 4. VS Code Extension Integration
+### 5. VS Code Extension Integration
 Build and launch the Studio IDE directly inside VS Code:
 ```bash
 cd foundry-vscode
@@ -147,7 +180,7 @@ docker compose up -d
 
 The integration test suite verifies partitioning logic, multi-tenancy, soft-delete transactions, caching, file processing, idempotency, envelope encryption, outbox dispatching, external connectors, and pipeline behaviors.
 
-To run all unit and integration tests:
+To run all unit and integration tests (with `docker compose up -d` already running):
 ```bash
-dotnet test
+dotnet test Foundry.slnx
 ```

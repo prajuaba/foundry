@@ -61,6 +61,39 @@ exists on its own repository interface. Nothing caught it, because no test had e
 compiled the output. `GeneratedCodeCompilesTests` now does, and found four bugs in under an
 hour by exercising reality instead of asserting on strings.
 
+### The clearest example: the repository itself could not be built
+
+Found the same day this document was first written, and worth recording because it is the
+pattern operating at the largest possible scale.
+
+The root repository recorded its seven sibling modules as **gitlinks** (mode `160000`) with
+no `.gitmodules` file. Git therefore had no path-to-URL mapping for them. The consequences:
+
+- `git clone` produced seven **empty** directories.
+- `git submodule update --init` failed outright — *"No url found for submodule path"*.
+- `dotnet restore` could not find ~15 of the projects referenced by `Foundry.slnx`.
+- **CI had never passed. Not once, on any commit, since the workflow was added.**
+
+Every `git push` reported success. The local working tree built and tested clean, because
+the seven directories happened to be populated on that one machine. Nothing anywhere
+reported a problem, and the published repository was unusable by every person and system
+other than its author.
+
+It was found by cloning the repo from GitHub and building *that*, rather than reasoning
+about it — which immediately exposed a second hidden dependency underneath: `Foundry.Cli`
+embedded `foundry-studio/dist/index.html`, a correctly-gitignored build artifact, so a
+clean clone failed with CS1566 until someone ran an undocumented `npm run build`. And
+underneath *that*, a third: `dotnet test Foundry.slnx` tried to run the `Foundry.Testing`
+helper library as a suite and exited 1 while all 258 tests passed — invisible for as long
+as the four suites were run individually rather than solution-wide.
+
+Three defects, stacked, each masked by the one above it. The generalisable lessons:
+
+1. **Verify against a fresh clone, not your working tree.** A working tree accumulates
+   state that the repository does not contain.
+2. **Run the command CI runs.** "All suites green" and `dotnet test Foundry.slnx` were not
+   the same statement, and only one of them was the one that mattered.
+
 ---
 
 ## 3. Coverage reality
@@ -78,9 +111,11 @@ Every area that *was* tested turned out to contain multiple real defects before 
 examined. There is no reason to assume the other nine differ, and currently no mechanism
 that would tell us.
 
-All suites are green as of this writing, and there are zero vulnerable NuGet packages. CI
+All 258 tests pass and there are zero vulnerable NuGet packages. CI
 (`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
-a Studio typecheck.
+a Studio typecheck; it **first went green on `bf3e227`**, after the three repository-level
+defects in section 2 were fixed. The seven modules are now vendored into the root
+repository, so a clone builds.
 
 ---
 
