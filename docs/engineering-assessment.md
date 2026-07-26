@@ -249,13 +249,29 @@ produced a valid container under `ValidateOnBuild`/`ValidateScopes`, and the **r
 sink** correctly honours `[RealTime(false)]` while still writing audit records. Tenant isolation
 is the highest-consequence surface in the framework, so a negative result there is a real finding.
 
-**One unresolved flake.** Two tests in `FoundryMongo.Tests.RepositoryAuditTests` failed once
-during a solution-wide run and could not be reproduced in eight subsequent runs (five isolated,
-one paired with the integration suite, two solution-wide). Both use mocks rather than the real
-database, so contention is not the obvious explanation; the leading hypothesis is order
-dependence on global MongoDB driver state, which this suite has exhibited before. It is recorded
-rather than closed — a suite that fails one run in ten undermines every other claim in this
-document, and it must be reproduced before it is called fixed.
+**The flake: mechanism removed, root cause never reproduced.** Stated that way deliberately, because
+the two are not the same thing and only one of them is proven.
+
+The suites that share process-global state now run serially, and the MongoDB serialization
+configuration is registered from a module initializer before any test starts rather than incidentally
+by whichever test called `AddFoundryMongo` first. That removes the class of nondeterminism: xUnit runs
+test classes in parallel by default, MongoDB freezes a type's class map on first use, and NSubstitute
+queues argument matchers per thread across async continuations — so *which* test observed *which*
+global configuration depended on thread scheduling. This suite had already produced one confirmed bug
+of exactly that shape, where `FullFlow_WithRealMongoDB` passed or failed according to whether another
+test's `AddFoundryMongo` call had run first.
+
+What is **not** established: that this was the cause of the two specific failures observed. They were
+never reproduced — 12 isolated runs, 6 under deliberate CPU load, and repeated solution-wide runs all
+passed, and the original assertion message was not captured. Several plausible mechanisms were checked
+and eliminated by reading the code: the audit sink is per-instance, the property cache is a
+`ConcurrentDictionary`, the test cursor is per-test, and the diff computation uses CLR property names
+rather than BSON element names, so the camelCase convention cannot affect it.
+
+The honest summary is that a real hazard was removed and the specific failure remains unexplained. The
+cost of serialising was measured rather than assumed: the Mongo suite went from ~230ms to ~490ms and
+the integration suite from 6s to 7-9s. **If it recurs, capture the assertion message first** — that is
+the piece of evidence this investigation lacked, and without it any further fix is another guess.
 
 No module is now wholly unverified. That is a floor, not a finish: the suites added today
 target the highest-consequence surface of each module, not its whole surface area.
