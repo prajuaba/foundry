@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { deriveApiManifest, crudRouteFor } from './manifest';
+import { compileToCs, deriveApiManifest, crudRouteFor } from './compiler';
 
 /**
  * Obtaining the manifest from the compiler.
@@ -96,5 +96,107 @@ describe('crudRouteFor', () => {
 
   it('handles an empty name without producing a broken route', () => {
     expect(crudRouteFor('')).toBe('/api');
+  });
+});
+
+describe('compileToCs', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const schema = { Namespace: 'Test.Domain', Entities: [], Enums: [] };
+
+  it('returns the files the compiler produced', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ files: { 'Customer.cs': 'public partial record Customer;' } }), {
+          status: 200,
+        }),
+      ),
+    );
+
+    await expect(compileToCs(schema)).resolves.toEqual({
+      'Customer.cs': 'public partial record Customer;',
+    });
+  });
+
+  it('posts the schema to the compile endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{"files":{}}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await compileToCs(schema);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain('/api/compile');
+    expect(JSON.parse(init.body)).toEqual(schema);
+  });
+
+  it('returns an empty map when the compiler emitted no files', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 200 })));
+
+    await expect(compileToCs(schema)).resolves.toEqual({});
+  });
+
+  it('explains that the backend must be running when it cannot be reached', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+
+    await expect(compileToCs(schema)).rejects.toThrow(/backend/i);
+  });
+
+  it('surfaces the compiler’s rejection rather than returning nothing', async () => {
+    // An empty preview with no explanation reads as "this schema has no entities", which is the wrong
+    // conclusion and sends someone editing a model that was fine.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response('{"error":"Invalid schema. Namespace is required."}', {
+          status: 400,
+          statusText: 'Bad Request',
+        }),
+      ),
+    );
+
+    await expect(compileToCs(schema)).rejects.toThrow(/400|Namespace is required/);
+  });
+
+  it('never falls back to generating C# locally', async () => {
+    // The reason the TypeScript generators were removed. A local fallback would reintroduce output that
+    // does not match `foundry compile` -- previously including a namespace that does not exist and a
+    // missing `partial` modifier.
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+
+    await expect(compileToCs(schema)).rejects.toThrow();
+  });
+});
+
+describe('compileToCs filenames', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('appends .cs, matching what the compiler writes to disk', async () => {
+    // The compiler keys files by path without an extension and appends .cs in its writer. Without
+    // mirroring that, Studio offered downloads named "Customer" with no extension.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ files: { Customer: 'x', 'Handlers/SubmitOrderHandler': 'y' } }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const files = await compileToCs({ Namespace: 'Test.Domain' });
+
+    expect(Object.keys(files).sort()).toEqual(['Customer.cs', 'Handlers/SubmitOrderHandler.cs']);
+  });
+
+  it('does not double up an extension the compiler already supplied', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ files: { 'Customer.cs': 'x' } }), { status: 200 })),
+    );
+
+    expect(Object.keys(await compileToCs({ Namespace: 'Test.Domain' }))).toEqual(['Customer.cs']);
   });
 });

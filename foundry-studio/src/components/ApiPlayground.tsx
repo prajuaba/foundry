@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useStore } from '../store';
-import { crudRouteFor } from '../manifest';
+import { crudRouteFor } from '../compiler';
 import { Play, Send, AlertCircle, Clock, CheckCircle2, ShieldCheck, Cpu, FileText, Zap, RefreshCw } from 'lucide-react';
 
 interface ProtocolResult {

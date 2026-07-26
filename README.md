@@ -90,7 +90,7 @@ Expect **603 C# tests passing**: 153 compiler, 75 integration, 73 rules, 63 file
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
 
-Studio is TypeScript and has its own suite (20 tests):
+Studio is TypeScript and has its own suite (28 tests):
 
 ```bash
 cd foundry-studio && npm test

@@ -102,7 +102,7 @@ Every module now has tests, plus the integration suite:
 
 | Has tests | Untested |
 | --------- | --------------- |
-| `foundry-schema` (153) · `foundry-integration-tests` (75) · `foundry-rules` (73) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) · `foundry-testing` (26) · `foundry-cli` (21) · `foundry-studio` (20) | *(none)* |
+| `foundry-schema` (153) · `foundry-integration-tests` (75) · `foundry-rules` (73) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) · `foundry-testing` (26) · `foundry-cli` (21) · `foundry-studio` (28) | *(none)* |
 
 Every module now has at least one test suite. Studio's 7.5k lines of TypeScript were previously verified only by `tsc`; it now has vitest and a CI job.
 
@@ -264,10 +264,29 @@ C# side. **That is a mirrored implementation, not a single one** — a weaker gu
 deliberately to keep the editor responsive and offline, with a shared table as the thing that keeps it
 honest. Worth naming as residual risk rather than calling it solved.
 
-**A third duplication remains and is larger than this one:** `StudioWorkspace` generates C# previews in
-TypeScript (`generateCsCode`, `generateEnumCode`) — a browser reimplementation of `PocoGenerator`. Same
-shape, same failure mode, and nothing pins the two together. The backend already exposes
-`POST /api/compile`, so the fix is available; it was out of scope here.
+### The C# preview duplication is gone too
+
+There were **six** TypeScript generators, not the two originally recorded: entity, enum, DTO and handler
+in `StudioWorkspace`, plus a second copy of the DTO and handler pair in `ApiDesigner`. All of them
+reimplemented `PocoGenerator`, and all had drifted far enough that the preview was misleading rather
+than merely stale:
+
+- They emitted `using FoundryMongo.Domain.Entities;` — a namespace that does not exist. The compiler
+  emits `Foundry.Core.Entities`. The previewed code would not compile.
+- They omitted `partial`, which the whole `*.Custom.cs` scaffold-preservation design depends on. A
+  developer copying the preview lost the extension point with no indication.
+- They omitted the generated-file header, `#nullable enable`, validation attributes, `[JsonIgnore]` on
+  soft-delete fields, compound indexes and workflow interfaces.
+
+A preview that differs from the real output is worse than none, because it is read *as* the output.
+Studio now fetches from `POST /api/compile`, so what it shows is what `foundry compile` writes — 334
+lines of duplicated generation deleted against 254 added, most of the additions being tests and error
+handling. One detail worth recording: the compiler keys files by path *without* an extension and appends
+`.cs` in its writer, so the client mirrors that; without it, downloads arrived as extensionless files.
+
+Both new clients fail loudly when the backend is unavailable and never fall back to local generation — a
+fallback is exactly how the divergence would return. The preview empties and shows the reason, because
+an empty list with no explanation reads as "this schema has no entities".
 
 Four areas came back clean, which is worth recording as evidence rather than left unsaid:
 **ambient tenant propagation** held under 50 interleaved flows, the **serialization defaults**

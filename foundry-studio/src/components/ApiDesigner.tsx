@@ -1,118 +1,18 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../store';
-import { crudRouteFor } from '../manifest';
-import type { ClassNode, DtoModel, DtoProperty, CustomEndpoint, Assignment } from '../types';
+import { compileToCs, crudRouteFor } from '../compiler';
+import type { ClassNode, DtoProperty, CustomEndpoint, Assignment } from '../types';
 import { Search, Plus, Trash2, Shield, Globe, Clock, Copy, Check, Link, Type, Braces, Database } from 'lucide-react';
 
 // Frontend C# generator for DTOs
-const generateDtoCsCode = (dto: DtoModel, namespace: string) => {
-  const propertiesLines: string[] = [];
-  dto.properties.forEach((prop: DtoProperty) => {
-    const requiredKeyword = prop.isRequired ? 'required ' : '';
-    const initKeyword = 'get; init;';
-    let defaultValue = '';
-    if (prop.type === 'string') defaultValue = ' = string.Empty;';
-    else if (prop.type === 'bool') defaultValue = ' = false;';
-    else if (['int', 'decimal', 'double', 'float'].includes(prop.type)) defaultValue = ' = 0;';
-
-    const attributes: string[] = [];
-    if (prop.attributes && prop.attributes.includes('Email')) attributes.push('[EmailAddress]');
-    if (prop.attributes && prop.attributes.includes('Phone')) attributes.push('[Phone]');
-    if (prop.attributes && prop.attributes.includes('Url')) attributes.push('[Url]');
-    const attrPrefix = attributes.length > 0 ? '    ' + attributes.join('\n    ') + '\n' : '';
-
-    propertiesLines.push(`${attrPrefix}    public ${requiredKeyword}${prop.type} ${prop.name} { ${initKeyword} }${defaultValue}`);
-  });
-
-  const propertiesBody = propertiesLines.length > 0 ? '\n' + propertiesLines.join('\n\n') + '\n' : '';
-
-  return `using System;
-using System.ComponentModel.DataAnnotations;
-using MongoDB.Bson;
-
-namespace ${namespace};
-
-public record ${dto.name}
-{${propertiesBody}}`;
-};
-
-// Frontend C# generator for Custom Handlers
-const generateHandlerCsCode = (ep: CustomEndpoint, namespace: string) => {
-  const handlerName = ep.requestType + "Handler";
-  const requestType = ep.requestType;
-  const responseType = ep.method === 'GET' ? (ep.requestType.replace("Query", "Response").replace("Request", "Response")) : "bool";
-  const repoType = ep.targetEntity ? `IRepository<${ep.targetEntity}>` : null;
-
-  let body = "";
-  if (ep.operationType === 'Query') {
-    body = `        var items = await _repository.FindAsync(
-            x => x.${ep.filterField || 'Id'} == request.${ep.filterSourceValue || 'Id'},
-            cancellationToken: cancellationToken);
-
-        return new ${responseType}
-        {
-            // Auto-projected from ${ep.targetEntity} records
-            Items = items.Select(x => new ${ep.targetEntity}Dto
-            {
-                // Property mappings appear here
-            }).ToList()
-        };`;
-  } else if (ep.operationType === 'Update') {
-    body = `        var entity = await _repository.GetByIdAsync(request.${ep.filterSourceValue || 'Id'});
-        if (entity == null)
-        {
-            return false;
-        }
-
-        // Apply visual assignments
-` + (ep.assignments || []).map((a: Assignment) => `        entity.${a.entityProperty} = request.${a.sourceValue};`).join('\n') + `
-
-        await _repository.UpdateAsync(entity);
-        return true;`;
-  } else if (ep.operationType === 'Insert') {
-    body = `        var entity = new ${ep.targetEntity}
-        {
-            // Auto-mapped from request payload properties
-        };
-
-        await _repository.AddAsync(entity);
-        return true;`;
-  } else {
-    body = `        // Write your custom MediatR query/command logic here
-        throw new NotImplementedException("Custom logic handler.");`;
-  }
-
-  const constructor = repoType ? `    private readonly ${repoType} _repository;
-
-    public ${handlerName}(${repoType} repository)
-    {
-        _repository = repository;
-    }
-` : `    public ${handlerName}()
-    {
-    }`;
-
-  return `using System;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using MediatR;
-using MongoDB.Bson;
-using FoundryCore.Entities;
-using FoundryMongo.Repositories;
-using ${namespace};
-
-namespace ${namespace}.Handlers;
-
-public class ${handlerName} : IRequestHandler<${requestType}, ${responseType}>
-{
-${constructor}
-    public async Task<${responseType}> Handle(${requestType} request, CancellationToken cancellationToken)
-    {
-${body}
-    }
-}`;
-};
+// C# previews come from the compiler, not from here.
+//
+// This file carried its own DTO and handler generators -- a second copy of the pair that StudioWorkspace
+// had, and a third implementation of output the C# PocoGenerator owns. They emitted code that would not
+// compile against the real libraries, so the "live preview" showed something other than what
+// `foundry compile` produces.
+//
+// The preview is now looked up from the compiler's output. See src/compiler.ts.
 
 export const ApiDesigner: React.FC = () => {
   const {
@@ -132,6 +32,33 @@ export const ApiDesigner: React.FC = () => {
     updateConnector,
     deleteConnector
   } = useStore();
+
+  // C# previews are the compiler's output, fetched rather than reimplemented. Debounced, because the
+  // designer changes on every keystroke.
+  const [compiledFiles, setCompiledFiles] = useState<Record<string, string>>({});
+  const [compileMessage, setCompileMessage] = useState<string | null>(null);
+  const { exportToSchema } = useStore();
+
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const files = await compileToCs(exportToSchema());
+        if (cancelled) return;
+        setCompiledFiles(files);
+        setCompileMessage(null);
+      } catch (error) {
+        if (cancelled) return;
+        setCompiledFiles({});
+        setCompileMessage(error instanceof Error ? error.message : String(error));
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [exportToSchema, nodes, dtos, customEndpoints, namespace]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
@@ -265,9 +192,13 @@ export const ApiDesigner: React.FC = () => {
       const ep = selectedItemDetail.ep;
       if (!ep) return '';
       
-      // If it has auto-generated visual MongoDB mappings, show C# preview!
+      // If it has auto-generated visual MongoDB mappings, show the compiler's C# for it.
       if (ep.operationType && ep.operationType !== 'Custom') {
-        return generateHandlerCsCode(ep, namespace);
+        return (
+          compiledFiles[`Handlers/${ep.requestType}Handler.cs`] ??
+          compileMessage ??
+          'Generating…'
+        );
       }
 
       // Fallback: show JSON mapping manifest entry
@@ -286,10 +217,10 @@ export const ApiDesigner: React.FC = () => {
     } else if (selectedItemDetail.type === 'dto') {
       const dto = selectedItemDetail.dto;
       if (!dto) return '';
-      return generateDtoCsCode(dto, namespace);
+      return compiledFiles[`${dto.name}.cs`] ?? compileMessage ?? 'Generating…';
     }
     return '';
-  }, [selectedItemDetail, namespace]);
+  }, [selectedItemDetail, namespace, compiledFiles, compileMessage]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(livePreviewContent);

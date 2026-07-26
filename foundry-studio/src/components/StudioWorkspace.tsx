@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useRef, type DragEvent } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef, type DragEvent } from 'react';
 import {
   ReactFlow,
   Controls,
@@ -10,7 +10,7 @@ import {
   useReactFlow
 } from '@xyflow/react';
 import { useStore } from '../store';
-import { deriveApiManifest } from '../manifest';
+import { compileToCs, deriveApiManifest } from '../compiler';
 import type { ClassNode } from '../types';
 import UmlClassNode from './UmlClassNode';
 import { UmlEnumNode } from './UmlEnumNode';
@@ -50,194 +50,17 @@ const edgeTypes: EdgeTypes = {
   orthogonal: OrthogonalEdge,
 };
 
-// Frontend implementation of C# code generator to allow direct export from schema JSON keys (Capitalized)
-const generateCsCode = (entity: any, namespace: string) => {
-  const keyProperty = entity.Properties.find((p: any) => p.IsKey);
-  const keyType = keyProperty?.Type || 'ObjectId';
-  
-  const interfaces = [];
-  if (entity.BaseClass) {
-    interfaces.push(entity.BaseClass);
-  } else {
-    interfaces.push('BaseEntity<' + keyType + '>');
-  }
-  interfaces.push('IVersionable');
-  if (entity.SoftDelete) interfaces.push('ISoftDelete');
-  
-  const interfaceList = interfaces.join(', ');
-  const propertiesLines: string[] = [];
-
-  entity.Properties.forEach((prop: any) => {
-    if (prop.IsKey) return;
-    
-    const type = prop.Type;
-    const requiredKeyword = prop.Attributes.includes('Required') ? 'required ' : '';
-    const initKeyword = 'get; init';
-    
-    const attributes: string[] = [];
-    if (prop.Attributes.includes('UniqueIndex') || prop.Attributes.includes('Unique')) {
-      attributes.push('[Indexed(Unique = true)]');
-    } else if (prop.Attributes.includes('Index')) {
-      attributes.push('[Indexed]');
-    }
-    
-    if (prop.Attributes.includes('TextIndex')) attributes.push('[TextIndexed]');
-    if (prop.Attributes.includes('Encrypt')) attributes.push('[SensitiveData(Protection = ProtectionType.Encrypt)]');
-    if (prop.Attributes.includes('Mask')) attributes.push('[SensitiveData(Protection = ProtectionType.Mask)]');
-    if (prop.Attributes.includes('MaskEmail')) attributes.push('[SensitiveData(Protection = ProtectionType.Mask, MaskingType = MaskingType.Email)]');
-
-    const attrPrefix = attributes.length > 0 ? '    ' + attributes.join('\n    ') + '\n' : '';
-    let defaultValue = '';
-    if (type === 'string') defaultValue = ' = string.Empty;';
-    else if (type === 'bool') defaultValue = ' = false;';
-    else if (['int', 'decimal', 'double', 'float'].includes(type)) defaultValue = ' = 0;';
-    else if (prop.IsEnum) defaultValue = ` = default(${type});`;
-
-    propertiesLines.push(`${attrPrefix}    public ${requiredKeyword}${type} ${prop.Name} { ${initKeyword}; }${defaultValue}`);
-  });
-
-  if (entity.SoftDelete) {
-    propertiesLines.push('    [Indexed]\n    public bool IsDeleted { get; init; } = false;');
-    propertiesLines.push('    public DateTime? DeletedAt { get; init; }');
-  }
-
-  const propertiesBody = propertiesLines.length > 0 ? '\n' + propertiesLines.join('\n\n') + '\n' : '';
-
-  return `using System;
-using MongoDB.Bson;
-using FoundryMongo.Domain.Entities;
-using FoundryMongo.Domain.Filters;
-
-namespace ${namespace};
-
-public record ${entity.Name} : ${interfaceList}
-{${propertiesBody}}`;
-};
-
-const generateEnumCode = (enumDef: any, namespace: string) => {
-  const values = enumDef.Values.join(',\n    ');
-  return `namespace ${namespace};
-
-public enum ${enumDef.Name}
-{
-    ${values}
-}`;
-};
-
-const generateDtoCsCode = (dto: any, namespace: string) => {
-  const propertiesLines: string[] = [];
-  (dto.Properties || dto.properties || []).forEach((prop: any) => {
-    const requiredKeyword = prop.IsRequired || prop.isRequired ? 'required ' : '';
-    const initKeyword = 'get; init;';
-    let defaultValue = '';
-    if (prop.Type === 'string' || prop.type === 'string') defaultValue = ' = string.Empty;';
-    else if (prop.Type === 'bool' || prop.type === 'bool') defaultValue = ' = false;';
-    else if (['int', 'decimal', 'double', 'float'].includes(prop.Type || prop.type)) defaultValue = ' = 0;';
-
-    const attributes: string[] = [];
-    const attrs = prop.Attributes || prop.attributes || [];
-    if (attrs.includes('Email')) attributes.push('[EmailAddress]');
-    if (attrs.includes('Phone')) attributes.push('[Phone]');
-    if (attrs.includes('Url')) attributes.push('[Url]');
-    const attrPrefix = attributes.length > 0 ? '    ' + attributes.join('\n    ') + '\n' : '';
-
-    propertiesLines.push(`${attrPrefix}    public ${requiredKeyword}${prop.Type || prop.type} ${prop.Name || prop.name} { ${initKeyword} }${defaultValue}`);
-  });
-
-  const propertiesBody = propertiesLines.length > 0 ? '\n' + propertiesLines.join('\n\n') + '\n' : '';
-
-  return `using System;
-using System.ComponentModel.DataAnnotations;
-using MongoDB.Bson;
-
-namespace ${namespace};
-
-public record ${dto.Name || dto.name}
-{${propertiesBody}}`;
-};
-
-const generateHandlerCsCode = (ep: any, namespace: string) => {
-  const reqType = ep.RequestType || ep.requestType;
-  const targetEntity = ep.TargetEntity || ep.targetEntity;
-  const operationType = ep.OperationType || ep.operationType || 'Custom';
-  const filterField = ep.FilterField || ep.filterField;
-  const filterSourceValue = ep.FilterSourceValue || ep.filterSourceValue;
-  const assignments = ep.Assignments || ep.assignments || [];
-
-  const handlerName = reqType + "Handler";
-  const responseType = ep.Method === 'GET' || ep.method === 'GET' ? (reqType.replace("Query", "Response").replace("Request", "Response")) : "bool";
-  const repoType = targetEntity ? `IRepository<${targetEntity}>` : null;
-
-  let body = "";
-  if (operationType === 'Query') {
-    body = `        var items = await _repository.FindAsync(
-            x => x.${filterField || 'Id'} == request.${filterSourceValue || 'Id'},
-            cancellationToken: cancellationToken);
-
-        return new ${responseType}
-        {
-            // Auto-projected from ${targetEntity} records
-            Items = items.Select(x => new ${targetEntity}Dto
-            {
-                // Property mappings appear here
-            }).ToList()
-        };`;
-  } else if (operationType === 'Update') {
-    body = `        var entity = await _repository.GetByIdAsync(request.${filterSourceValue || 'Id'});
-        if (entity == null)
-        {
-            return false;
-        }
-
-        // Apply visual assignments
-` + assignments.map((a: any) => `        entity.${a.entityProperty || a.EntityProperty} = request.${a.sourceValue || a.SourceValue};`).join('\n') + `
-
-        await _repository.UpdateAsync(entity);
-        return true;`;
-  } else if (operationType === 'Insert') {
-    body = `        var entity = new ${targetEntity}
-        {
-            // Auto-mapped from request payload properties
-        };
-
-        await _repository.AddAsync(entity);
-        return true;`;
-  } else {
-    body = `        // Write your custom MediatR query/command logic here
-        throw new NotImplementedException("Custom logic handler.");`;
-  }
-
-  const constructor = repoType ? `    private readonly ${repoType} _repository;
-
-    public ${handlerName}(${repoType} repository)
-    {
-        _repository = repository;
-    }
-` : `    public ${handlerName}()
-    {
-    }`;
-
-  return `using System;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using MediatR;
-using MongoDB.Bson;
-using FoundryCore.Entities;
-using FoundryMongo.Repositories;
-using ${namespace};
-
-namespace ${namespace}.Handlers;
-
-public class ${handlerName} : IRequestHandler<${reqType}, ${responseType}>
-{
-${constructor}
-    public async Task<${responseType}> Handle(${reqType} request, CancellationToken cancellationToken)
-    {
-${body}
-    }
-}`;
-};
+// C# is generated by the compiler, not here.
+//
+// Four generators used to live in this file -- for entities, enums, DTOs and handlers -- reimplementing
+// PocoGenerator in TypeScript. They had drifted badly enough that the preview was misleading rather
+// than merely stale: they emitted `using FoundryMongo.Domain.Entities;`, a namespace that does not
+// exist, and omitted `partial`, which the whole *.Custom.cs scaffold-preservation design depends on.
+// A developer copying the preview got code that would not compile and silently lost the extension
+// point.
+//
+// The preview now comes from POST /api/compile, so what Studio shows is what `foundry compile` writes.
+// See src/compiler.ts.
 
 export const StudioWorkspace: React.FC = () => {
   const { 
@@ -454,36 +277,38 @@ export const StudioWorkspace: React.FC = () => {
     return exportToSchema();
   }, [exportToSchema, nodes, edges, namespace]);
 
-  const generatedCsFiles = useMemo(() => {
-    const files: Record<string, string> = {};
-    
-    schemaJson.Entities.forEach((entity: any) => {
-      if (entity.Name) {
-        files[`${entity.Name}.cs`] = generateCsCode(entity, namespace);
-      }
-    });
+  // Generated by the compiler, fetched rather than computed. Debounced because the canvas changes on
+  // every keystroke and each change would otherwise be a request.
+  const [generatedCsFiles, setGeneratedCsFiles] = useState<Record<string, string>>({});
+  const [compileError, setCompileError] = useState<string | null>(null);
 
-    schemaJson.Enums.forEach((enumDef: any) => {
-      if (enumDef.Name) {
-        files[`${enumDef.Name}.cs`] = generateEnumCode(enumDef, namespace);
-      }
-    });
+  useEffect(() => {
+    if (!schemaJson?.Namespace) {
+      setGeneratedCsFiles({});
+      return;
+    }
 
-    (schemaJson.Dtos || schemaJson.dtos || []).forEach((dto: any) => {
-      if (dto.Name) {
-        files[`${dto.Name}.cs`] = generateDtoCsCode(dto, namespace);
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const files = await compileToCs(schemaJson);
+        if (cancelled) return;
+        setGeneratedCsFiles(files);
+        setCompileError(null);
+      } catch (error) {
+        if (cancelled) return;
+        // The preview is emptied rather than left showing stale output, so it never presents code that
+        // does not correspond to the current canvas.
+        setGeneratedCsFiles({});
+        setCompileError(error instanceof Error ? error.message : String(error));
       }
-    });
+    }, 300);
 
-    (schemaJson.CustomEndpoints || schemaJson.customEndpoints || []).forEach((ep: any) => {
-      const reqType = ep.RequestType || ep.requestType;
-      if (reqType && reqType !== 'Void') {
-        files[`Handlers/${reqType}Handler.cs`] = generateHandlerCsCode(ep, namespace);
-      }
-    });
-
-    return files;
-  }, [schemaJson, namespace]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [schemaJson]);
 
   const apiMetrics = useMemo(() => {
     const entities = (nodes || [])
@@ -1164,6 +989,16 @@ export const StudioWorkspace: React.FC = () => {
               {previewTab === 'C#' && (
                 <div className="w-64 border-r border-slate-800 bg-slate-950/40 p-4 overflow-y-auto flex flex-col gap-1">
                   <span className="text-[10px] text-slate-500 font-mono block mb-2 uppercase tracking-wider">Generated files</span>
+                  {/* Surfaced, not swallowed: the preview is empty when the compiler cannot be reached,
+                      and the reason has to be visible or an empty list reads as "no entities". */}
+                  {compileError && (
+                    <div className="mb-3 rounded border border-rose-900/40 bg-rose-950/30 p-2 text-[10px] leading-relaxed text-rose-300">
+                      {compileError}
+                    </div>
+                  )}
+                  {!compileError && previewFiles.length === 0 && (
+                    <div className="mb-3 text-[10px] text-slate-500">Generating…</div>
+                  )}
                   {previewFiles.map(file => (
                     <button
                       key={file}
