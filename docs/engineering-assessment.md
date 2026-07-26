@@ -98,32 +98,44 @@ Three defects, stacked, each masked by the one above it. The generalisable lesso
 
 ## 3. Coverage reality
 
-Three modules have tests, plus the integration suite:
+Six modules have tests, plus the integration suite:
 
 | Has tests | No tests at all |
 | --------- | --------------- |
-| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-mongo` (29) · `foundry-api` (23) | `foundry-kafka` · `foundry-realtime` · `foundry-connectors` · `foundry-file-io` · `foundry-testing` · `foundry-cli` · `foundry-studio` |
+| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-api` (23) | `foundry-realtime` · `foundry-connectors` · `foundry-file-io` · `foundry-testing` · `foundry-cli` · `foundry-studio` |
 
-The still-untested list includes the **Kafka outbox** and ~7.5k lines of Studio TypeScript
-verified only by `tsc`.
+The still-untested list includes ~7.5k lines of Studio TypeScript verified only by `tsc`.
 
-**The prediction held in both modules covered on 2026-07-26.** `foundry-rules` yielded five
-defects, four in guard-condition evaluation, each failing by *silently blocking a transition*.
-`foundry-core` yielded five more: three in pagination metadata (a page count that saturated to
-`long.MaxValue` on a zero page size, an untrimmed seek sentinel returning `PageSize + 1` items,
-and `Map` dropping the cursor so a mapped result reported itself as the last page) and two in the
-audit trail (an insert rendered as `(no change → <String>)` — misdescribing the change *and*
-printing the type instead of the value).
+**The prediction held in all three modules covered on 2026-07-26**, and the defect count per
+module has not declined:
 
-Two areas came back clean, which is worth recording as evidence rather than left unsaid:
-**ambient tenant propagation** held under interleaved concurrency, and `AddFoundryRules`
-produced a valid container under `ValidateOnBuild`/`ValidateScopes`. Tenant isolation is the
-highest-consequence surface in the framework, so a negative result there is a real finding.
+- `foundry-rules` — **five**, four in guard-condition evaluation, each failing by *silently
+  blocking a transition* rather than erroring.
+- `foundry-core` — **five**: three in pagination metadata (a page count saturating to
+  `long.MaxValue` on a zero page size, an untrimmed seek sentinel returning `PageSize + 1`
+  items, and `Map` dropping the cursor so a mapped result reported itself as the last page) and
+  two in the audit trail (an insert rendered as `(no change → <String>)`, misdescribing the
+  change *and* printing the type instead of the value).
+- `foundry-kafka` — **five**, and these are the most serious found all day, because they
+  silently break the two guarantees the transactional outbox exists to provide. Ordering was
+  broken at both ends: a fresh `Guid` partition key per message spread one entity's mutations
+  across partitions, and the publisher requested a sort order it never received because
+  `FindManyAsync` ignores `sortOrder` when `sortBy` is null. Durability defaulted to
+  `Acks=Leader`, which acknowledges before replication — so a broker failure loses a message
+  the outbox has already marked processed. Plus an unvalidated `int`-to-`Acks` cast and a topic
+  name that could degrade to `-events` and publish there successfully.
 
-Seven modules remain, and nothing yet contradicts the assumption that they carry comparable
+Three areas came back clean, which is worth recording as evidence rather than left unsaid:
+**ambient tenant propagation** held under 50 interleaved flows, the **serialization defaults**
+were correct on every property including the deliberately-writable OCC token, and
+`AddFoundryRules` produced a valid container under `ValidateOnBuild`/`ValidateScopes`. Tenant
+isolation is the highest-consequence surface in the framework, so a negative result there is a
+real finding.
+
+Six modules remain, and nothing yet contradicts the assumption that they carry comparable
 defect density.
 
-All 359 tests pass and there are zero vulnerable NuGet packages. CI
+All 393 tests pass and there are zero vulnerable NuGet packages. CI
 (`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
 a Studio typecheck; it **first went green on `bf3e227`**, after the three repository-level
 defects in section 2 were fixed. The seven modules are now vendored into the root

@@ -58,6 +58,9 @@
   <Folder Name="/foundry-core/tests/">
     <Project Path="foundry-core/tests/Foundry.Core.Tests/Foundry.Core.Tests.csproj" />
   </Folder>
+  <Folder Name="/foundry-kafka/tests/">
+    <Project Path="foundry-kafka/tests/Foundry.Kafka.Tests/Foundry.Kafka.Tests.csproj" />
+  </Folder>
   <Folder Name="/foundry-schema/" />
   <Folder Name="/foundry-schema/backend/">
     <Project Path="foundry-schema/backend/Foundry.Schema.Backend.csproj" />

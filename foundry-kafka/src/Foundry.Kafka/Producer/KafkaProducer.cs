@@ -30,16 +30,47 @@ public class KafkaProducer : IKafkaProducer
     public KafkaProducer(IOptions<KafkaOptions> options)
     {
         var kafkaOptions = options.Value;
+
+        if (string.IsNullOrWhiteSpace(kafkaOptions.BootstrapServers))
+        {
+            // Building a producer with no brokers fails later, inside librdkafka, at the first
+            // publish rather than at startup -- so a misconfigured application starts cleanly and
+            // then silently accumulates unpublished outbox rows.
+            throw new InvalidOperationException(
+                "Kafka BootstrapServers is not configured. Set it via AddFoundryKafka(options => "
+                + "options.BootstrapServers = ...) or the bound configuration section.");
+        }
+
         var producerConfig = new ProducerConfig
         {
             BootstrapServers = kafkaOptions.BootstrapServers,
             ClientId = kafkaOptions.ClientId,
             LingerMs = kafkaOptions.ProducerOptions.LingerMs,
-            Acks = (Acks)kafkaOptions.ProducerOptions.Acks,
+            Acks = ParseAcks(kafkaOptions.ProducerOptions.Acks),
             CompressionType = Enum.TryParse<CompressionType>(kafkaOptions.ProducerOptions.CompressionType, true, out var compType) ? compType : Confluent.Kafka.CompressionType.None
         };
 
         _producer = new ProducerBuilder<string, string>(producerConfig).Build();
+    }
+
+    /// <summary>
+    /// Converts a configured acknowledgement level into a valid <see cref="Acks"/> value.
+    /// </summary>
+    /// <remarks>
+    /// The configured integer used to be cast straight to the enum. <c>Acks.All</c> is <c>-1</c>, so
+    /// a plausible-looking value such as <c>2</c> or <c>3</c> produced an undefined enum member that
+    /// librdkafka then interpreted however it liked — a silently wrong durability setting on the
+    /// path the outbox depends on.
+    /// </remarks>
+    internal static Acks ParseAcks(int configured)
+    {
+        if (!Enum.IsDefined(typeof(Acks), (Acks)configured))
+        {
+            throw new InvalidOperationException(
+                $"Kafka Acks value {configured} is not valid. Use 0 (none), 1 (leader) or -1 (all replicas).");
+        }
+
+        return (Acks)configured;
     }
 
     /// <inheritdoc/>

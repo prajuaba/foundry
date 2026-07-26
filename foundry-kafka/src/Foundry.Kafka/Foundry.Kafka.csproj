@@ -15,6 +15,12 @@
     <PackageReference Include="Confluent.Kafka" />
   </ItemGroup>
 
+  <!-- Acks parsing is an internal detail, tested directly rather than exposed publicly just to
+       make it reachable. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Foundry.Kafka.Tests" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="../../../foundry-core/src/Foundry.Core/Foundry.Core.csproj" />
   </ItemGroup>

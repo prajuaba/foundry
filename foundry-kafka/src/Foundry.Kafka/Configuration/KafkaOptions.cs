@@ -41,7 +41,18 @@ public class ProducerOptions
     /// <summary>
     /// Gets or sets the acknowledgment level for message delivery.
     /// </summary>
-    public int Acks { get; set; } = 1;
+    /// <remarks>
+    /// Maps to Confluent's <c>Acks</c>: <c>0</c> None, <c>1</c> Leader, <c>-1</c> All.
+    /// <para>
+    /// Defaults to <c>-1</c> (all in-sync replicas). It was <c>1</c>, which acknowledges as soon as
+    /// the partition leader holds the message — if that broker fails before replicating, the message
+    /// is lost after the producer has already reported success and the outbox row has been marked
+    /// processed. That breaks the at-least-once guarantee the transactional outbox exists to provide,
+    /// and it fails only under broker failure, so it would never show up in development.
+    /// Throughput is the thing a deployment should opt into, not durability.
+    /// </para>
+    /// </remarks>
+    public int Acks { get; set; } = -1;
 
     /// <summary>
     /// Gets or sets the compression type for messages.

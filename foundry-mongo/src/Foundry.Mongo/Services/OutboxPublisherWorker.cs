@@ -78,11 +78,21 @@ public sealed class OutboxPublisherWorker : BackgroundService
             return;
         }
 
-        // Query unprocessed messages with retry limits
+        // Query unprocessed messages with retry limits, oldest first.
+        //
+        // This passed sortBy: null with SortOrder.Descending, and FindManyAsync only applies a sort
+        // when sortBy is non-empty -- so no sort was applied at all and the requested order was
+        // silently ignored. Messages were published in whatever order MongoDB returned them, which
+        // defeats the ordering guarantee the outbox exists to provide.
+        //
+        // Sorted on "_id" rather than "CreatedAt": ObjectId is monotonic by generation time, and
+        // "_id" is the field name regardless of the camelCase convention pack the driver is
+        // registered with. Sorting by "CreatedAt" would silently target a field that does not exist
+        // under that convention, which is the same class of no-op being fixed here.
         var messages = await repository.FindManyAsync(
             m => m.ProcessedAt == null && m.RetryCount < 5,
-            sortBy: null,
-            sortOrder: SortOrder.Descending,
+            sortBy: "_id",
+            sortOrder: SortOrder.Ascending,
             limit: 100,
             session: null,
             ct: ct
