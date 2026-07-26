@@ -147,3 +147,63 @@ public class GraphQLAndSoapTests
         Assert.Contains("GetCustomer", error.Message);
     }
 }
+
+/// <summary>
+/// SOAP response deserialization failures.
+/// </summary>
+public class SoapDeserializationTests
+{
+    private sealed record Reply(string Name);
+
+    private sealed class StubHandler(string body) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, System.Text.Encoding.UTF8, "text/xml"),
+            });
+    }
+
+    private static SoapConnector Connector(string body) => new(
+        new HttpClient(new StubHandler(body)) { BaseAddress = new Uri("https://legacy.example.com/") },
+        new ConnectorOptions { Name = "legacy", BaseUrl = "https://legacy.example.com/" },
+        Microsoft.Extensions.Logging.Abstractions.NullLogger<SoapConnector>.Instance);
+
+    [Fact]
+    public async Task AnUnparseableResponseIsReportedRatherThanReturnedAsNothing()
+    {
+        // `catch { return default; }` made a schema mismatch on the remote side indistinguishable from
+        // a legitimately empty result, so an integration that had silently broken looked like a
+        // service with no data.
+        var connector = Connector("<html><body>Gateway timeout</body></html>");
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(
+            () => connector.ExecuteAsync<string, Reply>("GetCustomer", "<id>42</id>"));
+
+        Assert.Contains("could not be deserialized", error.Message);
+    }
+
+    [Fact]
+    public async Task TheFailureNamesTheConnectorAndTheExpectedType()
+    {
+        var connector = Connector("<html/>");
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(
+            () => connector.ExecuteAsync<string, Reply>("GetCustomer", "<id>42</id>"));
+
+        Assert.Contains("legacy", error.Message);
+        Assert.Contains("Reply", error.Message);
+    }
+
+    [Fact]
+    public async Task TheResponseBodyIsIncludedForDiagnosis()
+    {
+        // For SOAP the envelope is the only description of what actually came back.
+        var connector = Connector("<html><body>Gateway timeout</body></html>");
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(
+            () => connector.ExecuteAsync<string, Reply>("GetCustomer", "<id>42</id>"));
+
+        Assert.Contains("Gateway timeout", error.Message);
+    }
+}

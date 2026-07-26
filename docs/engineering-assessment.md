@@ -93,7 +93,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 603 C# tests across 12 suites |
+| `Build and test` | 619 C# tests across 12 suites |
 | `Studio tests and typecheck` | 28 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
 | `Runtime smoke test` | A scaffolded app boots, serves generated REST endpoints, persists, **restarts**, and serves the record back from MongoDB |
@@ -133,11 +133,11 @@ Every module has tests:
 | `foundry-core` | 52 |
 | `foundry-kafka` | 34 |
 | `foundry-mongo` | 29 |
-| `foundry-connectors` | 28 |
+| `foundry-connectors` | 31 |
 | `foundry-studio` | 28 |
 | `foundry-realtime` | 26 |
 | `foundry-testing` | 26 |
-| `foundry-api` | 23 |
+| `foundry-api` | 36 |
 | `foundry-cli` | 21 |
 
 **Nine modules went from zero tests to a suite each, and seven of the nine yielded five defects.** The

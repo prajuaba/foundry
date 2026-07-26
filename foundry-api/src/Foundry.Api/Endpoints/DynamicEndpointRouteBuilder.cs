@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel.DataAnnotations;
 using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
@@ -49,9 +50,10 @@ public static class DynamicEndpointRouteBuilder
             if (prop == null) continue;
 
             object? val = null;
+            // Declared outside the try so the failure message can quote the offending value.
+            var strVal = item.Value.ToString();
             try
             {
-                var strVal = item.Value.ToString();
                 if (prop.PropertyType == typeof(ObjectId))
                 {
                     val = ObjectId.Parse(strVal);
@@ -77,10 +79,22 @@ public static class DynamicEndpointRouteBuilder
                     val = Convert.ChangeType(strVal, prop.PropertyType);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException or ArgumentException)
             {
-                System.Diagnostics.Debug.WriteLine($"Failed to parse query parameter '{key}': {ex.Message}");
-                continue;
+                // Rejected, not skipped.
+                //
+                // This logged to Debug.WriteLine -- which is compiled out entirely in Release -- and
+                // then `continue`d, so a query parameter the caller could not have known was
+                // unparseable was silently dropped from the filter. The request returned 200 with a
+                // *wider* result set than asked for, and nothing recorded that a filter had been
+                // discarded. Silently widening a result set is the worst direction to fail in a
+                // framework whose main claim is tenant isolation.
+                //
+                // ValidationException maps to 400 in GlobalExceptionHandler, which is what an
+                // unparseable query value is.
+                throw new ValidationException(
+                    $"Query parameter '{key}' has value '{strVal}', which is not valid for "
+                    + $"{prop.Name} ({prop.PropertyType.Name}).");
             }
 
             var propExpr = Expression.Property(parameter, prop);

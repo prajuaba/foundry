@@ -350,11 +350,25 @@ namespace Foundry.Api.SourceGenerators
                         sb.AppendLine("                SearchCriterion[]? criteria = null;");
                         sb.AppendLine("                if (!string.IsNullOrEmpty(criteriaJson))");
                         sb.AppendLine("                {");
+                        // A malformed `criteria` is rejected, not ignored.
+                        //
+                        // This emitted `} catch {}` into every generated GET endpoint, so unparseable
+                        // criteria left `criteria` null and the query ran *without the caller's
+                        // filter* -- returning a 200 with the full, unfiltered result set and no
+                        // indication the filter had been dropped. Silently widening a result set is
+                        // the worst direction to fail in a multi-tenant framework.
                         sb.AppendLine("                    try {");
                         sb.AppendLine("                        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };");
                         sb.AppendLine("                        options.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());");
                         sb.AppendLine("                        criteria = JsonSerializer.Deserialize<SearchCriterion[]>(criteriaJson, options);");
-                        sb.AppendLine("                    } catch {}");
+                        sb.AppendLine("                    }");
+                        sb.AppendLine("                    catch (JsonException ex)");
+                        sb.AppendLine("                    {");
+                        sb.AppendLine("                        return Results.Problem(");
+                        sb.AppendLine("                            detail: \"The 'criteria' query parameter is not valid JSON: \" + ex.Message,");
+                        sb.AppendLine("                            statusCode: StatusCodes.Status400BadRequest,");
+                        sb.AppendLine("                            title: \"Invalid search criteria\");");
+                        sb.AppendLine("                    }");
                         sb.AppendLine("                }");
                         sb.AppendLine();
                         sb.AppendLine($"                var filterExpr = GeneratedFilterBuilders.BuildFilterExpression<{fullEntityType}>(context) ?? DynamicEndpointRouteBuilder.BuildFilterExpression<{fullEntityType}>(context);");

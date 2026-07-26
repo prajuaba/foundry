@@ -80,7 +80,7 @@ public class SoapConnector : IFoundryConnector
         return writer.ToString();
     }
 
-    private static TResponse? DeserializeFromSoapEnvelope<TResponse>(string soapXml)
+    private TResponse? DeserializeFromSoapEnvelope<TResponse>(string soapXml)
     {
         try
         {
@@ -88,9 +88,25 @@ public class SoapConnector : IFoundryConnector
             using var reader = new StringReader(soapXml);
             return (TResponse?)serializer.Deserialize(reader);
         }
-        catch
+        catch (Exception ex)
         {
-            return default;
+            // Reported, not swallowed. Returning default made an unparseable SOAP response
+            // indistinguishable from a legitimately empty one, so a schema mismatch on the remote
+            // side looked like "no results" -- the same failure the GraphQL connector had with its
+            // errors array. The envelope is included because for SOAP it is the only description of
+            // what actually came back.
+            var message = $"[{Name}] The SOAP response could not be deserialized to "
+                + $"{typeof(TResponse).Name}: {ex.Message}. Response: {Truncate(soapXml)}";
+
+            throw new HttpRequestException(message, ex);
         }
+    }
+
+    /// <summary>Truncates an envelope for inclusion in an error message.</summary>
+    private static string Truncate(string xml)
+    {
+        const int max = 1000;
+        if (string.IsNullOrEmpty(xml)) return "(empty)";
+        return xml.Length <= max ? xml : xml.Substring(0, max) + "... (truncated)";
     }
 }
