@@ -53,40 +53,21 @@ public class WorkflowEngine : IWorkflowEngine
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Delegates to <see cref="DynamicRuleEvaluator"/> rather than comparing values itself.
+    /// <para>
+    /// This method used to carry its own copy of the comparison logic, and the two drifted: the
+    /// business-rule evaluator understood enums, invariant-culture numbers and the <c>contains</c>
+    /// family, while this one did not. Guard conditions on an enum silently never matched (an
+    /// enum's TypeCode is its underlying integer, so <c>"Approved"</c> was parsed as a number),
+    /// dates could not be ordered, and decimals were parsed with the ambient culture so the same
+    /// workflow behaved differently on a machine using a comma decimal separator. None of that
+    /// failed loudly -- a false condition simply reports "guard condition failed" and the workflow
+    /// never advances.
+    /// </para>
+    /// </remarks>
     public bool EvaluateCondition(string propertyName, string op, string expectedValue, object requestPayload)
-    {
-        if (requestPayload == null) return false;
-        var prop = requestPayload.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-        if (prop == null) return false;
-
-        var val = prop.GetValue(requestPayload);
-        if (val == null) return expectedValue == "null" || string.IsNullOrEmpty(expectedValue);
-
-        var valType = val.GetType();
-        if (IsNumericType(valType))
-        {
-            if (!decimal.TryParse(expectedValue, out var expectedNum)) return false;
-            var currentNum = Convert.ToDecimal(val);
-            return op.ToLower() switch
-            {
-                "equal" => currentNum == expectedNum,
-                "notequal" => currentNum != expectedNum,
-                "lessthan" => currentNum < expectedNum,
-                "lessthanorequal" => currentNum <= expectedNum,
-                "greaterthan" => currentNum > expectedNum,
-                "greaterthanorequal" => currentNum >= expectedNum,
-                _ => false
-            };
-        }
-
-        var currentStr = val.ToString() ?? "";
-        return op.ToLower() switch
-        {
-            "equal" => currentStr.Equals(expectedValue, StringComparison.OrdinalIgnoreCase),
-            "notequal" => !currentStr.Equals(expectedValue, StringComparison.OrdinalIgnoreCase),
-            _ => false
-        };
-    }
+        => DynamicRuleEvaluator.Evaluate(requestPayload, propertyName, op, expectedValue);
 
     /// <inheritdoc />
     public async Task<ActionExecutionDetail> ExecuteActionAsync(

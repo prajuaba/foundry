@@ -102,7 +102,11 @@ Three modules have tests, plus the integration suite:
 
 | Has tests | No tests at all |
 | --------- | --------------- |
-| `foundry-schema` (131) · `foundry-mongo` (29) · `foundry-api` (23) · `foundry-integration-tests` (75) | `foundry-core` · `foundry-rules` · `foundry-kafka` · `foundry-realtime` · `foundry-connectors` · `foundry-file-io` · `foundry-testing` · `foundry-cli` · `foundry-studio` |
+| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-rules` (49) · `foundry-mongo` (29) · `foundry-api` (23) | `foundry-core` · `foundry-kafka` · `foundry-realtime` · `foundry-connectors` · `foundry-file-io` · `foundry-testing` · `foundry-cli` · `foundry-studio` |
+
+`foundry-rules` was covered on 2026-07-26 and the prediction above held: five defects in the
+first module examined, four of them in guard-condition evaluation, every one of which failed by
+*silently blocking a transition* rather than erroring. Eight modules remain.
 
 That untested list includes the **workflow engine**, the **Kafka outbox**, and ~7.5k lines
 of Studio TypeScript verified only by `tsc`.
@@ -111,7 +115,7 @@ Every area that *was* tested turned out to contain multiple real defects before 
 examined. There is no reason to assume the other nine differ, and currently no mechanism
 that would tell us.
 
-All 258 tests pass and there are zero vulnerable NuGet packages. CI
+All 307 tests pass and there are zero vulnerable NuGet packages. CI
 (`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
 a Studio typecheck; it **first went green on `bf3e227`**, after the three repository-level
 defects in section 2 were fixed. The seven modules are now vendored into the root

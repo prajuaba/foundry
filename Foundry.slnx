@@ -52,6 +52,9 @@
   <Folder Name="/foundry-rules/src/">
     <Project Path="foundry-rules/src/Foundry.Rules/Foundry.Rules.csproj" />
   </Folder>
+  <Folder Name="/foundry-rules/tests/">
+    <Project Path="foundry-rules/tests/Foundry.Rules.Tests/Foundry.Rules.Tests.csproj" />
+  </Folder>
   <Folder Name="/foundry-schema/" />
   <Folder Name="/foundry-schema/backend/">
     <Project Path="foundry-schema/backend/Foundry.Schema.Backend.csproj" />

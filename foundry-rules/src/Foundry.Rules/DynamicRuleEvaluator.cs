@@ -32,58 +32,99 @@ public static class DynamicRuleEvaluator
 
         var propertyValue = propertyInfo.GetValue(target);
 
-        // Handle null values
+        // Handle null values.
+        //
+        // This previously answered "does the expected value look like null?" and ignored the
+        // operator entirely, so `Notes notequal null` reported true for a null Notes -- the exact
+        // opposite of what it asserts. Ordering and substring operators have no meaning against
+        // null and are false rather than throwing.
         if (propertyValue == null)
         {
-            return string.IsNullOrEmpty(expectedValue) || 
-                   string.Equals(expectedValue, "null", StringComparison.OrdinalIgnoreCase);
+            var expectedIsNull = string.IsNullOrEmpty(expectedValue)
+                || string.Equals(expectedValue, "null", StringComparison.OrdinalIgnoreCase);
+
+            return op.ToLowerInvariant() switch
+            {
+                "equal" or "==" or "equals" => expectedIsNull,
+                "notequal" or "!=" or "notequals" => !expectedIsNull,
+                _ => false
+            };
         }
 
         var propertyType = propertyValue.GetType();
 
-        // Handle Enum properties
+        // Handle Enum properties.
+        //
+        // Must precede the numeric branch: an enum's TypeCode is that of its underlying integer,
+        // so a name-based comparison would otherwise be parsed as a number and always fail.
         if (propertyType.IsEnum)
         {
-            if (!Enum.TryParse(propertyType, expectedValue, true, out var enumValue))
-                return false;
+            // By name first ("Approved"), then by underlying ordinal ("2"). Studio writes the
+            // name; a hand-edited or serialised definition may carry the number.
+            if (Enum.TryParse(propertyType, expectedValue, true, out var enumValue) && enumValue is not null)
+            {
+                return CompareEquality(Equals(propertyValue, enumValue), op);
+            }
 
-            return Equals(propertyValue, enumValue);
+            if (decimal.TryParse(expectedValue, NumberStyles.Any, CultureInfo.InvariantCulture, out var ordinal))
+            {
+                var actualOrdinal = Convert.ToDecimal(propertyValue, CultureInfo.InvariantCulture);
+                return CompareDecimals(actualOrdinal, ordinal, op);
+            }
+
+            return false;
+        }
+
+        // Handle date properties.
+        //
+        // Dates are neither numeric nor orderable as strings, so they used to fall through to the
+        // string branch where "lessthan" is unsupported and silently returned false. Every
+        // deadline, escalation or expiry condition therefore blocked its own transition.
+        if (propertyValue is DateTime or DateTimeOffset)
+        {
+            if (!DateTimeOffset.TryParse(
+                    expectedValue,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                    out var expectedDate))
+            {
+                return false;
+            }
+
+            var actualDate = propertyValue switch
+            {
+                DateTime dateTime => new DateTimeOffset(
+                    dateTime.Kind == DateTimeKind.Unspecified
+                        ? DateTime.SpecifyKind(dateTime, DateTimeKind.Utc)
+                        : dateTime.ToUniversalTime()),
+                DateTimeOffset offset => offset.ToUniversalTime(),
+                _ => default
+            };
+
+            return CompareComparable(actualDate, expectedDate, op);
         }
 
         // Handle numeric properties
         if (IsNumericType(propertyType))
         {
-            if (!decimal.TryParse(propertyValue.ToString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var currentValue))
+            // Converted directly rather than round-tripped through ToString(). The value is already
+            // a number; formatting it first used the ambient culture, so under a locale with a
+            // comma decimal separator 100.50m became "100,50" and then failed to parse as
+            // invariant -- the condition returned false purely because of the server's locale.
+            decimal currentValue;
+            try
+            {
+                currentValue = Convert.ToDecimal(propertyValue, CultureInfo.InvariantCulture);
+            }
+            catch (OverflowException)
+            {
                 return false;
+            }
 
             if (!decimal.TryParse(expectedValue, NumberStyles.Any, CultureInfo.InvariantCulture, out var expectedDecimal))
                 return false;
 
-            switch (op.ToLowerInvariant())
-            {
-                case "equal":
-                case "==":
-                case "equals":
-                    return currentValue == expectedDecimal;
-                case "notequal":
-                case "!=":
-                case "notequals":
-                    return currentValue != expectedDecimal;
-                case "lessthan":
-                case "<":
-                    return currentValue < expectedDecimal;
-                case "lessthanorequal":
-                case "<=":
-                    return currentValue <= expectedDecimal;
-                case "greaterthan":
-                case ">":
-                    return currentValue > expectedDecimal;
-                case "greaterthanorequal":
-                case ">=":
-                    return currentValue >= expectedDecimal;
-                default:
-                    return false;
-            }
+            return CompareDecimals(currentValue, expectedDecimal, op);
         }
 
         // Handle string/other properties
@@ -108,6 +149,46 @@ public static class DynamicRuleEvaluator
             default:
                 return false;
         }
+    }
+
+    /// <summary>
+    /// Applies an equality-only operator to an already-computed equality result.
+    /// </summary>
+    private static bool CompareEquality(bool areEqual, string op) => op.ToLowerInvariant() switch
+    {
+        "equal" or "==" or "equals" => areEqual,
+        "notequal" or "!=" or "notequals" => !areEqual,
+        _ => false
+    };
+
+    /// <summary>
+    /// Applies a comparison operator to two decimals.
+    /// </summary>
+    private static bool CompareDecimals(decimal actual, decimal expected, string op) =>
+        CompareComparable(actual, expected, op);
+
+    /// <summary>
+    /// Applies a comparison operator to any two comparable values of the same type.
+    /// </summary>
+    /// <remarks>
+    /// Shared by the numeric, enum-ordinal and date branches so the operator vocabulary cannot
+    /// diverge between them, which is how ordering came to be supported for numbers and silently
+    /// unsupported for dates.
+    /// </remarks>
+    private static bool CompareComparable<T>(T actual, T expected, string op) where T : IComparable<T>
+    {
+        var comparison = actual.CompareTo(expected);
+
+        return op.ToLowerInvariant() switch
+        {
+            "equal" or "==" or "equals" => comparison == 0,
+            "notequal" or "!=" or "notequals" => comparison != 0,
+            "lessthan" or "<" => comparison < 0,
+            "lessthanorequal" or "<=" => comparison <= 0,
+            "greaterthan" or ">" => comparison > 0,
+            "greaterthanorequal" or ">=" => comparison >= 0,
+            _ => false
+        };
     }
 
     private static bool IsNumericType(Type type)
