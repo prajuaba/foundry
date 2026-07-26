@@ -302,7 +302,7 @@ public class Program
     /// </remarks>
     private static async Task<int> HandleEvalCommandAsync(string[] args)
     {
-        string? host = null, model = null, mdOut = null, jsonOut = null, construct = null, caseId = null;
+        string? host = null, model = null, mdOut = null, jsonOut = null, construct = null, caseId = null, difficulty = null;
         var runs = 1;
         double minPass = 0;
         var list = false;
@@ -316,6 +316,7 @@ public class Program
                 case "--runs" when i + 1 < args.Length: int.TryParse(args[++i], out runs); break;
                 case "--construct" when i + 1 < args.Length: construct = args[++i]; break;
                 case "--case" when i + 1 < args.Length: caseId = args[++i]; break;
+                case "--difficulty" when i + 1 < args.Length: difficulty = args[++i]; break;
                 case "--out" or "-o" when i + 1 < args.Length: mdOut = args[++i]; break;
                 case "--json" when i + 1 < args.Length: jsonOut = args[++i]; break;
                 case "--min-pass" when i + 1 < args.Length: double.TryParse(args[++i], out minPass); break;
@@ -328,6 +329,8 @@ public class Program
             selected = selected.Where(c => string.Equals(c.Construct, construct, StringComparison.OrdinalIgnoreCase));
         if (!string.IsNullOrEmpty(caseId))
             selected = selected.Where(c => string.Equals(c.Id, caseId, StringComparison.OrdinalIgnoreCase));
+        if (!string.IsNullOrEmpty(difficulty))
+            selected = selected.Where(c => string.Equals(c.Difficulty.ToString(), difficulty, StringComparison.OrdinalIgnoreCase));
 
         var cases = selected.ToList();
 
@@ -385,6 +388,12 @@ public class Program
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine($"Pass rate: {result.PassRate:P0}   Valid IR: {result.ValidIrRate:P0}");
         Console.ResetColor();
+        Console.WriteLine();
+        foreach (var band in result.Results.GroupBy(r => r.Difficulty).OrderBy(g => g.Key))
+        {
+            var rate = band.Count(r => r.Passed) / (double)band.Count();
+            Console.WriteLine($"  {band.Key,-6} {rate,6:P0}  ({band.Count(r => r.Passed)}/{band.Count()})");
+        }
         Console.WriteLine();
         Console.WriteLine("Weakest constructs:");
         foreach (var group in result.Results
