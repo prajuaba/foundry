@@ -64,6 +64,9 @@
   <Folder Name="/foundry-realtime/tests/">
     <Project Path="foundry-realtime/tests/Foundry.RealTime.Tests/Foundry.RealTime.Tests.csproj" />
   </Folder>
+  <Folder Name="/foundry-connectors/tests/">
+    <Project Path="foundry-connectors/tests/Foundry.Connectors.Tests/Foundry.Connectors.Tests.csproj" />
+  </Folder>
   <Folder Name="/foundry-schema/" />
   <Folder Name="/foundry-schema/backend/">
     <Project Path="foundry-schema/backend/Foundry.Schema.Backend.csproj" />

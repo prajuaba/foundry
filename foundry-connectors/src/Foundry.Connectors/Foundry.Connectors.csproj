@@ -18,4 +18,11 @@
     <PackageReference Include="System.ServiceModel.Http" />
   </ItemGroup>
 
+
+  <!-- ConfiguredApiKeyValues returns secret material, so it stays internal and is reached from
+       tests rather than made public. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Foundry.Connectors.Tests" />
+  </ItemGroup>
+
 </Project>

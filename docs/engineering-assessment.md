@@ -102,11 +102,11 @@ Six modules have tests, plus the integration suite:
 
 | Has tests | No tests at all |
 | --------- | --------------- |
-| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-realtime` (26) · `foundry-api` (23) | `foundry-connectors` · `foundry-file-io` · `foundry-testing` · `foundry-cli` · `foundry-studio` |
+| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) | `foundry-file-io` · `foundry-testing` · `foundry-cli` · `foundry-studio` |
 
 The still-untested list includes ~7.5k lines of Studio TypeScript verified only by `tsc`.
 
-**The prediction held in all four modules covered on 2026-07-26**, and the defect count per
+**The prediction held in all five modules covered on 2026-07-26**, and the defect count per
 module has not declined:
 
 - `foundry-rules` — **five**, four in guard-condition evaluation, each failing by *silently
@@ -137,6 +137,20 @@ module has not declined:
   record id alone, so a caller could name an entity they may read and then join the record group
   of one they may not; and an unresolvable entity name failed *open*.
 
+- `foundry-connectors` — **five**. The registration helpers keyed `ConnectorOptions` and the typed
+  `HttpClient` on the *type* rather than the connector name, so a second connector of the same type
+  replaced the first: an application integrating a CRM and a billing provider ended up with both
+  pointing at one base URL carrying one set of credentials — sending one service's API key to the
+  other's endpoint, in a perfectly well-formed request. Five of six new registration tests fail
+  against the original code; the one that passes is the single-connector demo case. Also: the HTTP
+  verb was chosen with `payload.Equals(default(TRequest))`, so a legitimate `0` or `false` was
+  mistaken for "no payload" and silently downgraded to a GET with the body dropped;
+  `EnsureSuccessStatusCode` discarded the remote body in all three connectors, which for SOAP means
+  throwing away the entire fault detail; GraphQL returned `null` and dropped the `errors` array on
+  the protocol's *normal* failure mode (HTTP 200 plus errors), making a rejected query
+  indistinguishable from one that matched nothing; and GraphQL bound responses with case-sensitive
+  defaults, so conventional camelCase fields silently produced an all-defaults object.
+
 Four areas came back clean, which is worth recording as evidence rather than left unsaid:
 **ambient tenant propagation** held under 50 interleaved flows, the **serialization defaults**
 were correct on every property including the deliberately-writable OCC token, `AddFoundryRules`
@@ -152,10 +166,10 @@ dependence on global MongoDB driver state, which this suite has exhibited before
 rather than closed — a suite that fails one run in ten undermines every other claim in this
 document, and it must be reproduced before it is called fixed.
 
-Five modules remain, and nothing yet contradicts the assumption that they carry comparable
+Four modules remain, and nothing yet contradicts the assumption that they carry comparable
 defect density.
 
-All 419 tests pass and there are zero vulnerable NuGet packages. CI
+All 447 tests pass and there are zero vulnerable NuGet packages. CI
 (`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
 a Studio typecheck; it **first went green on `bf3e227`**, after the three repository-level
 defects in section 2 were fixed. The seven modules are now vendored into the root

@@ -47,7 +47,11 @@ public class SoapConnector : IFoundryConnector
         content.Headers.Add("SOAPAction", $"\"{soapActionHeader}\"");
 
         var response = await _http.PostAsync("", content, cancellationToken);
-        response.EnsureSuccessStatusCode();
+
+        // A SOAP fault normally arrives as HTTP 500 with the fault detail in the body, so discarding
+        // the body -- which EnsureSuccessStatusCode does -- threw away the entire description of what
+        // went wrong and left only "500 Internal Server Error".
+        await ConnectorResponse.EnsureSuccessAsync(response, Name, action, cancellationToken);
 
         var xmlResponse = await response.Content.ReadAsStringAsync(cancellationToken);
         return DeserializeFromSoapEnvelope<TResponse>(xmlResponse);
