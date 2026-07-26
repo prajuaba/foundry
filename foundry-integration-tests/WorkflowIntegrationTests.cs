@@ -124,7 +124,12 @@ public class WorkflowIntegrationTests
         services.AddSingleton(mockHttpClientFactory);
 
         services.AddSingleton<IWorkflowEngine, WorkflowEngine>();
-        services.AddTransient(typeof(IPipelineBehavior<,>), typeof(WorkflowTransitionBehavior<,>));
+
+        // The behaviour's collaborators are injected rather than discovered by reflection, so the
+        // workflow entity types are declared explicitly. Previously the behaviour scanned every loaded
+        // assembly for a type whose simple name matched "TestStateEntity", which happened to work here
+        // only because this process had exactly one such type.
+        services.AddFoundryWorkflows(registry => registry.Register<TestStateEntity>());
 
         var provider = services.BuildServiceProvider();
 

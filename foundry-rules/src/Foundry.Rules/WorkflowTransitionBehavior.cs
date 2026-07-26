@@ -6,30 +6,61 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using MediatR;
-using Microsoft.Extensions.DependencyInjection;
-
+using MongoDB.Bson;
+using Foundry.Core.User;
 
 namespace Foundry.Rules;
 
 /// <summary>
 /// MediatR pipeline behavior that transparently processes state machine transitions.
 /// </summary>
+/// <remarks>
+/// <para>
+/// Every collaborator is injected. This class previously located the API manifest, the current-user
+/// context, the entity's CLR type and <c>IRepository&lt;T&gt;</c> by scanning
+/// <c>AppDomain.CurrentDomain.GetAssemblies()</c> for simple-name matches and invoking methods through
+/// <c>MethodInfo</c>. That made the orchestration untestable without a real database and the API
+/// assembly loaded in-process, and it failed in ways the compiler could not see — see
+/// <see cref="IWorkflowStateStore"/> for the specific failure modes.
+/// </para>
+/// <para>
+/// The transition sequence is unchanged: resolve the workflow, check temporal validity, authorise,
+/// load the entity, verify the source state, evaluate guards, run actions, resolve choice nodes, then
+/// persist and record.
+/// </para>
+/// </remarks>
 public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
     where TRequest : IRequest<TResponse>
 {
-    private readonly IServiceProvider _serviceProvider;
     private readonly IWorkflowEngine _workflowEngine;
+    private readonly IWorkflowDefinitionProvider _definitions;
+    private readonly IWorkflowStateStore _stateStore;
+    private readonly ICurrentUserContext? _userContext;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="WorkflowTransitionBehavior{TRequest, TResponse}"/> class.
     /// </summary>
-    /// <param name="serviceProvider">The application's service provider container.</param>
-    /// <param name="workflowEngine">The workflow execution engine instance.</param>
-    public WorkflowTransitionBehavior(IServiceProvider serviceProvider, IWorkflowEngine workflowEngine)
+    /// <param name="workflowEngine">Evaluates guard conditions, permissions and actions.</param>
+    /// <param name="definitions">Supplies the configured workflow definitions.</param>
+    /// <param name="stateStore">Loads and persists the workflow-bearing entity.</param>
+    /// <param name="userContext">
+    /// The caller's identity. Optional: a background or system-initiated transition has no user, and
+    /// requiring one would make the workflow unusable outside a request.
+    /// </param>
+    public WorkflowTransitionBehavior(
+        IWorkflowEngine workflowEngine,
+        IWorkflowDefinitionProvider definitions,
+        IWorkflowStateStore stateStore,
+        ICurrentUserContext? userContext = null)
     {
-        _serviceProvider = serviceProvider;
-        _workflowEngine = workflowEngine;
+        _workflowEngine = workflowEngine ?? throw new ArgumentNullException(nameof(workflowEngine));
+        _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
+        _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
+        _userContext = userContext;
     }
+
+    /// <summary>Maximum choice-node hops before the routing chain is treated as a cycle.</summary>
+    private const int MaxChoiceDepth = 5;
 
     /// <inheritdoc />
     public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken ct)
@@ -39,306 +70,210 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
             return await next();
         }
 
-        // 1. Resolve manifest configurations
-        object? manifest = null;
-        var manifestType = AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(a => {
-                try { return a.GetTypes(); } catch { return Array.Empty<Type>(); }
-            })
-            .FirstOrDefault(t => t.Name == "ApiManifest" || t.FullName == "Foundry.Api.Manifest.ApiManifest");
+        // 1. Resolve the active workflow for this entity.
+        var workflowConfig = _definitions.GetWorkflows()
+            .FirstOrDefault(w => w.Entity.Equals(transitionRequest.EntityType, StringComparison.OrdinalIgnoreCase) && w.IsActive)
+            ?? throw new WorkflowException(
+                $"No active workflow definition found for entity '{transitionRequest.EntityType}'.");
 
-        if (manifestType == null)
-        {
-            throw new WorkflowException("ApiManifest type could not be resolved from loaded assemblies.");
-        }
-
-        manifest = _serviceProvider.GetService(manifestType);
-
-        if (manifest == null)
-        {
-            throw new WorkflowException("ApiManifest is not registered in the service container.");
-        }
-
-        var workflowsProp = manifestType.GetProperty("Workflows");
-        var workflows = workflowsProp?.GetValue(manifest) as IEnumerable<WorkflowConfig>;
-
-        // 2. Find active workflow definition for the target entity
-        var workflowConfig = workflows?.FirstOrDefault(w => 
-            w.Entity.Equals(transitionRequest.EntityType, StringComparison.OrdinalIgnoreCase) && w.IsActive);
-
-        if (workflowConfig == null)
-        {
-            throw new WorkflowException($"No active workflow definition found for entity '{transitionRequest.EntityType}'.");
-        }
-
-        // Validate temporal expiration checks
+        // 2. Temporal validity.
         var now = DateTime.UtcNow;
-        if (!string.IsNullOrWhiteSpace(workflowConfig.EffectiveDate) && DateTime.TryParse(workflowConfig.EffectiveDate, out var effDate) && now < effDate)
+        if (!string.IsNullOrWhiteSpace(workflowConfig.EffectiveDate)
+            && DateTime.TryParse(workflowConfig.EffectiveDate, out var effectiveDate) && now < effectiveDate)
         {
-            throw new WorkflowException($"Workflow '{workflowConfig.Name}' is not yet effective (Starts on {workflowConfig.EffectiveDate}).");
+            throw new WorkflowException(
+                $"Workflow '{workflowConfig.Name}' is not yet effective (starts on {workflowConfig.EffectiveDate}).");
         }
-        if (!string.IsNullOrWhiteSpace(workflowConfig.ExpirationDate) && DateTime.TryParse(workflowConfig.ExpirationDate, out var expDate) && now > expDate)
+        if (!string.IsNullOrWhiteSpace(workflowConfig.ExpirationDate)
+            && DateTime.TryParse(workflowConfig.ExpirationDate, out var expirationDate) && now > expirationDate)
         {
-            throw new WorkflowException($"Workflow '{workflowConfig.Name}' has expired on {workflowConfig.ExpirationDate}.");
-        }
-
-        // 3. Find Transition configuration mapping
-        var transitionConfig = workflowConfig.Transitions?.FirstOrDefault(t => 
-            t.Id.Equals(transitionRequest.TransitionId, StringComparison.OrdinalIgnoreCase));
-
-        if (transitionConfig == null)
-        {
-            throw new WorkflowException($"Transition '{transitionRequest.TransitionId}' is not defined in workflow '{workflowConfig.Name}'.");
+            throw new WorkflowException(
+                $"Workflow '{workflowConfig.Name}' expired on {workflowConfig.ExpirationDate}.");
         }
 
-        // 4. Resolve current user context and validate permission matrix
-        List<string> userRoles = new();
-        string operatorId = "system";
+        // 3. Transition definition.
+        var transitionConfig = workflowConfig.Transitions?
+            .FirstOrDefault(t => t.Id.Equals(transitionRequest.TransitionId, StringComparison.OrdinalIgnoreCase))
+            ?? throw new WorkflowException(
+                $"Transition '{transitionRequest.TransitionId}' is not defined in workflow '{workflowConfig.Name}'.");
 
-        // Dynamically resolve ICurrentUserContext (if registered in API host)
-        var userContextType = AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(a => {
-                try { return a.GetTypes(); } catch { return Array.Empty<Type>(); }
-            })
-            .FirstOrDefault(t => t.Name.Equals("ICurrentUserContext", StringComparison.OrdinalIgnoreCase) || t.FullName?.Equals("Foundry.Core.User.ICurrentUserContext", StringComparison.OrdinalIgnoreCase) == true);
+        // 4. Caller identity and authorisation.
+        var operatorId = _userContext?.OperatorId ?? "system";
+        var userRoles = _userContext?.User is ClaimsPrincipal principal
+            ? principal.Claims.Where(c => c.Type == ClaimTypes.Role).Select(c => c.Value).ToList()
+            : new List<string>();
 
-        if (userContextType != null)
-        {
-            var userContext = _serviceProvider.GetService(userContextType);
-            if (userContext != null)
-            {
-                var operatorProp = userContextType.GetProperty("OperatorId");
-                if (operatorProp != null)
-                {
-                    operatorId = operatorProp.GetValue(userContext)?.ToString() ?? "anonymous";
-                }
-
-                var userProp = userContextType.GetProperty("User");
-                if (userProp != null && userProp.GetValue(userContext) is ClaimsPrincipal principal)
-                {
-                    userRoles = principal.Claims.Where(c => c.Type == ClaimTypes.Role).Select(c => c.Value).ToList();
-                }
-            }
-        }
-
-        var fromStateConfig = workflowConfig.States?.FirstOrDefault(s => s.Name.Equals(transitionRequest.FromState, StringComparison.OrdinalIgnoreCase));
-        var fromStateRoles = fromStateConfig?.AllowedRoles ?? new List<string>();
+        var fromStateConfig = workflowConfig.States?
+            .FirstOrDefault(s => s.Name.Equals(transitionRequest.FromState, StringComparison.OrdinalIgnoreCase));
 
         _workflowEngine.ValidatePermission(
             transitionRequest.TransitionId,
             transitionRequest.FromState,
             transitionConfig.RequiredRoles,
-            fromStateRoles,
+            fromStateConfig?.AllowedRoles ?? new List<string>(),
             userRoles);
 
-        // 5. Resolve Target Entity from Repository and check state
-        var allTypes = AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(a => {
-                try { return a.GetTypes(); } catch { return Array.Empty<Type>(); }
-            })
-            .ToList();
+        // 5. Load the entity and verify its current state.
+        var entity = await _stateStore.LoadAsync(transitionRequest.EntityType, transitionRequest.EntityId, ct)
+            ?? throw new WorkflowException(
+                $"Target entity '{transitionRequest.EntityType}' with ID '{transitionRequest.EntityId}' does not exist.");
 
-        var entityType = allTypes.FirstOrDefault(t => t.Name.Equals(transitionRequest.EntityType, StringComparison.OrdinalIgnoreCase));
-        if (entityType == null)
+        if (string.IsNullOrWhiteSpace(entity.CurrentState))
         {
-            throw new WorkflowException($"Entity type '{transitionRequest.EntityType}' could not be resolved in the domain assemblies.");
+            // Unset state means the entity has not entered the workflow yet; adopt the initial state.
+            entity.CurrentState = workflowConfig.States?.FirstOrDefault(s => s.IsInitial)?.Name
+                ?? transitionRequest.FromState;
         }
 
-        var repoType = allTypes.FirstOrDefault(t => t.Name.Equals("IRepository`1") && t.IsInterface && t.IsGenericType)?
-            .MakeGenericType(entityType);
-
-        if (repoType == null)
+        if (!entity.CurrentState.Equals(transitionRequest.FromState, StringComparison.OrdinalIgnoreCase))
         {
-            throw new WorkflowException($"Repository interface IRepository<{entityType.Name}> could not be resolved.");
+            throw new WorkflowException(
+                $"Invalid transition source state. Entity is currently in state '{entity.CurrentState}', "
+                + $"but this transition requires state '{transitionRequest.FromState}'.");
         }
 
-        var repo = _serviceProvider.GetService(repoType);
-        if (repo == null)
+        // 6. Guard conditions, evaluated against the request first and then the entity.
+        foreach (var condition in transitionConfig.Conditions ?? new List<WorkflowConditionConfig>())
         {
-            throw new WorkflowException($"Repository service IRepository<{entityType.Name}> is not registered.");
-        }
+            var passed = _workflowEngine.EvaluateCondition(condition.Property, condition.Operator, condition.Value, request)
+                || _workflowEngine.EvaluateCondition(condition.Property, condition.Operator, condition.Value, entity);
 
-        var getByIdMethod = repoType.GetMethod("GetByIdAsync");
-        if (getByIdMethod == null)
-        {
-            throw new WorkflowException("GetByIdAsync method is missing on the repository.");
-        }
-
-        var idType = transitionRequest.EntityId.Length == 24 ? typeof(MongoDB.Bson.ObjectId) : typeof(string);
-        object parsedId = idType == typeof(MongoDB.Bson.ObjectId) 
-            ? MongoDB.Bson.ObjectId.Parse(transitionRequest.EntityId) 
-            : transitionRequest.EntityId;
-
-        var entityTask = (Task)getByIdMethod.Invoke(repo, new object[] { parsedId, null!, ct })!;
-        await entityTask;
-        var entity = ((dynamic)entityTask).Result;
-
-        if (entity == null)
-        {
-            throw new WorkflowException($"Target entity document with ID '{transitionRequest.EntityId}' does not exist.");
-        }
-
-        var statefulEntity = entity as IWorkflowStateful;
-        if (statefulEntity == null)
-        {
-            throw new WorkflowException($"Entity type '{transitionRequest.EntityType}' must implement IWorkflowStateful to track state machine status.");
-        }
-
-        if (string.IsNullOrWhiteSpace(statefulEntity.CurrentState))
-        {
-            // Auto-initialize to initial state if unset
-            var initialState = workflowConfig.States?.FirstOrDefault(s => s.IsInitial)?.Name ?? transitionRequest.FromState;
-            statefulEntity.CurrentState = initialState;
-        }
-
-        if (!statefulEntity.CurrentState.Equals(transitionRequest.FromState, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new WorkflowException($"Invalid transition source state. Entity is currently in state '{statefulEntity.CurrentState}', but this transition requires state '{transitionRequest.FromState}'.");
-        }
-
-        // 6. Evaluate guard conditions
-        if (transitionConfig.Conditions != null)
-        {
-            foreach (var cond in transitionConfig.Conditions)
+            if (!passed)
             {
-                var passed = _workflowEngine.EvaluateCondition(cond.Property, cond.Operator, cond.Value, request);
-                if (!passed && entity != null)
-                {
-                    passed = _workflowEngine.EvaluateCondition(cond.Property, cond.Operator, cond.Value, entity);
-                }
-
-                if (!passed)
-                {
-                    throw new WorkflowException($"Guard condition failed: {cond.Property} must satisfy operator '{cond.Operator}' with value '{cond.Value}'.");
-                }
+                throw new WorkflowException(
+                    $"Guard condition failed: {condition.Property} must satisfy operator "
+                    + $"'{condition.Operator}' with value '{condition.Value}'.");
             }
         }
 
-        // 7. Execute automated actions (DAG actions)
+        // 7. Automated actions. A failed action fails the transition.
         var actionDetails = new List<ActionExecutionDetail>();
-        if (transitionConfig.Actions != null)
+        foreach (var action in transitionConfig.Actions ?? new List<WorkflowActionConfig>())
         {
-            foreach (var act in transitionConfig.Actions)
-            {
-                var detail = await _workflowEngine.ExecuteActionAsync(
-                    act.Type,
-                    act.RequestType,
-                    act.PayloadTemplate,
-                    act.Method,
-                    act.Url,
-                    act.Headers,
-                    act.BodyTemplate,
-                    request,
-                    ct);
+            var detail = await _workflowEngine.ExecuteActionAsync(
+                action.Type, action.RequestType, action.PayloadTemplate,
+                action.Method, action.Url, action.Headers, action.BodyTemplate, request, ct);
 
-                actionDetails.Add(detail);
-                if (!detail.Success)
-                {
-                    // Fail the transition if an action fails (participates in transactions)
-                    throw new WorkflowException($"Workflow action execution failed on '{detail.ActionName}': {detail.ResponseBody}");
-                }
+            actionDetails.Add(detail);
+
+            if (!detail.Success)
+            {
+                throw new WorkflowException(
+                    $"Workflow action execution failed on '{detail.ActionName}': {detail.ResponseBody}");
             }
         }
 
-        // 8. Resolve final target state (dynamic routing decision gates / choice nodes recursion)
-        var resolvedTargetState = transitionRequest.ToState;
-        var maxDepth = 5;
-        var currentDepth = 0;
+        // 8. Resolve the final state, following choice nodes.
+        var resolvedTargetState = ResolveTargetState(workflowConfig, transitionRequest.ToState, request, entity);
 
-        while (currentDepth < maxDepth)
+        entity.CurrentState = resolvedTargetState;
+        entity.WorkflowId = workflowConfig.Id;
+        entity.WorkflowVersion = workflowConfig.Version;
+
+        await _stateStore.SaveAsync(transitionRequest.EntityType, entity, ct);
+
+        // 9. Run the handler, then record what actually happened.
+        //
+        // The activity log used to be written before the handler ran, with Success hardcoded to true.
+        // A handler that threw left a history entry claiming the transition had succeeded -- a false
+        // record in the one place someone would look to find out. It is now written after the handler
+        // returns, and a failure is recorded as a failure before the exception propagates.
+        TResponse response;
+        try
         {
-            var choiceNode = workflowConfig.ChoiceNodes?.FirstOrDefault(c => 
-                c.Id.Equals(resolvedTargetState, StringComparison.OrdinalIgnoreCase) ||
-                c.Name.Equals(resolvedTargetState, StringComparison.OrdinalIgnoreCase));
+            response = await next();
+        }
+        catch (Exception ex)
+        {
+            await AppendLogAsync(transitionRequest, workflowConfig, resolvedTargetState, operatorId,
+                request, actionDetails, success: false, ex.Message, ct);
+            throw;
+        }
 
-            if (choiceNode == null)
+        await AppendLogAsync(transitionRequest, workflowConfig, resolvedTargetState, operatorId,
+            request, actionDetails, success: true, errorMessage: null, ct);
+
+        return response;
+    }
+
+    /// <summary>
+    /// Follows choice nodes from the requested target state to a concrete state.
+    /// </summary>
+    /// <remarks>
+    /// Bounded by <see cref="MaxChoiceDepth"/>. A chain that is still unresolved at the limit throws
+    /// rather than silently leaving the entity in a choice node's id as though it were a real state,
+    /// which would leave a document in a state no transition matches.
+    /// </remarks>
+    private string ResolveTargetState(
+        WorkflowConfig workflowConfig, string requestedState, object request, IWorkflowStateful entity)
+    {
+        var resolved = requestedState;
+
+        for (var depth = 0; depth <= MaxChoiceDepth; depth++)
+        {
+            var choiceNode = workflowConfig.ChoiceNodes?.FirstOrDefault(c =>
+                c.Id.Equals(resolved, StringComparison.OrdinalIgnoreCase)
+                || c.Name.Equals(resolved, StringComparison.OrdinalIgnoreCase));
+
+            if (choiceNode == null) return resolved;
+
+            if (depth == MaxChoiceDepth)
             {
-                break;
+                throw new WorkflowException(
+                    $"Choice node routing for '{requestedState}' did not resolve to a state within "
+                    + $"{MaxChoiceDepth} hops; the definition may contain a cycle.");
             }
 
-            var matchedBranch = false;
+            var matched = false;
             foreach (var branch in choiceNode.Branches ?? new List<WorkflowChoiceBranchConfig>())
             {
-                var branchPassed = true;
-                if (branch.Conditions != null)
-                {
-                    foreach (var cond in branch.Conditions)
-                    {
-                        var passed = _workflowEngine.EvaluateCondition(cond.Property, cond.Operator, cond.Value, request);
-                        if (!passed && entity != null)
-                        {
-                            passed = _workflowEngine.EvaluateCondition(cond.Property, cond.Operator, cond.Value, entity);
-                        }
-                        if (!passed)
-                        {
-                            branchPassed = false;
-                            break;
-                        }
-                    }
-                }
+                var branchPassed = (branch.Conditions ?? new List<WorkflowConditionConfig>()).All(condition =>
+                    _workflowEngine.EvaluateCondition(condition.Property, condition.Operator, condition.Value, request)
+                    || _workflowEngine.EvaluateCondition(condition.Property, condition.Operator, condition.Value, entity));
 
                 if (branchPassed)
                 {
-                    resolvedTargetState = branch.ToState;
-                    matchedBranch = true;
+                    resolved = branch.ToState;
+                    matched = true;
                     break;
                 }
             }
 
-            if (!matchedBranch)
-            {
-                resolvedTargetState = choiceNode.DefaultState;
-            }
-
-            currentDepth++;
+            if (!matched) resolved = choiceNode.DefaultState;
         }
 
-        statefulEntity.CurrentState = resolvedTargetState;
-        statefulEntity.WorkflowId = workflowConfig.Id;
-        statefulEntity.WorkflowVersion = workflowConfig.Version;
+        return resolved;
+    }
 
-        var updateMethod = repoType.GetMethod("UpdateAsync");
-        if (updateMethod == null)
+    private async Task AppendLogAsync(
+        IWorkflowTransitionRequest transitionRequest,
+        WorkflowConfig workflowConfig,
+        string resolvedTargetState,
+        string operatorId,
+        object request,
+        List<ActionExecutionDetail> actionDetails,
+        bool success,
+        string? errorMessage,
+        CancellationToken ct)
+    {
+        var log = new WorkflowActivityLog
         {
-            throw new WorkflowException("UpdateAsync method is missing on the repository.");
-        }
+            Id = ObjectId.GenerateNewId(),
+            EntityId = transitionRequest.EntityId,
+            EntityType = transitionRequest.EntityType,
+            WorkflowId = workflowConfig.Id,
+            WorkflowVersion = workflowConfig.Version,
+            FromState = transitionRequest.FromState,
+            ToState = resolvedTargetState,
+            TransitionId = transitionRequest.TransitionId,
+            TriggeredBy = operatorId,
+            TriggeredAt = DateTime.UtcNow,
+            PayloadDetails = JsonSerializer.Serialize(request),
+            Success = success,
+            ErrorMessage = errorMessage,
+            ExecutedActions = actionDetails
+        };
 
-        var updateTask = (Task)updateMethod.Invoke(repo, new object[] { entity!, null!, ct })!;
-        await updateTask;
-
-        // 9. Write Workflow Activity Log entry
-        var logRepoType = allTypes.FirstOrDefault(t => t.Name.Equals("IRepository`1") && t.IsInterface && t.IsGenericType)?
-            .MakeGenericType(typeof(WorkflowActivityLog));
-
-        if (logRepoType != null)
-        {
-            var logRepo = _serviceProvider.GetService(logRepoType);
-            if (logRepo != null)
-            {
-                var insertMethod = logRepoType.GetMethod("InsertAsync");
-                if (insertMethod != null)
-                {
-                    var log = new WorkflowActivityLog
-                    {
-                        Id = MongoDB.Bson.ObjectId.GenerateNewId(),
-                        EntityId = transitionRequest.EntityId,
-                        EntityType = transitionRequest.EntityType,
-                        WorkflowId = workflowConfig.Id,
-                        WorkflowVersion = workflowConfig.Version,
-                        FromState = transitionRequest.FromState,
-                        ToState = resolvedTargetState,
-                        TransitionId = transitionRequest.TransitionId,
-                        TriggeredBy = operatorId,
-                        TriggeredAt = DateTime.UtcNow,
-                        PayloadDetails = JsonSerializer.Serialize(request),
-                        Success = true,
-                        ExecutedActions = actionDetails
-                    };
-                    await (Task)insertMethod.Invoke(logRepo, new object[] { log, null!, ct })!;
-                }
-            }
-        }
-
-        return await next();
+        await _stateStore.AppendActivityLogAsync(log, ct);
     }
 }

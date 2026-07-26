@@ -179,11 +179,27 @@ public class WorkflowEngineTests
         
         mockServiceProvider.GetService(typeof(IRepository<TestWorkflowStatefulEntity>)).Returns(mockRepo);
 
+        // The activity-log repository is now required rather than skipped when absent: a transition
+        // that leaves no history is worse than one that fails, because the history is where someone
+        // looks to find out what happened.
+        var mockLogRepo = Substitute.For<IRepository<Foundry.Rules.WorkflowActivityLog>>();
+        mockServiceProvider.GetService(typeof(IRepository<Foundry.Rules.WorkflowActivityLog>)).Returns(mockLogRepo);
+
         // 3. Stub engine
         var mockEngine = Substitute.For<IWorkflowEngine>();
         mockEngine.EvaluateCondition("TotalAmount", "GreaterThan", "1000", Arg.Any<object>()).Returns(true);
 
-        var behavior = new WorkflowTransitionBehavior<SubmitOrderTransition, Unit>(mockServiceProvider, mockEngine);
+        // The behaviour's collaborators are injected rather than discovered by reflection. This test
+        // now exercises the real adapters -- the manifest-backed definition provider and the
+        // repository-backed state store -- against mocked repositories, instead of relying on the
+        // behaviour finding types by scanning loaded assemblies.
+        var registry = new Foundry.Api.Workflow.WorkflowEntityTypeRegistry()
+            .Register<TestWorkflowStatefulEntity>();
+        var definitions = new Foundry.Api.Workflow.ApiManifestWorkflowDefinitionProvider(manifest);
+        var stateStore = new Foundry.Api.Workflow.MongoWorkflowStateStore(mockServiceProvider, registry);
+
+        var behavior = new WorkflowTransitionBehavior<SubmitOrderTransition, Unit>(
+            mockEngine, definitions, stateStore);
         var request = new SubmitOrderTransition { EntityId = ObjectId.GenerateNewId().ToString() };
 
         // Act

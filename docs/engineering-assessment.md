@@ -102,7 +102,7 @@ Every module now has tests, plus the integration suite:
 
 | Has tests | Untested |
 | --------- | --------------- |
-| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) · `foundry-testing` (26) · `foundry-cli` (21) · `foundry-studio` (19) | *(none)* |
+| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-rules` (73) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) · `foundry-testing` (26) · `foundry-cli` (21) · `foundry-studio` (19) | *(none)* |
 
 Every module now has at least one test suite. Studio's 7.5k lines of TypeScript were previously verified only by `tsc`; it now has vitest and a CI job.
 
@@ -201,6 +201,41 @@ module has not declined:
   is individually valid. Studio is now pinned to the compiler's contract by test, and Studio gained a
   test runner (vitest) and a CI job in the process — it had none.
 
+### The workflow orchestrator: reflection replaced with contracts
+
+Recorded separately because it was the largest single piece of untested code in the repository, and
+the reason it was untested was its design rather than neglect.
+
+`WorkflowTransitionBehavior` (344 lines) located four collaborators at runtime by scanning
+`AppDomain.CurrentDomain.GetAssemblies()` for **simple-name** matches and invoking methods through
+`MethodInfo`: the API manifest, the current-user context, the entity's CLR type, and
+`IRepository<T>`. Consequences:
+
+- Two entities named `Order` in different namespaces resolved to whichever assembly was enumerated
+  first — silently the wrong type, since either result is a usable `Type`.
+- The key type was guessed from the id string's *length*: 24 characters meant `ObjectId`, anything
+  else `string`. A malformed id was quietly treated as a different key type and failed inside the
+  driver.
+- Renaming a repository method broke the workflow at runtime with no compiler error.
+- Exercising any of it required a real MongoDB repository and the API assembly loaded in-process, so
+  none of the orchestration had a test.
+
+The reflection existed to avoid a project reference from `Foundry.Rules` to `Foundry.Api` — a genuine
+layering constraint. Two interfaces (`IWorkflowDefinitionProvider`, `IWorkflowStateStore`) preserve
+that independence with compile-time contracts, implemented in `Foundry.Api`, which already references
+Rules, Mongo and Core. The behaviour now contains **no reflection at all**, and gained 24 tests
+covering the transition sequence end to end with fakes.
+
+Two defects surfaced once it was reachable. The activity log was written *before* the handler ran with
+`Success` hardcoded to `true`, so a handler that threw left a history entry claiming the transition had
+succeeded — a false record in the one place someone would look. And a cyclic choice-node chain
+exhausted the depth counter and fell through, leaving `CurrentState` set to the choice node's id: a
+state no transition matches, so the document was silently stranded. Both now fail or record honestly.
+
+Registration is explicit (`AddFoundryWorkflows(registry => registry.Register<Order>())`) and that is
+the point: an application that has not declared its workflow entities fails at startup naming what to
+add, rather than at the first transition from inside an assembly scan.
+
 **The duplication itself is the remaining risk.** Aligning the two producers by test stops them
 drifting silently, but it does not remove the second implementation. Every divergence found today in
 `foundry-rules` had the same root cause — two copies of one contract, one of which had quietly fallen
@@ -225,7 +260,7 @@ document, and it must be reproduced before it is called fixed.
 No module is now wholly unverified. That is a floor, not a finish: the suites added today
 target the highest-consequence surface of each module, not its whole surface area.
 
-All 557 tests pass and there are zero vulnerable NuGet packages. CI
+All 581 C# tests pass and there are zero vulnerable NuGet packages. CI
 (`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
 a Studio typecheck; it **first went green on `bf3e227`**, after the three repository-level
 defects in section 2 were fixed. The seven modules are now vendored into the root
