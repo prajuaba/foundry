@@ -129,7 +129,7 @@ jobs:
           done
 
   studio:
-    name: Studio typecheck
+    name: Studio tests and typecheck
     runs-on: ubuntu-latest
 
     defaults:
@@ -145,6 +145,13 @@ jobs:
 
       - name: Install
         run: npm ci
+
+      # Studio is the second producer of api-manifest.json, alongside the C# compiler. These tests
+      # pin its output to the compiler's contract: the two previously disagreed on the route prefix
+      # and on whether an entity with no declared methods gets full CRUD, so the same domain model
+      # produced two different APIs with nothing reporting a conflict.
+      - name: Test
+        run: npm test
 
       - name: Typecheck and build
         run: npm run build

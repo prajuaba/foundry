@@ -1191,11 +1191,24 @@ export const useStore = create<StoreState>((rawSet, get) => {
     nodes.forEach((node) => {
       if (node.type === 'classNode') {
         const entity = (node as ClassNode).data.entity;
-        const enabledMethods = entity.apiEnabledMethods || ['GET', 'POST', 'GET_BY_ID', 'PUT', 'DELETE'];
 
-        // Proper pluralization for route paths
+        // No declared methods means no REST surface was asked for.
+        //
+        // This used to default to full CRUD, which the C# ApiManifestGenerator does not: an entity
+        // that exists only as a workflow target or a DTO source acquired a complete public surface,
+        // DELETE included, purely by being on the canvas. The two producers have to agree, and
+        // "expose nothing unless asked" is the safer of the two behaviours.
+        const enabledMethods = entity.apiEnabledMethods || [];
+        if (enabledMethods.length === 0) return;
+
+        // Route derivation must match ApiManifestGenerator.RouteFor exactly.
+        //
+        // This emitted /api/v1/{plural} while the compiler emits /api/{plural}, so an application
+        // built from a Studio-exported manifest served different URLs from one built by
+        // `foundry compile` — and a client generated against either 404s against the other. Each
+        // manifest is individually valid, so nothing reports the conflict.
         const routeName = pluralize(entity.name).toLowerCase();
-        const route = `/api/v1/${routeName}`;
+        const route = `/api/${routeName}`;
 
         const roles: Record<string, string[]> = {};
         const caching: Record<string, any> = {};

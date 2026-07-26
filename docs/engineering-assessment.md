@@ -98,15 +98,15 @@ Three defects, stacked, each masked by the one above it. The generalisable lesso
 
 ## 3. Coverage reality
 
-Eleven modules have tests, plus the integration suite:
+Every module now has tests, plus the integration suite:
 
-| Has tests | No tests at all |
+| Has tests | Untested |
 | --------- | --------------- |
-| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) · `foundry-testing` (26) · `foundry-cli` (21) | `foundry-studio` |
+| `foundry-schema` (131) · `foundry-integration-tests` (75) · `foundry-file-io` (63) · `foundry-core` (52) · `foundry-rules` (49) · `foundry-kafka` (34) · `foundry-mongo` (29) · `foundry-connectors` (28) · `foundry-realtime` (26) · `foundry-api` (23) · `foundry-testing` (26) · `foundry-cli` (21) · `foundry-studio` (19) | *(none)* |
 
-The still-untested list includes ~7.5k lines of Studio TypeScript verified only by `tsc`.
+Every module now has at least one test suite. Studio's 7.5k lines of TypeScript were previously verified only by `tsc`; it now has vitest and a CI job.
 
-**The prediction held in seven of the eight modules covered on 2026-07-26**, and the defect count per
+**The prediction held in eight of the nine modules covered on 2026-07-26**, and the defect count per
 module has not declined:
 
 - `foundry-rules` — **five**, four in guard-condition evaluation, each failing by *silently
@@ -189,6 +189,24 @@ module has not declined:
   they came from and the API's own validation rejected them; and a shared non-thread-safe `Random`
   could degrade to returning zeros under concurrent generation.
 
+- `foundry-studio` — **two**, and they are divergences rather than isolated bugs, which makes them
+  the most structurally interesting finding. Studio is the *second* producer of `api-manifest.json`,
+  alongside the compiler's `ApiManifestGenerator`; both claim to turn the same domain model into the
+  same API surface, and they disagreed. Studio emitted `/api/v1/{plural}` where the compiler emits
+  `/api/{plural}`, so an application built from a Studio-exported manifest served different URLs from
+  one built by `foundry compile` — and a client generated against either 404s against the other. And
+  Studio defaulted an entity with no declared methods to **full CRUD** where the compiler skips it, so
+  an entity present only as a workflow target or DTO source acquired a complete public surface,
+  `DELETE` included, purely by being on the canvas. Neither reports a conflict, because each manifest
+  is individually valid. Studio is now pinned to the compiler's contract by test, and Studio gained a
+  test runner (vitest) and a CI job in the process — it had none.
+
+**The duplication itself is the remaining risk.** Aligning the two producers by test stops them
+drifting silently, but it does not remove the second implementation. Every divergence found today in
+`foundry-rules` had the same root cause — two copies of one contract, one of which had quietly fallen
+behind. Studio deriving the manifest from the compiler rather than from its own canvas walk is the
+real fix, and it is not done.
+
 Four areas came back clean, which is worth recording as evidence rather than left unsaid:
 **ambient tenant propagation** held under 50 interleaved flows, the **serialization defaults**
 were correct on every property including the deliberately-writable OCC token, `AddFoundryRules`
@@ -204,8 +222,8 @@ dependence on global MongoDB driver state, which this suite has exhibited before
 rather than closed — a suite that fails one run in ten undermines every other claim in this
 document, and it must be reproduced before it is called fixed.
 
-One module remains, and nothing yet contradicts the assumption that they carry comparable
-defect density.
+No module is now wholly unverified. That is a floor, not a finish: the suites added today
+target the highest-consequence surface of each module, not its whole surface area.
 
 All 557 tests pass and there are zero vulnerable NuGet packages. CI
 (`.github/workflows/ci.yml`) runs build + test against a MongoDB service, schema gates, and
