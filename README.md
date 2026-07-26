@@ -25,18 +25,18 @@ graph TD
 
 | Component | Directory | Description |
 | :--- | :--- | :--- |
-| **`Foundry.Core`** | [`foundry-core/`](file:///Users/prajuab/Workspace/foundry/foundry-core/) | Shared domain entity interfaces (`IEntity`, `ISoftDelete`, `IMultiTenant`, `IVersionable`), `TenantContext` ambient propagation, and core models. |
-| **`Foundry.Mongo`** | [`foundry-mongo/`](file:///Users/prajuab/Workspace/foundry/foundry-mongo/) | Advanced MongoDB data access layer (`IRepository`, tenant isolation filter injection, OCC, dynamic seek pagination, background archival worker, hot/cold partitioned repositories). |
-| **`Foundry.FileIO`** | [`foundry-file-io/`](file:///Users/prajuab/Workspace/foundry/foundry-file-io/) | Pluggable file processing library (CSV parser, Excel streaming reader, CSV exporter, file signature validator, and path sanitiser). |
-| **`Foundry.Rules`** | [`foundry-rules/`](file:///Users/prajuab/Workspace/foundry/foundry-rules/) | Decoupled, lightweight business rules and policy validation engine (contracts, dynamic rules orchestrator, custom exceptions). |
-| **`Foundry.Kafka`** | [`foundry-kafka/`](file:///Users/prajuab/Workspace/foundry/foundry-kafka/) | Transactional outbox event streaming with trace propagation over Kafka message headers. |
-| **`Foundry.RealTime`** | [`foundry-realtime/`](file:///Users/prajuab/Workspace/foundry/foundry-realtime/) | Event-streaming and real-time communications broker (SignalR notification hubs, WebSockets, SSE) integrated at repository audit sink level. |
-| **`Foundry.Connectors`** | [`foundry-connectors/`](file:///Users/prajuab/Workspace/foundry/foundry-connectors/) | Enterprise external service connectors (REST, SOAP 1.1/1.2, GraphQL) with Polly v8 resilience pipelines, authentication, and health checks. |
-| **`Foundry.Testing`** | [`foundry-testing/`](file:///Users/prajuab/Workspace/foundry/foundry-testing/) | Autonomous multi-protocol testing engine generating schema-driven mock data, xUnit test suites, and interactive HTML execution reports. |
-| **`Foundry.Api`** | [`foundry-api/`](file:///Users/prajuab/Workspace/foundry/foundry-api/) | API Gateway with MediatR pipeline behaviors (Security, Tenant Middleware, Sliding Window Rate Limiting, Caching, Audit, Rules Validation). |
+| **`Foundry.Core`** | [`foundry-core/`](foundry-core/) | Shared domain entity interfaces (`IEntity`, `ISoftDelete`, `IMultiTenant`, `IVersionable`), `TenantContext` ambient propagation, and core models. |
+| **`Foundry.Mongo`** | [`foundry-mongo/`](foundry-mongo/) | Advanced MongoDB data access layer (`IRepository`, tenant isolation filter injection, OCC, dynamic seek pagination, background archival worker, hot/cold partitioned repositories). |
+| **`Foundry.FileIO`** | [`foundry-file-io/`](foundry-file-io/) | Pluggable file processing library (CSV parser, Excel streaming reader, CSV exporter, file signature validator, and path sanitiser). |
+| **`Foundry.Rules`** | [`foundry-rules/`](foundry-rules/) | Decoupled, lightweight business rules and policy validation engine (contracts, dynamic rules orchestrator, custom exceptions). |
+| **`Foundry.Kafka`** | [`foundry-kafka/`](foundry-kafka/) | Transactional outbox event streaming with trace propagation over Kafka message headers. |
+| **`Foundry.RealTime`** | [`foundry-realtime/`](foundry-realtime/) | Event-streaming and real-time communications broker (SignalR notification hubs, WebSockets, SSE) integrated at repository audit sink level. |
+| **`Foundry.Connectors`** | [`foundry-connectors/`](foundry-connectors/) | Enterprise external service connectors (REST, SOAP 1.1/1.2, GraphQL) with Polly v8 resilience pipelines, authentication, and health checks. |
+| **`Foundry.Testing`** | [`foundry-testing/`](foundry-testing/) | Autonomous multi-protocol testing engine generating schema-driven mock data, xUnit test suites, and interactive HTML execution reports. |
+| **`Foundry.Api`** | [`foundry-api/`](foundry-api/) | API Gateway with MediatR pipeline behaviors (Security, Tenant Middleware, Sliding Window Rate Limiting, Caching, Audit, Rules Validation). |
 | **`Foundry.Cli`** | [`foundry-cli/`](foundry-cli/) | Unified CLI: `new`, `compile`, `validate`, `export`, `sdk`, `doctor`, `test`, `lsp`, `studio`, `api`, plus the AI toolchain (`ai`, `ai-spec`, `eval`). |
-| **`Foundry.Studio`** | [`foundry-studio/`](file:///Users/prajuab/Workspace/foundry/foundry-studio/) | React 19 + Vite Visual Studio IDE featuring domain modeling, DTO composition, workflow designer, external connector setup, API playground, and autonomous test suite runner. |
-| **`foundry-vscode`** | [`foundry-vscode/`](file:///Users/prajuab/Workspace/foundry/foundry-vscode/) | Native VS Code Extension & LSP Server integration embedding Foundry Studio canvas into editor tabs with native schema sync. |
+| **`Foundry.Studio`** | [`foundry-studio/`](foundry-studio/) | React 19 + Vite Visual Studio IDE featuring domain modeling, DTO composition, workflow designer, external connector setup, API playground, and autonomous test suite runner. |
+| **`foundry-vscode`** | [`foundry-vscode/`](foundry-vscode/) | Native VS Code Extension & LSP Server integration embedding Foundry Studio canvas into editor tabs with native schema sync. |
 
 ---
 

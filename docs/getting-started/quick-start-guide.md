@@ -55,7 +55,8 @@ docker compose up -d
 ### Option A: Inside VS Code (Recommended)
 1. Install the VSIX extension package:
    ```bash
-   code --install-extension /Users/prajuab/Workspace/foundry/foundry-vscode/foundry-vscode-1.0.0.vsix --force
+   # from the repository root, after building the extension (see foundry-vscode/)
+   code --install-extension foundry-vscode/foundry-vscode-1.0.0.vsix --force
    ```
 2. Open VS Code.
 3. Press `Cmd + Shift + P` ➔ **`Foundry: Create New Schema Manifest`** *(or open any `.foundry.json` file)*.
