@@ -8,11 +8,11 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-742, on a repository whose CI had never passed once.
+751, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
-> **Five separate features had never executed.** Not under-tested — never run.
+> **Six separate features had never executed.** Not under-tested — never run.
 >
 > 1. **Multi-tenancy** did not compile. `IMultiTenant` needs a `set`; the compiler emitted `init`.
 > 2. **Generated APIs were anonymous**, while their own OpenAPI output named the roles they required.
@@ -20,14 +20,18 @@ The single most important finding is not any individual bug. It is this:
 > 4. **The Excel import path** had never been called by any test.
 > 5. **The outbox** had never published, and the compose file meant to supply a broker exited on
 >    startup — which is why nobody noticed.
+> 6. **Hot/cold partitioning** archived nothing: the sweep ran inside a MongoDB transaction, which a
+>    standalone server does not support, and the failure was caught and logged.
 
 Each looked correct in source. Each had convincing scaffolding around it — a meticulous validator, a
 pipeline behaviour with its own tests, an OpenAPI description naming the roles. Reading the code
-would have confirmed all five were fine. That is the disposition worth naming: this codebase was
+would have confirmed all six were fine. That is the disposition worth naming: this codebase was
 consistently good at *appearing* to work, and the appearance was load-bearing.
 
-The verification backlog is now clear. What remains in section 5 is a list of gaps someone would
-choose to close, not damage someone discovered.
+The enumerated backlog is now clear. But the sixth was found *after* that sentence was first written,
+by picking the most-advertised feature with no tests and running it — and it failed within minutes.
+That is the honest state: the known list is done, and the base rate for "never run" in this codebase
+is six for six. Section 5 lists what is still unexercised, in that spirit.
 
 ---
 
@@ -35,9 +39,14 @@ choose to close, not damage someone discovered.
 
 The runtime layer — `foundry-mongo`, 4,775 lines across 27 files covering tenant filter injection,
 envelope encryption, optimistic concurrency, seek pagination and hot/cold partitioning — is real
-senior-level work and held up under inspection. (An earlier draft of this document said 11.5k lines;
-that figure was inherited and never checked. Measured, `foundry-mongo/src` is 4,775 lines and the whole
-module including tests and samples is 6,909.)
+senior-level work. (An earlier draft of this document said 11.5k lines; that figure was inherited and
+never checked. Measured, `foundry-mongo/src` is 4,775 lines and the whole module including tests and
+samples is 6,909.)
+
+An earlier draft added "and held up under inspection". That clause is deleted rather than softened,
+because it turned out to be the problem in miniature: hot/cold partitioning is in that list, it does
+read as careful work, and **it had never archived a single record**. Inspection was exactly what it
+held up under.
 
 The AI thesis is **validated rather than aspirational**. The local model never writes C#; it writes IR,
 and the compiler writes C#. Measured with `qwen3-coder:30b`:
@@ -111,7 +120,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 737 C# tests across 12 suites |
+| `Build and test` | 746 C# tests across 13 suites |
 | `Outbox round trip` | 5 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -371,6 +380,41 @@ HTML served with a 200, malformed JSON, an oversized error body — and all pass
 code. Worth stating plainly: coverage that finds nothing is still worth having, and reporting it as a
 finding would be dishonest.
 
+### Hot/cold partitioning archived nothing
+
+Named in section 1 as part of what makes the data layer senior-level work, and it had **no tests at
+all** — neither `PartitionedRepository<T>` nor `DataArchivalWorker` was executed by anything. It was
+checked because the pattern above had held five times and predicted where to look next. It held a
+sixth.
+
+**The archival sweep could never run.** It moved documents inside `WithTransactionAsync`, and MongoDB
+supports multi-document transactions only on a replica set. Every deployment this project ships is a
+standalone server — its own `docker-compose.yml`, and the `mongo:7` service in all three CI jobs — so
+the sweep threw `NotSupportedException: Standalone servers do not support transactions` on every pass.
+The exception was caught and logged.
+
+That failure is worse than it first looks, because of how reads route. `GetByIdAsync` picks a
+collection from the age embedded in the record's `ObjectId` and **does not fall back**:
+
+> A record older than the threshold is looked for only in `Ledgers_{year}`. The sweep never moved it
+> there. So on the day a record crossed the threshold it stopped being readable — and the archival
+> that was supposed to have moved it had been failing silently since the day the feature was written.
+
+The sweep now detects whether the server supports transactions and uses them when it can. Without
+them it copies, **verifies the copy is present**, and only then deletes — insert-then-delete, never
+the reverse, so an interruption duplicates a document (which a re-run corrects) rather than losing
+one. A verification shortfall aborts with the active collection untouched. The sweep is also public
+now, so an operator can trigger one, and it reports failure instead of logging it: one unarchivable
+entity no longer blocks the others, and a sweep with any failure throws rather than returning quietly.
+
+**A second finding, in the same shape as the tenancy work.** `PartitionedRepository` accepted an
+`ITenantContext`, passed it to the active and deleted repositories, and dropped it. Archive
+repositories are created lazily per year and had nothing to pass — so **a row left tenant isolation
+the moment it aged past the threshold**, and any tenant could read any other tenant's archived
+records by id. Isolation must not depend on how old a record is.
+
+Nine tests now cover routing, the tenant boundary across the partition, and the sweep itself.
+
 ### The last mirrored implementation is gone
 
 
@@ -400,7 +444,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **742 in total**, from 258 at the start:
+Every module has tests. **751 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
@@ -408,7 +452,7 @@ Every module has tests. **742 in total**, from 258 at the start:
 | `foundry-rules` | 87 | — |
 | `foundry-integration-tests` | 75 | MongoDB |
 | `foundry-file-io` | 75 | — |
-| `foundry-mongo` | 61 | MongoDB |
+| `foundry-mongo` | 70 | MongoDB |
 | `foundry-api` | 54 | MongoDB |
 | `foundry-core` | 52 | — |
 | `foundry-kafka` | 39 | — |
@@ -570,9 +614,17 @@ generator does not do for custom endpoints.
 ### Verified thinly, or only by inspection
 
 **Coverage is a floor, not a finish.** The suites target each module's highest-consequence surface, not
-its whole surface area. The outside-world paths named in earlier cycles are now covered;
-`CheckHealthAsync`, the CSV exporter's streaming path and the partitioned repository's archival worker
-are not.
+its whole surface area. Still unexercised, and listed because the base rate for "never run" in this
+codebase is now six for six: `CheckHealthAsync` on the connectors, the CSV exporter's streaming path,
+GraphQL (mapped by the template, never in the smoke test), a real-time client connecting to a running
+application, and the generated SDKs — the CLI suite covers `validate`, `schema build`, `ai-spec` and
+LSP framing, not `sdk` or `export`.
+
+**Archival is verified on a standalone server, which is not how it should be deployed.** The
+copy-verify-delete path is what the tests exercise, because that is what the project's own
+infrastructure supports. The transactional path is selected by a server capability check and is
+covered only by inspection — the thing this document says is worth little. Running the suite against
+a replica set would close that.
 
 **The outbox is proven for one message, not under load or failure.** The round trip runs; what it does
 not cover is a broker that goes away mid-publish, the retry ceiling of five attempts, or ordering
@@ -601,19 +653,23 @@ assertion message before anything else.**
 
 ## 6. Recommended priority for the next cycle
 
-The verification backlog is now clear: the catch-site audit, the smoke test extension, endpoint
+Everything that was on a list is done: the catch-site audit, the smoke test extension, endpoint
 authorization, row-level ownership, workflows reaching a running application, coverage on the
-outside-world paths, the outbox round trip against a real broker, and the last mirrored
-implementation are all done. Two of those were not on any list before the cycle that found them —
-they came from asking whether the framework was production-ready and then checking rather than
-answering from memory, which remains the more useful lesson than any item below.
+outside-world paths, the outbox round trip against a real broker, the last mirrored implementation,
+and hot/cold partitioning. **Three of those were not on any list before the cycle that found them** —
+they came from asking whether the framework was production-ready, then checking rather than answering
+from memory. That remains the more useful lesson than any item below.
 
-One item is left, and its position is the point: for the first time the next thing to do is work
-someone chose rather than damage someone discovered.
+Two items, and the first exists because checking one unverified feature immediately found a sixth
+failure. The order matters: finish looking before building more.
 
-1. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
+1. **Run the five remaining unexercised features once, end to end** — `CheckHealthAsync`, the CSV
+   exporter's streaming path, GraphQL, a real-time client, and the generated SDKs. This was not on
+   the list until partitioning was checked and failed; six for six is no longer a coincidence, and
+   this is cheap relative to what it keeps finding.
+2. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than
-   precede it. That condition is now met.
+   precede it. Item 1 is the last of that.
 
 Worth adding to that list before starting it, from section 5 rather than from this one: resource-level
 authorization beyond ownership, a read path for workflow history, and the outbox under failure rather
@@ -648,7 +704,7 @@ while its own documentation named the roles it required.** A reviewer reading th
 the schema, or the `Produces(401)` on the route, would have concluded access control was working. The
 one thing that would have shown otherwise was sending a request without a token, and nothing did.
 
-By the end the shape had repeated five times, which stops it being a coincidence and makes it a
+By the end the shape had repeated six times, which stops it being a coincidence and makes it a
 property of how the project was built: **layers were completed in isolation and connected on faith.**
 Each layer was reviewable and correct. The connection between them was neither, because nothing
 executed it, and code review cannot see an absence.
@@ -659,7 +715,7 @@ Three lessons, in order of how much they would have saved:
    verified by assertion-in-documentation, and both survived years of green builds.
 2. **Ask the blunt question and then check.** "Is this production-ready?" was answered by reading the
    code rather than by recalling the design — which is the only reason the authorization gap was found.
-   Two of the five were found this way, from a question rather than a plan.
+   Three of the six were found this way, from a question rather than a plan.
 3. **A comment claiming coverage is indistinguishable from coverage.** The Excel gap survived because a
    remark in a neighbouring test file explained it away, and nobody checked whether the thing it
    pointed at existed.

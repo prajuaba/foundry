@@ -41,7 +41,7 @@ public sealed class DataArchivalWorker : BackgroundService
             try
             {
                 // Run archival sweep
-                await ArchiveOldDataAsync(stoppingToken);
+                await RunSweepAsync(stoppingToken);
 
                 // Sleep for 24 hours
                 await Task.Delay(TimeSpan.FromHours(24), stoppingToken);
@@ -67,14 +67,45 @@ public sealed class DataArchivalWorker : BackgroundService
         _logger.LogInformation("Data Archival Background Worker stopped.");
     }
 
-    private async Task ArchiveOldDataAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Runs one archival sweep across every partitioned entity type.
+    /// </summary>
+    /// <remarks>
+    /// Public so a sweep can be triggered on demand — after a bulk import, or by an operator who does
+    /// not want to wait a day — and so it can be tested. The background loop calls this and nothing
+    /// else, so what runs on a schedule is what a test exercises.
+    /// </remarks>
+    public async Task RunSweepAsync(CancellationToken cancellationToken = default)
     {
         var partitionedTypes = GetPartitionedTypes();
         _logger.LogInformation("Found {Count} partitioned entity types to sweep.", partitionedTypes.Count);
 
+        // Every type is attempted, and the sweep still reports failure. One entity that cannot be
+        // archived must not silently block the rest -- nor be reported as a clean run.
+        var failures = new List<Exception>();
+
         foreach (var type in partitionedTypes)
         {
-            await ProcessPartitionedTypeAsync(type, cancellationToken);
+            try
+            {
+                await ProcessPartitionedTypeAsync(type, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to archive entity: {Name}", type.Name);
+                failures.Add(ex);
+            }
+        }
+
+        if (failures.Count > 0)
+        {
+            throw new AggregateException(
+                $"{failures.Count} of {partitionedTypes.Count} partitioned entity types could not be archived.",
+                failures);
         }
     }
 
@@ -101,54 +132,141 @@ public sealed class DataArchivalWorker : BackgroundService
         var pluralName = entityType.Name.Pluralize();
         _logger.LogInformation("Sweeping partitioned entity: {Name} (Threshold: {Years} years)", entityType.Name, attr.ArchiveThresholdYears);
 
+        var collection = _database.GetCollection<BsonDocument>(pluralName);
+        var archiveThresholdDate = DateTime.UtcNow.AddYears(-attr.ArchiveThresholdYears);
+        var thresholdId = ObjectId.GenerateNewId(archiveThresholdDate);
+
+        // Documents older than the threshold, by the timestamp embedded in their ObjectId.
+        var filter = Builders<BsonDocument>.Filter.Lt("_id", thresholdId);
+
+        var oldDocuments = await collection.Find(filter).ToListAsync(cancellationToken);
+        if (oldDocuments.Count == 0)
+        {
+            _logger.LogInformation("No old documents found to archive for entity: {Name}", entityType.Name);
+            return;
+        }
+
+        _logger.LogInformation("Archiving {Count} documents for entity: {Name}", oldDocuments.Count, entityType.Name);
+
+        var useTransaction = await SupportsTransactionsAsync(cancellationToken);
+
+        foreach (var group in oldDocuments.GroupBy(d => d["_id"].AsObjectId.CreationTime.Year))
+        {
+            await ArchiveYearAsync(collection, pluralName, group.Key, group.ToList(), useTransaction, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// Moves one year's documents into their archive collection.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Insert then delete, in that order, and <b>never</b> the reverse. Without a transaction a
+    /// failure between the two duplicates a document into the archive, which the copy-then-verify
+    /// below detects and which a re-run corrects. Deleting first would lose it outright.
+    /// </para>
+    /// <para>
+    /// The whole sweep used to run inside <c>WithTransactionAsync</c>, and MongoDB supports
+    /// multi-document transactions only on a replica set. Every deployment this project ships --
+    /// its own docker-compose, and the `mongo:7` service in CI -- is a standalone server, so the
+    /// sweep threw <c>NotSupportedException: Standalone servers do not support transactions</c> on
+    /// every run. The exception was caught and logged, so **archival never happened and nothing
+    /// said so**: records aged past the threshold, stayed in the active collection, and became
+    /// unreachable, because reads route by id age and never look there.
+    /// </para>
+    /// </remarks>
+    private async Task ArchiveYearAsync(
+        IMongoCollection<BsonDocument> active,
+        string pluralName,
+        int year,
+        List<BsonDocument> documents,
+        bool useTransaction,
+        CancellationToken ct)
+    {
+        var archiveCollectionName = $"{pluralName}_{year}";
+        var archiveCollection = _database.GetCollection<BsonDocument>(archiveCollectionName);
+        var ids = documents.Select(d => d["_id"].AsObjectId).ToList();
+        var byId = Builders<BsonDocument>.Filter.In("_id", ids);
+
+        if (useTransaction)
+        {
+            using var session = await _database.Client.StartSessionAsync(cancellationToken: ct);
+            await session.WithTransactionAsync(async (st, token) =>
+            {
+                await archiveCollection.InsertManyAsync(st, documents, cancellationToken: token);
+                await active.DeleteManyAsync(st, byId, cancellationToken: token);
+                return true;
+            }, cancellationToken: ct);
+
+            _logger.LogInformation(
+                "Archived {Count} documents into {ArchiveName} transactionally.", documents.Count, archiveCollectionName);
+            return;
+        }
+
+        // Unordered, so one already-archived document from an interrupted previous run does not stop
+        // the rest. A duplicate key here means the copy already exists, which is the outcome wanted.
         try
         {
-            var collection = _database.GetCollection<BsonDocument>(pluralName);
-            var archiveThresholdDate = DateTime.UtcNow.AddYears(-attr.ArchiveThresholdYears);
-            var dummyId = ObjectId.GenerateNewId(archiveThresholdDate);
+            await archiveCollection.InsertManyAsync(
+                documents, new InsertManyOptions { IsOrdered = false }, ct);
+        }
+        catch (MongoBulkWriteException<BsonDocument> ex)
+            when (ex.WriteErrors.All(e => e.Category == ServerErrorCategory.DuplicateKey))
+        {
+            _logger.LogInformation(
+                "{Count} documents were already present in {ArchiveName} from an earlier run.",
+                ex.WriteErrors.Count, archiveCollectionName);
+        }
 
-            // Filter for documents older than threshold using ObjectId creation timestamp
-            var filter = Builders<BsonDocument>.Filter.Lt("_id", dummyId);
+        // Deleted only once the archive copy is confirmed present. Without a transaction this is
+        // what stands between an interrupted sweep and data loss.
+        var archivedCount = await archiveCollection.CountDocumentsAsync(byId, cancellationToken: ct);
+        if (archivedCount != documents.Count)
+        {
+            throw new InvalidOperationException(
+                $"Archiving '{pluralName}' into '{archiveCollectionName}' copied {archivedCount} of "
+                + $"{documents.Count} documents. The active collection is left untouched so nothing "
+                + "is lost; re-run the sweep once the cause is resolved.");
+        }
 
-            var oldDocuments = await collection.Find(filter).ToListAsync(cancellationToken);
-            if (!oldDocuments.Any())
+        await active.DeleteManyAsync(byId, ct);
+
+        _logger.LogInformation(
+            "Archived {Count} documents into {ArchiveName}.", documents.Count, archiveCollectionName);
+    }
+
+    /// <summary>
+    /// Whether this deployment can run a multi-document transaction.
+    /// </summary>
+    /// <remarks>
+    /// A replica set or sharded cluster can; a standalone server cannot. Determined from the server's
+    /// own description rather than by attempting a transaction and catching the failure, so that a
+    /// genuine transaction error is never mistaken for "this server does not do transactions".
+    /// </remarks>
+    private async Task<bool> SupportsTransactionsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var hello = await _database.RunCommandAsync<BsonDocument>(
+                new BsonDocument("hello", 1), cancellationToken: ct);
+
+            var isReplicaSet = hello.Contains("setName");
+            var isSharded = hello.GetValue("msg", BsonNull.Value).ToString() == "isdbgrid";
+
+            if (!isReplicaSet && !isSharded)
             {
-                _logger.LogInformation("No old documents found to archive for entity: {Name}", entityType.Name);
-                return;
+                _logger.LogWarning(
+                    "MongoDB is a standalone server, which does not support multi-document "
+                    + "transactions. Archival will copy and verify before deleting instead. Run a "
+                    + "replica set in production so a sweep is atomic.");
             }
 
-            _logger.LogInformation("Archiving {Count} documents for entity: {Name}", oldDocuments.Count, entityType.Name);
-
-            // Group by creation year
-            var groupedByYear = oldDocuments.GroupBy(d => d["_id"].AsObjectId.CreationTime.Year);
-
-            using var session = await _database.Client.StartSessionAsync(cancellationToken: cancellationToken);
-            await session.WithTransactionAsync(async (sessionToken, ct) =>
-            {
-                foreach (var group in groupedByYear)
-                {
-                    var year = group.Key;
-                    var archiveCollectionName = $"{pluralName}_{year}";
-                    var archiveCollection = _database.GetCollection<BsonDocument>(archiveCollectionName);
-
-                    var docsList = group.ToList();
-
-                    // 1. Write to Archive Collection
-                    await archiveCollection.InsertManyAsync(sessionToken, docsList, cancellationToken: ct);
-
-                    // 2. Delete from Active Collection
-                    var ids = docsList.Select(d => d["_id"].AsObjectId).ToList();
-                    var deleteFilter = Builders<BsonDocument>.Filter.In("_id", ids);
-                    await collection.DeleteManyAsync(sessionToken, deleteFilter, cancellationToken: ct);
-
-                    _logger.LogInformation("Successfully archived {Count} documents into {ArchiveName}.", docsList.Count, archiveCollectionName);
-                }
-                return true;
-            }, cancellationToken: cancellationToken);
+            return isReplicaSet || isSharded;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to run archiving migration for entity: {Name}", entityType.Name);
+            _logger.LogWarning(ex, "Could not determine whether MongoDB supports transactions; assuming it does not.");
+            return false;
         }
     }
 }

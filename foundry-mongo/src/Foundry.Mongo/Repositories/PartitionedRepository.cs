@@ -36,6 +36,17 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
     private readonly ConcurrentDictionary<int, Repository<T>> _archiveRepositories = new();
     private readonly int _thresholdYears;
 
+    /// <summary>
+    /// The ambient tenant, retained so archive repositories are scoped like the active one.
+    /// </summary>
+    /// <remarks>
+    /// This was accepted by the constructor, handed to the active and deleted repositories, and then
+    /// dropped. Archive repositories are created lazily per year, and had nothing to pass — so a row
+    /// left tenant isolation the moment it aged past the archive threshold, and any tenant could read
+    /// any other tenant's archived records by id. Isolation must not depend on how old a record is.
+    /// </remarks>
+    private readonly Foundry.Core.Tenant.ITenantContext? _tenantContext;
+
     public IMongoCollection<T> Collection => _activeRepository.Collection;
     public string CollectionName => _activeRepository.CollectionName;
     public int MaxDepthCap { get => _activeRepository.MaxDepthCap; set => _activeRepository.MaxDepthCap = value; }
@@ -51,6 +62,7 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
         _auditSink = auditSink;
         _userContext = userContext;
         _encryptionProvider = encryptionProvider;
+        _tenantContext = tenantContext;
 
         var partitionedAttribute = typeof(T).GetCustomAttribute<PartitionedAttribute>();
         _thresholdYears = partitionedAttribute?.ArchiveThresholdYears ?? 2;
@@ -76,7 +88,8 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
         {
             var baseCollectionName = typeof(T).Name.Pluralize();
             var archiveCollectionName = $"{baseCollectionName}_{y}";
-            return new Repository<T>(_db, _auditSink, _userContext, _encryptionProvider, archiveCollectionName);
+            return new Repository<T>(
+                _db, _auditSink, _userContext, _encryptionProvider, archiveCollectionName, _tenantContext);
         });
     }
 
