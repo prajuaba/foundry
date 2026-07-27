@@ -481,6 +481,71 @@ namespace Foundry.Schema.Compiler
             }
         }
 
+        /// <summary>
+        /// Checks that row-level ownership is fully configured, or not configured at all.
+        /// </summary>
+        /// <remarks>
+        /// The dangerous state is the half-configured one, which reads as protected and is not. Every
+        /// rule here exists to make that state impossible to express.
+        /// </remarks>
+        private static void ValidateOwnershipCoherence(
+            Entity entity, List<Property> properties, string path, DiagnosticBag bag)
+        {
+            var ownerKey = properties.FirstOrDefault(p =>
+                p.IsOwnerKey || (p.Attributes ?? new List<string>()).Contains("OwnerKey"));
+
+            if (entity.OwnerScoped && ownerKey is null)
+            {
+                bag.Error(
+                    DiagnosticCatalog.OwnerScopedWithoutOwnerKey,
+                    $"Entity '{entity.Name}' sets 'ownerScoped' but declares no owner key, so there is "
+                    + "nothing to scope rows by.",
+                    $"{path}/properties",
+                    "Add a string property named 'OwnerId' with \"isOwnerKey\": true.");
+            }
+
+            // The mirror of the tenancy case, and dangerous for the same reason: it reads as
+            // owner-scoped to anyone skimming the document, while every query returns every row.
+            if (!entity.OwnerScoped && ownerKey is not null)
+            {
+                bag.Warning(
+                    DiagnosticCatalog.OwnerKeyWithoutOwnerScoped,
+                    $"Entity '{entity.Name}' declares owner key '{ownerKey.Name}' but does not set "
+                    + "'ownerScoped'. No owner filter will be applied and every caller sees every row.",
+                    $"{path}/ownerScoped",
+                    "Set \"ownerScoped\": true, or remove the owner key.");
+            }
+
+            if (ownerKey is not null && !string.Equals(ownerKey.Name, "OwnerId", StringComparison.Ordinal))
+            {
+                bag.Error(
+                    DiagnosticCatalog.OwnerKeyMustBeNamedOwnerId,
+                    $"Entity '{entity.Name}' marks '{ownerKey.Name}' as the owner key, but it must be named 'OwnerId'.",
+                    $"{path}/properties",
+                    "Rename the property to 'OwnerId'.");
+            }
+
+            if (ownerKey is not null
+                && !string.Equals(ownerKey.Type, "string", StringComparison.OrdinalIgnoreCase))
+            {
+                bag.Error(
+                    DiagnosticCatalog.OwnerKeyMustBeNamedOwnerId,
+                    $"Entity '{entity.Name}' declares owner key 'OwnerId' as '{ownerKey.Type}'; it must be a string.",
+                    $"{path}/properties",
+                    "The owner key holds a claim value, which is always a string.");
+            }
+
+            if (!entity.OwnerScoped && entity.OwnerExemptRoles.Count > 0)
+            {
+                bag.Warning(
+                    DiagnosticCatalog.OwnerExemptRolesWithoutOwnerScoped,
+                    $"Entity '{entity.Name}' lists 'ownerExemptRoles' but does not set 'ownerScoped', "
+                    + "so there is no owner filter for those roles to be exempt from.",
+                    $"{path}/ownerScoped",
+                    "Set \"ownerScoped\": true, or remove 'ownerExemptRoles'.");
+            }
+        }
+
         private static void ValidateEntityFeatureCoherence(Entity entity, List<Property> properties, string path, DiagnosticBag bag)
         {
             var declaresTenantKey = properties.Any(p =>
@@ -529,6 +594,26 @@ namespace Foundry.Schema.Compiler
                     "Set \"multiTenant\": true and mark the tenant property with \"isTenantKey\": true, "
                     + "or remove 'tenantProperty'.");
             }
+
+            // The data layer builds its tenant filter against the stored field named "TenantId". A
+            // differently-named key does not merely look untidy: the emitted entity fails to satisfy
+            // IMultiTenant (CS0535), and were it to compile the filter would match no document at
+            // all. Rejected here, where the message can name the property, rather than surfacing as
+            // a compile error in generated code or an empty result set at runtime.
+            var tenantKey = properties.FirstOrDefault(p =>
+                p.IsTenantKey || (p.Attributes ?? new List<string>()).Contains("TenantKey"));
+
+            if (tenantKey is not null
+                && !string.Equals(tenantKey.Name, "TenantId", StringComparison.Ordinal))
+            {
+                bag.Error(
+                    DiagnosticCatalog.TenantKeyMustBeNamedTenantId,
+                    $"Entity '{entity.Name}' marks '{tenantKey.Name}' as the tenant key, but it must be named 'TenantId'.",
+                    $"{path}/properties",
+                    "Rename the property to 'TenantId'.");
+            }
+
+            ValidateOwnershipCoherence(entity, properties, path, bag);
 
             if (!entity.KafkaOutboxEnabled && !string.IsNullOrWhiteSpace(entity.KafkaTopic))
             {

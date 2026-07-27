@@ -106,6 +106,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ArgumentNullException.ThrowIfNull(entity);
 
         StampTenant(entity);
+        StampOwner(entity);
 
         var now = DateTime.UtcNow;
         entity.CreatedAtUtc = now;
@@ -165,6 +166,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         foreach (var entity in list)
         {
             StampTenant(entity);
+            StampOwner(entity);
             entity.CreatedAtUtc = now;
             entity.UpdatedAtUtc = now;
             entity.Version = 1;
@@ -439,7 +441,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ArgumentNullException.ThrowIfNull(updateSelector);
 
         var objectId = ConvertToObjectId(id);
-        var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId));
+        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId)));
 
         var existingCursor = session != null
             ? await _collection.FindAsync(session, filter, new FindOptions<T> { Limit = 1 }, ct)
@@ -483,10 +485,10 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         }
 
         // Optimistic Concurrency Control
-        var occFilter = ScopeToTenant(Builders<T>.Filter.And(
+        var occFilter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.And(
             Builders<T>.Filter.Eq(e => e.Id, objectId),
             Builders<T>.Filter.Eq(e => e.Version, oldVersion)
-        ));
+        )));
 
         var encrypted = EncryptEntityForWrite(entityAfter);
 
@@ -586,9 +588,10 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         // The update is a whole-document replace, so an unstamped tenant in the request body would
         // be written verbatim -- letting a PUT move a row into another tenant.
         StampTenant(entity);
+        StampOwner(entity);
 
         var oldVersion = entity.Version;
-        var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, entity.Id));
+        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, entity.Id)));
 
         var existingCursor = session != null
             ? await _collection.FindAsync(session, filter, new FindOptions<T> { Limit = 1 }, ct)
@@ -626,10 +629,10 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         }
 
         // Optimistic Concurrency Control
-        var occFilter = ScopeToTenant(Builders<T>.Filter.And(
+        var occFilter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.And(
             Builders<T>.Filter.Eq(e => e.Id, entity.Id),
             Builders<T>.Filter.Eq(e => e.Version, oldVersion)
-        ));
+        )));
 
         var encrypted = EncryptEntityForWrite(entity);
 
@@ -895,7 +898,8 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         foreach (var entity in list)
         {
             StampTenant(entity);
-            var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, entity.Id));
+            StampOwner(entity);
+            var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, entity.Id)));
             var findOptions = new FindOptions<T> { Limit = 1 };
             var existingCursor = session != null
                 ? await _collection.FindAsync(session, filter, findOptions, ct)
@@ -1033,7 +1037,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         CancellationToken ct = default)
     {
         var objectId = ConvertToObjectId(id);
-        var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId));
+        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId)));
 
         var findOptions = new FindOptions<T> { Limit = 1 };
         var existingCursor = session != null
@@ -1453,7 +1457,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         DecryptEntity(entity); // Decrypt to plaintext for application-side restore logic
 
         var objectId = ConvertToObjectId(id);
-        var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId));
+        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId)));
 
         var existingCursor = session != null
             ? await _collection.FindAsync(session, filter, new FindOptions<T> { Limit = 1 }, ct)
@@ -1514,7 +1518,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         if (!typeof(ISoftDelete).IsAssignableFrom(typeof(T)))
             throw new NotSupportedException($"Entity type '{typeof(T).Name}' does not support soft delete.");
 
-        var filter = ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, id));
+        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, id)));
 
         // Bypass soft delete filter to fetch the soft-deleted record
         var findOptions = new FindOptions<T> { Limit = 1 };
@@ -1544,10 +1548,10 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         var oldVersion = entity.Version;
         entity.Version = oldVersion + 1;
 
-        var occFilter = ScopeToTenant(Builders<T>.Filter.And(
+        var occFilter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.And(
             Builders<T>.Filter.Eq(e => e.Id, id),
             Builders<T>.Filter.Eq(e => e.Version, oldVersion)
-        ));
+        )));
 
         var encrypted = EncryptEntityForWrite(entity);
 
@@ -1681,6 +1685,138 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     }
 
     /// <summary>
+    /// Roles for <typeparamref name="T"/> that see every row in the tenant rather than only their own.
+    /// </summary>
+    /// <remarks>
+    /// Read once per closed generic type. The attribute is fixed at compile time, so re-reading it
+    /// per call would be reflection on every query.
+    /// </remarks>
+    private static readonly string[] OwnerExemptRoles =
+        ((Foundry.Core.Security.OwnerExemptRolesAttribute?)Attribute.GetCustomAttribute(
+            typeof(T), typeof(Foundry.Core.Security.OwnerExemptRolesAttribute)))?.Roles
+        ?? Array.Empty<string>();
+
+    private static readonly bool IsOwnerScoped =
+        typeof(Foundry.Core.Security.IOwnedResource).IsAssignableFrom(typeof(T));
+
+    /// <summary>
+    /// The caller's own identifier, or <c>null</c> when there is no authenticated caller.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not <see cref="ICurrentUserContext.OperatorId"/>, which falls back to the literal
+    /// "anonymous" so that audit records always carry something. That fallback is right for audit and
+    /// wrong here: it would become a legitimate owner value, and every unauthenticated caller would
+    /// share ownership of every row written without a caller. Ownership asks a stricter question --
+    /// is there an authenticated principal at all -- and answers null when there is not.
+    /// </remarks>
+    private string? CurrentOwnerId
+    {
+        get
+        {
+            var principal = _userContext?.User;
+            if (principal?.Identity?.IsAuthenticated != true) return null;
+
+            var id = principal.FindFirst("sub")?.Value
+                  ?? principal.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+            return string.IsNullOrWhiteSpace(id) ? null : id;
+        }
+    }
+
+    /// <summary>
+    /// Whether the current caller is exempt from the owner filter for this entity.
+    /// </summary>
+    /// <remarks>
+    /// Exemption lifts the owner filter only. The tenant filter is applied independently and is never
+    /// affected, so an exempt role is wider access within one tenant and never across tenants.
+    /// </remarks>
+    private bool IsOwnerExempt()
+    {
+        if (OwnerExemptRoles.Length == 0) return false;
+
+        var principal = _userContext?.User;
+        if (principal?.Identity?.IsAuthenticated != true) return false;
+
+        foreach (var role in OwnerExemptRoles)
+        {
+            if (principal.IsInRole(role)) return true;
+
+            // Role claims are matched by their raw name too. AddFoundryAuthentication sets
+            // MapInboundClaims=false and a configurable RoleClaimType, so IsInRole alone would
+            // depend on the principal having been built with a matching ClaimsIdentity role type.
+            if (principal.HasClaim(c =>
+                    (c.Type == "role" || c.Type == System.Security.Claims.ClaimTypes.Role)
+                    && string.Equals(c.Value, role, StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether reads and id-addressed writes should be narrowed to the caller's own rows.
+    /// </summary>
+    private bool TryGetOwnerScope(out string ownerId)
+    {
+        ownerId = string.Empty;
+
+        if (!IsOwnerScoped) return false;
+        if (_userContext is null) return false;   // no caller concept at all: background jobs, migrations
+        if (IsOwnerExempt()) return false;
+
+        var current = CurrentOwnerId;
+        if (current is null) return false;
+
+        ownerId = current;
+        return true;
+    }
+
+    /// <summary>
+    /// Stamps the authenticated caller onto a row being written.
+    /// </summary>
+    /// <remarks>
+    /// Server-assigned for the same reason the tenant is: a caller who could set this could create
+    /// rows owned by somebody else, or hand one of their own to another user. An owner-scoped write
+    /// with no authenticated caller is refused rather than left blank, because a row owned by nobody
+    /// is unreachable to every non-exempt caller and silently accumulates.
+    /// </remarks>
+    private void StampOwner(T entity)
+    {
+        if (entity is not Foundry.Core.Security.IOwnedResource owned) return;
+        if (_userContext is null) return;
+
+        var current = CurrentOwnerId;
+
+        if (current is null)
+        {
+            // An exempt caller acting on behalf of the system still needs an identity to write with;
+            // exemption widens what may be read, not who may own a row.
+            throw new InvalidOperationException(
+                $"'{typeof(T).Name}' is owner-scoped, but the current request has no authenticated "
+                + "caller, so the row would belong to nobody and be unreachable. Ensure the endpoint "
+                + "requires authentication and that the token carries a 'sub' claim.");
+        }
+
+        owned.OwnerId = current;
+    }
+
+    /// <summary>
+    /// Restricts a write targeted by id to rows the caller owns.
+    /// </summary>
+    /// <remarks>
+    /// The same reasoning as the tenant scope: an id is handed out in every list response, so a write
+    /// addressed by id must be narrowed or knowing an id is enough to modify somebody else's row.
+    /// </remarks>
+    private FilterDefinition<T> ScopeToOwner(FilterDefinition<T> filter)
+    {
+        if (!TryGetOwnerScope(out var ownerId)) return filter;
+
+        return Builders<T>.Filter.And(filter, Builders<T>.Filter.Eq("OwnerId", ownerId));
+    }
+
+    /// <summary>
     /// Restricts a write targeted by id to the ambient tenant.
     /// </summary>
     /// <remarks>
@@ -1727,6 +1863,12 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             filter = Builders<T>.Filter.And(filter, tenantFilter);
         }
 
+        // Ownership narrows within the tenant; it never replaces the tenant filter above.
+        if (TryGetOwnerScope(out var ownerId))
+        {
+            filter = Builders<T>.Filter.And(filter, Builders<T>.Filter.Eq("OwnerId", ownerId));
+        }
+
         return filter;
     }
 
@@ -1760,6 +1902,17 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             And(Expression.Equal(
                 Expression.Property(parameter, nameof(Foundry.Core.Tenant.IMultiTenant.TenantId)),
                 Expression.Constant(_tenantContext.TenantId, typeof(string))));
+        }
+
+        // This overload is the one behind FindManyAsync, CountAsync and FindByCriteriaAsync -- every
+        // generated list endpoint. Omitting the owner predicate here would leave ownership enforced
+        // on reads of a single row and absent from reads of all of them, which is the more damaging
+        // half to miss. It is the same trap the tenant filter fell into.
+        if (TryGetOwnerScope(out var ownerId))
+        {
+            And(Expression.Equal(
+                Expression.Property(parameter, nameof(Foundry.Core.Security.IOwnedResource.OwnerId)),
+                Expression.Constant(ownerId, typeof(string))));
         }
 
         if (body is null) return filter ?? (x => true);

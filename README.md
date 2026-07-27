@@ -85,8 +85,8 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **654 C# tests passing**: 157 compiler, 75 integration, 73 rules, 63 file-IO, 54 API,
-52 core, 42 MongoDB, 34 Kafka, 31 connectors, 26 real-time, 26 testing, 21 CLI. Run it this way
+Expect **689 C# tests passing**: 173 compiler, 75 integration, 73 rules, 63 file-IO, 61 MongoDB,
+54 API, 52 core, 34 Kafka, 31 connectors, 26 real-time, 26 testing, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
 
@@ -98,9 +98,9 @@ cd foundry-studio && npm test
 
 The suites above check that code is generated and that it compiles. Neither says an application
 *works*, so one gate scaffolds two projects, runs them, and drives them over HTTP with real JWTs it
-mints itself — authentication, the roles a schema declares, CRUD, validation, filtering, optimistic
-concurrency, a restart, and tenant isolation across two tenants. It needs MongoDB on
-`localhost:27017`:
+mints itself — authentication, the roles a schema declares, row-level ownership, CRUD, validation,
+filtering, optimistic concurrency, a restart, and tenant isolation across two tenants. It needs
+MongoDB on `localhost:27017`:
 
 ```bash
 ./scripts/runtime-smoke-test.sh
@@ -130,6 +130,26 @@ export Authentication__Jwt__SigningKey="$(openssl rand -base64 48)"
 Roles are read from the `role` claim and the tenant from `tenant_id`; both claim names are
 configurable under `Authentication:Jwt`. A signed `tenant_id` always outranks the
 `X-Tenant-ID` header, which remains only for callers a token cannot describe.
+
+Roles decide whether a caller may use an endpoint. To decide which **rows** they see through it,
+mark an entity owner-scoped:
+
+```json
+{
+  "name": "Note",
+  "ownerScoped": true,
+  "ownerExemptRoles": ["Supervisor"],
+  "properties": [
+    { "name": "OwnerId", "type": "string", "isOwnerKey": true }
+  ]
+}
+```
+
+`OwnerId` is assigned from the caller's `sub` claim and overwritten if a request body sets it.
+Lists, reads by id, updates and deletes are all narrowed to the caller's own rows; roles in
+`ownerExemptRoles` see everything **within their tenant**, never across one. The tenant key must
+be named `TenantId` and the owner key `OwnerId` — the data layer filters on those field names, and
+the compiler rejects any other name rather than emitting a filter that matches nothing.
 
 ### 4. CLI Tooling Commands (`foundry`)
 Run the unified `Foundry.Cli` executable:

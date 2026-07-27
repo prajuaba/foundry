@@ -139,6 +139,27 @@ namespace Foundry.Schema.Compiler
         [JsonPropertyName("tenantProperty")]
         public string? TenantProperty { get; init; }
 
+        /// <summary>
+        /// Restricts rows to the caller who created them, in addition to any tenant filter.
+        /// </summary>
+        /// <remarks>
+        /// Roles answer "may this caller call this endpoint"; ownership answers "which rows may they
+        /// see through it". Without it, any caller holding a declared role reaches every row in their
+        /// tenant — adequate for back-office tools, not for anything where users hold their own records.
+        /// </remarks>
+        [JsonPropertyName("ownerScoped")]
+        public bool OwnerScoped { get; init; }
+
+        /// <summary>
+        /// Roles that see every row in the tenant rather than only their own.
+        /// </summary>
+        /// <remarks>
+        /// Exemption lifts the owner filter and never the tenant filter, so it widens access within
+        /// one tenant and cannot cross tenants.
+        /// </remarks>
+        [JsonPropertyName("ownerExemptRoles")]
+        public List<string> OwnerExemptRoles { get; init; } = new();
+
         public Dictionary<string, List<string>> ApiBusinessRules { get; init; } = new();
 
         /// <summary>
@@ -181,6 +202,13 @@ namespace Foundry.Schema.Compiler
         public string Type { get; init; } = string.Empty;
         public bool IsKey { get; init; }
         public bool IsTenantKey { get; init; }
+
+        /// <summary>
+        /// Marks the property that records which caller owns the row. Must be named <c>OwnerId</c>.
+        /// </summary>
+        [JsonPropertyName("isOwnerKey")]
+        public bool IsOwnerKey { get; init; }
+
         public bool IsEnum { get; init; }
         public List<string> Attributes { get; init; } = new();
     }

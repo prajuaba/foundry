@@ -629,6 +629,14 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
             if (isMultiTenant)
                 interfaces.Add("IMultiTenant");
 
+            // Row-level ownership. Composes with tenancy rather than replacing it: the data layer
+            // applies both filters, so an owner-scoped multi-tenant entity is narrowed twice.
+            var isOwnerScoped = entity.OwnerScoped
+                || entity.Properties.Any(p => p.IsOwnerKey || p.Attributes.Contains("OwnerKey"));
+
+            if (isOwnerScoped)
+                interfaces.Add("IOwnedResource");
+
             var interfaceList = string.Join(", ", interfaces);
 
             var properties = new List<string>();
@@ -663,12 +671,25 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
                 // `set` is also what the DAL needs here: the repository stamps the tenant from the
                 // ambient context on insert rather than trusting the request body, which it cannot
                 // do through an init-only accessor.
-                var initKeyword = isTenantKey && isMultiTenant ? "get; set" : "get; init";
+                //
+                // The owner key needs `set` for exactly the same two reasons: IOwnedResource
+                // declares one, and the repository stamps the owner from the authenticated caller
+                // instead of trusting the request body.
+                var isOwnerKey = prop.IsOwnerKey || prop.Attributes.Contains("OwnerKey");
+
+                var initKeyword = (isTenantKey && isMultiTenant) || (isOwnerKey && isOwnerScoped)
+                    ? "get; set"
+                    : "get; init";
 
                 var attributes = new List<string>();
                 if (isTenantKey)
                 {
                     attributes.Add("[TenantKey]");
+                }
+
+                if (isOwnerKey)
+                {
+                    attributes.Add("[OwnerKey]");
                 }
 
                 foreach (var attr in prop.Attributes)
@@ -783,6 +804,20 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
                 realTimeAttribute = $"[RealTime(true, new[] {{ {rolesList} }})]\n";
             }
 
+            // Roles that see the whole tenant rather than only their own rows. Carried on the entity
+            // because it is a policy about the entity, not a value on any row.
+            var ownerExemptAttribute = "";
+            if (isOwnerScoped && entity.OwnerExemptRoles.Count > 0)
+            {
+                // CodeGen.LitList escapes, so a role name containing a quote cannot terminate the
+                // literal and inject code -- the schema-to-code injection this compiler has had once.
+                var exemptList = CodeGen.LitList(
+                    entity.OwnerExemptRoles.Where(r => !string.IsNullOrWhiteSpace(r)));
+
+                if (!string.IsNullOrEmpty(exemptList))
+                    ownerExemptAttribute = $"[OwnerExemptRoles({exemptList})]\n";
+            }
+
             // Entity-level indexes. Previously parsed, validated and then dropped on the floor:
             // nothing in the emitter referenced entity.Indexes, so a declared composite index was
             // never created and queries silently fell back to collection scans.
@@ -806,7 +841,7 @@ using Foundry.Core.Entities;{extraImports}
 
 namespace {CodeGen.Ns(@namespace)};
 
-{partitionAttribute}{realTimeAttribute}{compoundIndexAttribute}public partial record {CodeGen.Ident(entity.Name, "Entity name")} : {interfaceList}
+{partitionAttribute}{realTimeAttribute}{ownerExemptAttribute}{compoundIndexAttribute}public partial record {CodeGen.Ident(entity.Name, "Entity name")} : {interfaceList}
 {{{propertyLines}}}";
         }
 

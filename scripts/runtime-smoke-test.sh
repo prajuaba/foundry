@@ -405,6 +405,19 @@ cat > "$WORK_DIR/tenant-schema.json" <<'SCHEMA'
       ],
       "ApiEnabledMethods": ["GET", "POST", "GET_BY_ID", "PUT", "DELETE"],
       "ApiRoles": { "DELETE": ["Admin"] }
+    },
+    {
+      "Name": "Note",
+      "multiTenant": true,
+      "ownerScoped": true,
+      "ownerExemptRoles": ["Supervisor"],
+      "Properties": [
+        { "Name": "Id", "Type": "ObjectId", "IsKey": true },
+        { "Name": "TenantId", "Type": "string", "isTenantKey": true },
+        { "Name": "OwnerId", "Type": "string", "isOwnerKey": true },
+        { "Name": "Body", "Type": "string", "Attributes": ["Required"] }
+      ],
+      "ApiEnabledMethods": ["GET", "POST", "GET_BY_ID", "PUT", "DELETE"]
     }
   ]
 }
@@ -541,6 +554,93 @@ log "The declared role does grant access"
 authenticate_as "$ACME_ADMIN"
 expect_status 204 "DELETE as Admin" -X DELETE "$BASE/api/invoices/$ACME_ID"
 expect_status 404 "GET after the authorised delete" "$BASE/api/invoices/$ACME_ID"
+
+# ── Row-level ownership ─────────────────────────────────────────────────────
+#
+# Roles decide whether a caller may use an endpoint. Ownership decides which rows they see through
+# it. Without it any caller holding a role reached every row in their tenant, which is adequate for
+# a back-office tool and not for anything where users hold their own records.
+#
+# Note declares "ownerScoped": true with "ownerExemptRoles": ["Supervisor"], and is multi-tenant, so
+# this also exercises the interaction that matters most: exemption must lift the owner filter and
+# never the tenant filter.
+ALICE=$(mint_token alice "" acme)
+BOB=$(mint_token bob "" acme)
+ACME_SUPERVISOR=$(mint_token acme-supervisor Supervisor acme)
+GLOBEX_SUPERVISOR=$(mint_token globex-supervisor Supervisor globex)
+
+log "A row is stamped with the caller who created it"
+authenticate_as "$ALICE"
+expect_status 201 "POST /api/notes as alice" \
+  -X POST "$BASE/api/notes" -H 'Content-Type: application/json' -d '{"body":"ALICE-NOTE"}'
+ALICE_NOTE=$(json_field "$WORK_DIR/body.json" Id id)
+NOTE_OWNER=$(json_field "$WORK_DIR/body.json" OwnerId ownerId)
+[[ "$NOTE_OWNER" == "alice" ]] || fail "the note's owner was '$NOTE_OWNER', expected 'alice'"
+pass "alice's note is stamped alice from the token's sub claim"
+
+authenticate_as "$BOB"
+expect_status 201 "POST /api/notes as bob" \
+  -X POST "$BASE/api/notes" -H 'Content-Type: application/json' -d '{"body":"BOB-NOTE"}'
+BOB_NOTE=$(json_field "$WORK_DIR/body.json" Id id)
+
+log "A caller cannot create a row owned by somebody else"
+authenticate_as "$ALICE"
+expect_status 201 "POST as alice claiming to be bob in the body" \
+  -X POST "$BASE/api/notes" -H 'Content-Type: application/json' \
+  -d '{"body":"FORGED-OWNER","ownerId":"bob"}'
+FORGED_OWNER=$(json_field "$WORK_DIR/body.json" OwnerId ownerId)
+[[ "$FORGED_OWNER" == "alice" ]] \
+  || fail "a request body set the owner to '$FORGED_OWNER' -- a caller can create rows owned by others"
+pass "the body's owner was overwritten with the caller's own"
+
+log "A list request returns only the caller's own rows"
+expect_status 200 "GET /api/notes as alice" "$BASE/api/notes"
+grep -q 'BOB-NOTE' "$WORK_DIR/body.json" \
+  && fail "alice's list contains bob's note -- ownership is not applied to reads"
+grep -q 'ALICE-NOTE' "$WORK_DIR/body.json" \
+  || fail "alice's list is missing her own note"
+pass "alice sees ALICE-NOTE and not BOB-NOTE"
+
+log "Another caller's row is not reachable by id"
+expect_status 404 "GET bob's note as alice" "$BASE/api/notes/$BOB_NOTE"
+expect_status 200 "GET alice's note as alice" "$BASE/api/notes/$ALICE_NOTE"
+
+log "A write against another caller's row does not take effect"
+curl -s -o /dev/null ${AUTH[@]+"${AUTH[@]}"} -X PUT "$BASE/api/notes/$BOB_NOTE" \
+  -H 'Content-Type: application/json' \
+  -d "{\"id\":\"$BOB_NOTE\",\"body\":\"STOLEN\",\"version\":1}" || true
+curl -s -o /dev/null ${AUTH[@]+"${AUTH[@]}"} -X DELETE "$BASE/api/notes/$BOB_NOTE" || true
+
+authenticate_as "$BOB"
+expect_status 200 "GET bob's note as bob" "$BASE/api/notes/$BOB_NOTE"
+grep -q 'STOLEN' "$WORK_DIR/body.json" \
+  && fail "alice overwrote bob's note -- writes addressed by id are not owner-scoped"
+grep -q 'BOB-NOTE' "$WORK_DIR/body.json" \
+  || fail "bob's note no longer holds its own value"
+pass "bob's note survived both a cross-owner update and a cross-owner delete"
+
+log "An exempt role sees every row in its tenant"
+# Supervisors and auditors are the reason ownership can be enforced by default rather than opted in.
+authenticate_as "$ACME_SUPERVISOR"
+expect_status 200 "GET /api/notes as an acme Supervisor" "$BASE/api/notes"
+grep -q 'ALICE-NOTE' "$WORK_DIR/body.json" || fail "the supervisor cannot see alice's note"
+grep -q 'BOB-NOTE' "$WORK_DIR/body.json" || fail "the supervisor cannot see bob's note"
+pass "the acme supervisor sees both notes"
+
+expect_status 200 "GET bob's note as an acme Supervisor" "$BASE/api/notes/$BOB_NOTE"
+
+# The interaction that matters most. Exemption lifts the owner filter; if it lifted the tenant
+# filter too, a supervisor in one tenant would become a supervisor of all of them.
+log "An exempt role is still confined to its own tenant"
+authenticate_as "$GLOBEX_SUPERVISOR"
+expect_status 200 "GET /api/notes as a globex Supervisor" "$BASE/api/notes"
+grep -q 'ALICE-NOTE' "$WORK_DIR/body.json" \
+  && fail "a globex supervisor sees acme's notes -- exemption lifted the tenant filter"
+grep -q 'BOB-NOTE' "$WORK_DIR/body.json" \
+  && fail "a globex supervisor sees acme's notes -- exemption lifted the tenant filter"
+pass "the globex supervisor sees none of acme's notes"
+
+expect_status 404 "GET an acme note as a globex Supervisor" "$BASE/api/notes/$ALICE_NOTE"
 
 # A multi-tenant row with no tenant is invisible to every tenant once isolation is on, and
 # visible to all of them until then. The write is refused rather than silently orphaned.

@@ -93,10 +93,10 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 654 C# tests across 12 suites |
+| `Build and test` | 689 C# tests across 12 suites |
 | `Studio tests and typecheck` | 28 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
-| `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication and declared roles**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
+| `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication, declared roles and row-level ownership**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
 
 CI first went green on `bf3e227`. The runtime smoke test is the one that matters most, because it is the
 only gate that runs a generated application rather than compiling one — and reaching it required six
@@ -159,6 +159,46 @@ token signed with a different key gets 401, a `Clerk` gets 403 where the schema 
 `Admin` gets 204. Enforcement that refuses everyone is not enforcement, so the positive case is asserted
 alongside the negatives.
 
+### Authorization reaches individual rows
+
+Roles decide whether a caller may use an endpoint. They say nothing about which rows come back
+through it, so any caller holding a declared role reached every row in their tenant — adequate for a
+back-office tool, and not for anything where users hold their own records.
+
+An entity can now declare ownership:
+
+```json
+{
+  "name": "Note",
+  "multiTenant": true,
+  "ownerScoped": true,
+  "ownerExemptRoles": ["Supervisor"],
+  "properties": [
+    { "name": "OwnerId", "type": "string", "isOwnerKey": true }
+  ]
+}
+```
+
+Enforcement lives in the data layer rather than at the endpoint, which is the decision the whole
+feature turns on. An endpoint check can refuse a request; it cannot filter a list. Putting ownership
+where the tenant filter already lives means the list path, the by-id path, updates and deletes are
+narrowed by one mechanism instead of four, and the two filters compose: **ownership narrows within a
+tenant and can never widen across one.** That last property is asserted directly — a `Supervisor`
+exempt from the owner filter in one tenant still sees nothing belonging to another.
+
+`OwnerId` is server-assigned from the caller's `sub` claim and overwritten if the request body sets
+it, for the same reason the tenant is. It reads the authenticated principal rather than
+`ICurrentUserContext.OperatorId`, which falls back to the literal `"anonymous"` — right for audit,
+and wrong here, where it would become a legitimate owner value shared by every unauthenticated write.
+
+**A pre-existing bug surfaced while building it.** A tenant key named anything other than `TenantId`
+produced a project that would not compile (CS0535, `IMultiTenant.TenantId` unimplemented) — and had
+it compiled, the repository's filter on the field `"TenantId"` would have matched no document. The
+data layer identifies these fields by name, so both keys are now required to be named `TenantId` and
+`OwnerId`, with diagnostics FDY3011 and FDY3014 rejecting anything else at validation time. That is a
+constraint rather than a fix, but it is stated at the point where the message can name the property
+instead of surfacing as a compile error in generated code or an empty result set at runtime.
+
 ### Tenant isolation now exists
 
 It did not before, in four independent ways, and extending the smoke test is what surfaced them. The
@@ -199,13 +239,13 @@ Every module has tests:
 
 | Suite | Tests |
 | ----- | ----: |
-| `foundry-schema` | 157 |
+| `foundry-schema` | 173 |
 | `foundry-integration-tests` | 75 |
 | `foundry-rules` | 73 |
 | `foundry-file-io` | 63 |
 | `foundry-core` | 52 |
 | `foundry-kafka` | 34 |
-| `foundry-mongo` | 42 |
+| `foundry-mongo` | 61 |
 | `foundry-connectors` | 31 |
 | `foundry-studio` | 28 |
 | `foundry-realtime` | 26 |
@@ -350,9 +390,16 @@ mint them. That is the right split — an identity provider's job is not a code 
 adopting this still has to stand one up, and the scaffolded project does not say so beyond the
 configuration it leaves empty.
 
-**Authorization is role-based only.** There is no resource-level or ownership check: any caller holding
-a declared role reaches every row their tenant can see. For many domains that is not enough, and the
-manifest has nowhere to express more.
+**Ownership is one relationship, not an authorization language.** `ownerScoped` answers "this row
+belongs to one caller", which covers the common case and nothing beyond it. Sharing, delegation,
+team or hierarchy scoping, and field-level restrictions all have nowhere to be expressed. A schema
+needing those still writes them by hand in a business rule, where nothing checks that the rule was
+applied to every path.
+
+**Exempt roles are per entity, not per operation.** A `Supervisor` exempted from the owner filter on
+an entity is exempted for reads, updates and deletes alike. Read-only oversight — the common shape
+for an auditor — cannot be expressed, and combining `ownerExemptRoles` with `apiRoles` on DELETE is
+the closest approximation.
 
 **Scaffolded projects pull in `MessagePack` 2.5.187, which carries known high-severity advisories**
 (transitively, via SignalR). The framework's own dependencies are clean; the generated application's are
@@ -364,25 +411,22 @@ not, and a scaffolded project prints those warnings on its first build.
 
 ## 6. Recommended priority for the next cycle
 
-The catch-site audit, the smoke test extension, and endpoint authorization are done. Authorization was
-not on the previous list at all — it was found by asking whether the framework was production-ready and
-then checking rather than answering from memory, which is the more useful lesson than any item below.
+The catch-site audit, the smoke test extension, endpoint authorization and row-level ownership are all
+done. None of the last two was on the list before this cycle — they were found by asking whether the
+framework was production-ready and then checking rather than answering from memory, which remains the
+more useful lesson than any item below.
 
-1. **Resource-level authorization.** Roles are now enforced, but a role is coarse: any caller with the
-   right role reaches every row in their tenant. Ownership and record-level rules have nowhere to be
-   expressed in the manifest. This is the largest remaining gap between what a regulated buyer will ask
-   for and what exists.
-2. **Make workflows reach a running application.** Emit `Workflows` into `api-manifest.json`, have the
+1. **Make workflows reach a running application.** Emit `Workflows` into `api-manifest.json`, have the
    scaffolder register `AddFoundryWorkflows`, and expose a route that triggers a transition. Today a
    workflow declared in a schema is compiled, validated and then goes nowhere — the same shape as the
    defect class in section 2, at feature scale. Once it runs, the smoke test can cover it in a few lines.
-3. **Deepen coverage on the paths that talk to the outside world** — the connectors' HTTP and SOAP
+2. **Deepen coverage on the paths that talk to the outside world** — the connectors' HTTP and SOAP
    paths, the workflow engine's `ExecuteActionAsync`, the Excel import end to end. These are where
    untrusted input meets the framework and where the remaining silent failures most likely live.
-4. **Add a Kafka job to CI** and take the outbox round trip end to end.
-5. **Remove the last mirrored implementation** by having the designer and playground read routes from a
+3. **Add a Kafka job to CI** and take the outbox round trip end to end.
+4. **Remove the last mirrored implementation** by having the designer and playground read routes from a
    cached manifest rather than deriving them.
-6. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
+5. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than precede
    it.
 

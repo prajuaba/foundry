@@ -63,6 +63,15 @@
         "tenantProperty": {
           "type": "string"
         },
+        "ownerScoped": {
+          "type": "boolean"
+        },
+        "ownerExemptRoles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "apiBusinessRules": {
           "type": "object",
           "additionalProperties": {
@@ -142,6 +151,9 @@
           "type": "boolean"
         },
         "isTenantKey": {
+          "type": "boolean"
+        },
+        "isOwnerKey": {
           "type": "boolean"
         },
         "isEnum": {

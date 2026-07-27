@@ -42,6 +42,11 @@ Ranges: `FDY1xxx` document structure, `FDY2xxx` cross-reference integrity,
 | `FDY3008` | A custom endpoint 'method' must be one of GET, POST, PUT, PATCH, DELETE. |
 | `FDY3009` | A custom endpoint 'route' must begin with '/'. |
 | `FDY3010` | An enum is declared but no property is typed with it. Usually the property that should use it was left as a plain scalar, which loses type safety and leaves the enum dead. |
+| `FDY3011` | The tenant key property must be named 'TenantId'. The data layer builds its tenant filter against the stored field by that name, so any other name compiles to an entity that does not satisfy IMultiTenant -- and, if it did, would filter on a field no document has. |
+| `FDY3012` | A property marked 'isOwnerKey' requires the entity to set 'ownerScoped': true. |
+| `FDY3013` | An entity with 'ownerScoped': true must mark one property 'isOwnerKey'. |
+| `FDY3014` | The owner key property must be named 'OwnerId', for the same reason the tenant key must be named 'TenantId': the data layer filters on the stored field by name. |
+| `FDY3015` | Setting 'ownerExemptRoles' without 'ownerScoped': true has no effect; there is no owner filter for those roles to be exempt from. |
 | `FDY4001` | The name cannot be emitted as C#. Use letters, digits and underscores, starting with a letter or underscore. |
 | `FDY4002` | The name is a reserved C# keyword. Choose a different name. |
 | `FDY4003` | The namespace must be dot-separated valid C# identifiers, e.g. 'Acme.Billing'. |

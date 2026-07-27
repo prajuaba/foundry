@@ -125,8 +125,14 @@ public class GeneratedCodeCompilesTests
     }
 
     /// <summary>
-    /// A minimal multi-tenant document, in its own namespace so it cannot collide with the showcase.
+    /// A document exercising every access-control interface at once, in its own namespace so it
+    /// cannot collide with the showcase.
     /// </summary>
+    /// <remarks>
+    /// Tenancy and ownership are composed on one type deliberately. Both fix the accessor of a
+    /// generated property (<c>set</c>, not <c>init</c>) to satisfy an interface, and both are the
+    /// kind of thing a text-level assertion reports as correct while the type does not compile.
+    /// </remarks>
     private static SchemaModel MultiTenantSchema() => new()
     {
         Namespace = "Foundry.CompileCheck.Tenancy",
@@ -136,11 +142,14 @@ public class GeneratedCodeCompilesTests
             {
                 Name = "TenantScopedInvoice",
                 MultiTenant = true,
+                OwnerScoped = true,
+                OwnerExemptRoles = new List<string> { "Supervisor" },
                 SoftDelete = true,
                 Properties = new List<Property>
                 {
                     new() { Name = "Id", Type = "ObjectId", IsKey = true },
                     new() { Name = "TenantId", Type = "string", IsTenantKey = true },
+                    new() { Name = "OwnerId", Type = "string", IsOwnerKey = true },
                     new() { Name = "Reference", Type = "string", Attributes = new List<string> { "Required" } }
                 }
             }

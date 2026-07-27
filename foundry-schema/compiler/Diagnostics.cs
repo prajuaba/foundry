@@ -260,6 +260,21 @@ namespace Foundry.Schema.Compiler
         /// <summary>An enum is declared but no property is typed with it.</summary>
         public const string UnusedEnum = "FDY3010";
 
+        /// <summary>The tenant key is not named <c>TenantId</c>.</summary>
+        public const string TenantKeyMustBeNamedTenantId = "FDY3011";
+
+        /// <summary>A property is marked <c>isOwnerKey</c> but the entity is not owner-scoped.</summary>
+        public const string OwnerKeyWithoutOwnerScoped = "FDY3012";
+
+        /// <summary>An entity is owner-scoped but declares no owner key.</summary>
+        public const string OwnerScopedWithoutOwnerKey = "FDY3013";
+
+        /// <summary>The owner key is not named <c>OwnerId</c>.</summary>
+        public const string OwnerKeyMustBeNamedOwnerId = "FDY3014";
+
+        /// <summary>Exempt roles are listed but the entity is not owner-scoped.</summary>
+        public const string OwnerExemptRolesWithoutOwnerScoped = "FDY3015";
+
         // ---- FDY4xxx: naming and identifier safety ----
 
         /// <summary>A name is not a valid C# identifier and cannot be emitted as code.</summary>
@@ -297,6 +312,8 @@ namespace Foundry.Schema.Compiler
             KafkaTopicWithoutOutbox,         // named a topic without enabling the outbox
             FileIoExtensionsWithoutFileIo,   // listed extensions without enabling FileIO
             TenantKeyWithoutMultiTenant,     // marked a tenant key without enabling multi-tenancy
+            OwnerKeyWithoutOwnerScoped,      // marked an owner key without enabling owner scoping
+            OwnerExemptRolesWithoutOwnerScoped, // listed exempt roles with nothing to be exempt from
             WorkflowNoFinalState,            // a workflow instances can never leave
             UnknownAttribute                 // the hint lists the supported vocabulary
         };
@@ -334,6 +351,11 @@ namespace Foundry.Schema.Compiler
             [DuplicateTypeName] = "An entity, enum and DTO all become C# types in one namespace and are written to one file per name, so their names must not collide. A collision silently discards one of them.",
             [TenantKeyWithoutMultiTenant] = "A property marked 'isTenantKey' requires the entity to set 'multiTenant': true.",
             [MultiTenantWithoutTenantKey] = "An entity with 'multiTenant': true must mark one property 'isTenantKey' or set 'tenantProperty'.",
+            [TenantKeyMustBeNamedTenantId] = "The tenant key property must be named 'TenantId'. The data layer builds its tenant filter against the stored field by that name, so any other name compiles to an entity that does not satisfy IMultiTenant -- and, if it did, would filter on a field no document has.",
+            [OwnerKeyWithoutOwnerScoped] = "A property marked 'isOwnerKey' requires the entity to set 'ownerScoped': true.",
+            [OwnerScopedWithoutOwnerKey] = "An entity with 'ownerScoped': true must mark one property 'isOwnerKey'.",
+            [OwnerKeyMustBeNamedOwnerId] = "The owner key property must be named 'OwnerId', for the same reason the tenant key must be named 'TenantId': the data layer filters on the stored field by name.",
+            [OwnerExemptRolesWithoutOwnerScoped] = "Setting 'ownerExemptRoles' without 'ownerScoped': true has no effect; there is no owner filter for those roles to be exempt from.",
             [KafkaTopicWithoutOutbox] = "Setting 'kafkaTopic' without 'enableKafkaOutbox': true has no effect.",
             [FileIoExtensionsWithoutFileIo] = "Setting 'fileIOAllowedExtensions' without 'enableFileIO': true has no effect.",
             [UnknownAttribute] = "The attribute is not in the supported vocabulary and will be ignored.",
