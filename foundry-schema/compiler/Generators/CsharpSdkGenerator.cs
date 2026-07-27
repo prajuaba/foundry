@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace Foundry.Schema.Compiler.Generators;
@@ -23,15 +24,29 @@ public static class CsharpSdkGenerator
 
         sb.AppendLine($"namespace {schema.Namespace}.Client;");
 
+        // Enums the entities refer to. Without these the SDK named types nothing declared and did
+        // not compile (CS0246) -- the client was shipped as source, so this was a build error in
+        // the consumer's project, not ours.
+        foreach (var enumDef in schema.Enums ?? new List<Foundry.Schema.Compiler.Enum>())
+        {
+            sb.AppendLine($"\npublic enum {enumDef.Name}");
+            sb.AppendLine("{");
+            sb.AppendLine("    " + string.Join(",\n    ", enumDef.Values));
+            sb.AppendLine("}");
+        }
+
         if (schema.Entities != null)
         {
             foreach (var entity in schema.Entities)
             {
+                // The route the application actually serves, from the one producer of that contract.
+                var route = ApiManifestGenerator.RouteFor(entity.Name);
+
                 sb.AppendLine($"\npublic class {entity.Name}Model");
                 sb.AppendLine("{");
                 foreach (var prop in entity.Properties)
                 {
-                    sb.AppendLine($"    public {prop.Type} {prop.Name} {{ get; set; }}");
+                    sb.AppendLine($"    public {MapClientType(prop, schema)} {prop.Name} {{ get; set; }}");
                 }
                 sb.AppendLine("}");
 
@@ -41,23 +56,56 @@ public static class CsharpSdkGenerator
                 sb.AppendLine($"    public {entity.Name}Client(HttpClient http) => _http = http;\n");
 
                 sb.AppendLine($"    public async Task<List<{entity.Name}Model>?> GetAllAsync()");
-                sb.AppendLine($"        => await _http.GetFromJsonAsync<List<{entity.Name}Model>>(\"/api/v1/{entity.Name.ToLowerInvariant()}\");\n");
+                sb.AppendLine($"        => await _http.GetFromJsonAsync<List<{entity.Name}Model>>(\"{route}\");\n");
 
                 sb.AppendLine($"    public async Task<{entity.Name}Model?> GetByIdAsync(string id)");
-                sb.AppendLine($"        => await _http.GetFromJsonAsync<{entity.Name}Model>($\"/api/v1/{entity.Name.ToLowerInvariant()}/{{id}}\");\n");
+                sb.AppendLine($"        => await _http.GetFromJsonAsync<{entity.Name}Model>($\"{route}/{{id}}\");\n");
 
                 sb.AppendLine($"    public async Task<{entity.Name}Model?> CreateAsync({entity.Name}Model model)");
                 sb.AppendLine("    {");
-                sb.AppendLine($"        var res = await _http.PostAsJsonAsync(\"/api/v1/{entity.Name.ToLowerInvariant()}\", model);");
+                sb.AppendLine($"        var res = await _http.PostAsJsonAsync(\"{route}\", model);");
                 sb.AppendLine($"        return await res.Content.ReadFromJsonAsync<{entity.Name}Model>();");
                 sb.AppendLine("    }\n");
 
                 sb.AppendLine($"    public async Task DeleteAsync(string id)");
-                sb.AppendLine($"        => await _http.DeleteAsync($\"/api/v1/{entity.Name.ToLowerInvariant()}/{{id}}\");");
+                sb.AppendLine($"        => await _http.DeleteAsync($\"{route}/{{id}}\");");
                 sb.AppendLine("}");
             }
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// The C# type a <em>client</em> should see for a schema property.
+    /// </summary>
+    /// <remarks>
+    /// The schema type was emitted verbatim, so a key property produced <c>public ObjectId Id</c> in
+    /// a file with no <c>using MongoDB.Bson</c> and no driver reference. That is wrong twice over: it
+    /// does not compile, and a REST client has no business taking a MongoDB dependency to read an id
+    /// the API sends as a JSON string. Ids and unrecognised types map to <c>string</c>; declared
+    /// enums keep their names, because those are now emitted alongside.
+    /// </remarks>
+    private static string MapClientType(Property property, SchemaModel schema)
+    {
+        if (property.IsEnum
+            || (schema.Enums ?? new List<Foundry.Schema.Compiler.Enum>()).Any(e =>
+                string.Equals(e.Name, property.Type, StringComparison.OrdinalIgnoreCase)))
+        {
+            return property.Type;
+        }
+
+        return property.Type.ToLowerInvariant() switch
+        {
+            "objectid" or "guid" or "string" => "string",
+            "int" or "int32" => "int",
+            "long" or "int64" => "long",
+            "decimal" => "decimal",
+            "double" => "double",
+            "float" => "float",
+            "bool" or "boolean" => "bool",
+            "datetime" => "DateTime",
+            _ => "string"
+        };
     }
 }

@@ -101,10 +101,24 @@ public static class RealTimeServiceCollectionExtensions
     /// <summary>
     /// Maps real-time communications endpoints: SignalR hub, WebSockets accept pipeline, and Server-Sent Events (SSE) route.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every channel requires an authenticated caller. None of them did: in a scaffolded application
+    /// where each generated CRUD endpoint answers 401 without a token, <c>/realtime/sse</c> returned
+    /// 200 and streamed, and the SignalR hub negotiated. These channels carry
+    /// <c>AuditLogEntry</c> notifications with <c>PropertyDiffs</c> — the changed values — so an
+    /// anonymous client could watch every mutation in the system while being refused the endpoint
+    /// that produced it.
+    /// </para>
+    /// <para>
+    /// <c>NotificationHub</c> authorises subscriptions against the caller's roles, which an anonymous
+    /// connection does not have; that check was doing its work on a principal nobody had established.
+    /// </para>
+    /// </remarks>
     public static IEndpointRouteBuilder MapFoundryRealTime(this IEndpointRouteBuilder endpoints)
     {
         // 1. Map SignalR Hub
-        endpoints.MapHub<NotificationHub>("/realtime/hub");
+        endpoints.MapHub<NotificationHub>("/realtime/hub").RequireAuthorization();
 
         // 2. Map Server-Sent Events Endpoint
         endpoints.MapGet("/realtime/sse", async (HttpContext context, SseNotificationService sseService, CancellationToken ct) =>
@@ -133,7 +147,7 @@ public static class RealTimeServiceCollectionExtensions
             {
                 sseService.UnregisterClient(client.Id);
             }
-        });
+        }).RequireAuthorization();
 
         // 3. Map WebSockets Middleware Endpoint
         endpoints.MapGet("/realtime/ws", async (HttpContext context, WebSocketConnectionManager connectionManager) =>
@@ -172,7 +186,7 @@ public static class RealTimeServiceCollectionExtensions
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
                 await context.Response.WriteAsync("Not a WebSocket request.");
             }
-        });
+        }).RequireAuthorization();
 
         return endpoints;
     }

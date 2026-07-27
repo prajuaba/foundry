@@ -30,7 +30,12 @@ public static class TypeScriptSdkGenerator
                 {
                     var propType = MapTypeScriptType(prop.Type);
                     var optional = prop.IsKey || prop.Type.EndsWith("?") ? "?" : "";
-                    sb.AppendLine($"  {prop.Name.ToLowerInvariant()}{optional}: {propType};");
+
+                    // Emitted exactly as declared. These were lower-cased, and the API applies no
+                    // naming policy -- it serialises "FullName", not "fullname" -- so every field on
+                    // every generated interface read back as undefined. TypeScript compiled it
+                    // happily, which is why nothing caught it.
+                    sb.AppendLine($"  {prop.Name}{optional}: {propType};");
                 }
                 sb.AppendLine("}\n");
             }
@@ -41,27 +46,33 @@ public static class TypeScriptSdkGenerator
             foreach (var entity in schema.Entities)
             {
                 var name = entity.Name;
-                var lower = name.ToLowerInvariant();
+
+                // The route the application actually serves, from the one producer of that contract.
+                // This emitted "/api/v1/{singular-lowercase}" -- the identical mistake that was found
+                // and fixed in Studio's designer and playground, and never fixed here. Every SDK this
+                // generator has ever produced, in all three languages, called URLs the running
+                // application does not serve, so every request 404'd.
+                var route = ApiManifestGenerator.RouteFor(name);
 
                 sb.AppendLine($"export class {name}Client {{");
                 sb.AppendLine("  constructor(private config: ApiConfig) {}\n");
 
                 sb.AppendLine($"  async getAll(): Promise<{name}[]> {{");
-                sb.AppendLine($"    const res = await fetch(`${{this.config.baseUrl}}/api/v1/{lower}`, {{");
+                sb.AppendLine($"    const res = await fetch(`${{this.config.baseUrl}}{route}`, {{");
                 sb.AppendLine("      headers: { 'X-Tenant-ID': this.config.tenantId || '', ...this.config.headers }");
                 sb.AppendLine("    });");
                 sb.AppendLine("    return await res.json();");
                 sb.AppendLine("  }\n");
 
                 sb.AppendLine($"  async getById(id: string): Promise<{name}> {{");
-                sb.AppendLine($"    const res = await fetch(`${{this.config.baseUrl}}/api/v1/{lower}/${{id}}`, {{");
+                sb.AppendLine($"    const res = await fetch(`${{this.config.baseUrl}}{route}/${{id}}`, {{");
                 sb.AppendLine("      headers: { 'X-Tenant-ID': this.config.tenantId || '', ...this.config.headers }");
                 sb.AppendLine("    });");
                 sb.AppendLine("    return await res.json();");
                 sb.AppendLine("  }\n");
 
                 sb.AppendLine($"  async create(data: Partial<{name}>): Promise<{name}> {{");
-                sb.AppendLine($"    const res = await fetch(`${{this.config.baseUrl}}/api/v1/{lower}`, {{");
+                sb.AppendLine($"    const res = await fetch(`${{this.config.baseUrl}}{route}`, {{");
                 sb.AppendLine("      method: 'POST',");
                 sb.AppendLine("      headers: { 'Content-Type': 'application/json', 'X-Tenant-ID': this.config.tenantId || '', ...this.config.headers },");
                 sb.AppendLine("      body: JSON.stringify(data)");
@@ -70,7 +81,7 @@ public static class TypeScriptSdkGenerator
                 sb.AppendLine("  }\n");
 
                 sb.AppendLine($"  async delete(id: string): Promise<void> {{");
-                sb.AppendLine($"    await fetch(`${{this.config.baseUrl}}/api/v1/{lower}/${{id}}`, {{");
+                sb.AppendLine($"    await fetch(`${{this.config.baseUrl}}{route}/${{id}}`, {{");
                 sb.AppendLine("      method: 'DELETE',");
                 sb.AppendLine("      headers: { 'X-Tenant-ID': this.config.tenantId || '', ...this.config.headers }");
                 sb.AppendLine("    });");

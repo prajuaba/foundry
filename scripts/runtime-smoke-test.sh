@@ -739,6 +739,32 @@ code=$(status -X POST "$BASE/api/invoices/transitions/submitinvoice" \
   || fail "globex drove a transition on an acme invoice -- workflow writes are not tenant-scoped"
 pass "a cross-tenant transition was refused with $code"
 
+# ── Real-time channels ──────────────────────────────────────────────────────
+#
+# The real-time channels carry AuditLogEntry notifications, and an AuditLogEntry carries
+# PropertyDiffs -- the changed values. None of the three required a token: in an application where
+# every generated CRUD endpoint answers 401, /realtime/sse returned 200 and streamed, and the
+# SignalR hub negotiated. An anonymous client could watch every mutation in the system while being
+# refused the endpoint that produced it.
+log "The real-time channels refuse an anonymous client"
+authenticate_as_nobody
+expect_status 401 "GET /realtime/sse with no token" --max-time 10 "$BASE/realtime/sse"
+expect_status 401 "POST /realtime/hub/negotiate with no token" \
+  --max-time 10 -X POST "$BASE/realtime/hub/negotiate?negotiateVersion=1"
+expect_status 401 "GET /realtime/ws with no token" --max-time 10 "$BASE/realtime/ws"
+
+log "An authenticated client is accepted"
+# 000 is curl's code for a transfer it cut short: SSE holds the connection open, so a timeout here
+# means the stream was established. A 401 would have returned promptly with a status.
+authenticate_as "$ACME_ADMIN"
+sse_code=$(status --max-time 3 "$BASE/realtime/sse" || true)
+[[ "$sse_code" == "200" || "$sse_code" == "000" ]] \
+  || fail "an authenticated SSE connection was refused with $sse_code"
+pass "SSE accepted an authenticated client"
+
+expect_status 200 "POST /realtime/hub/negotiate as an authenticated caller" \
+  --max-time 10 -X POST "$BASE/realtime/hub/negotiate?negotiateVersion=1"
+
 # A multi-tenant row with no tenant is invisible to every tenant once isolation is on, and
 # visible to all of them until then. The write is refused rather than silently orphaned.
 #

@@ -28,24 +28,29 @@ public static class PythonSdkGenerator
                 var name = entity.Name;
                 var lower = name.ToLowerInvariant();
 
+                // The route the application actually serves, from the one producer of that contract.
+                // This emitted "/api/v1/{singular-lowercase}", so every call 404'd. `lower` is still
+                // used for the Python method names, which are a naming choice rather than a contract.
+                var route = ApiManifestGenerator.RouteFor(name);
+
                 sb.AppendLine($"    # {name} endpoints");
                 sb.AppendLine($"    def get_all_{lower}(self) -> List[Dict[str, Any]]:");
-                sb.AppendLine($"        res = requests.get(f'{{self.base_url}}/api/v1/{lower}', headers=self.headers)");
+                sb.AppendLine($"        res = requests.get(f'{{self.base_url}}{route}', headers=self.headers)");
                 sb.AppendLine("        res.raise_for_status()");
                 sb.AppendLine("        return res.json()\n");
 
                 sb.AppendLine($"    def get_{lower}_by_id(self, item_id: str) -> Dict[str, Any]:");
-                sb.AppendLine($"        res = requests.get(f'{{self.base_url}}/api/v1/{lower}/{{item_id}}', headers=self.headers)");
+                sb.AppendLine($"        res = requests.get(f'{{self.base_url}}{route}/{{item_id}}', headers=self.headers)");
                 sb.AppendLine("        res.raise_for_status()");
                 sb.AppendLine("        return res.json()\n");
 
                 sb.AppendLine($"    def create_{lower}(self, data: Dict[str, Any]) -> Dict[str, Any]:");
-                sb.AppendLine($"        res = requests.post(f'{{self.base_url}}/api/v1/{lower}', json=data, headers=self.headers)");
+                sb.AppendLine($"        res = requests.post(f'{{self.base_url}}{route}', json=data, headers=self.headers)");
                 sb.AppendLine("        res.raise_for_status()");
                 sb.AppendLine("        return res.json()\n");
 
                 sb.AppendLine($"    def delete_{lower}(self, item_id: str) -> None:");
-                sb.AppendLine($"        res = requests.delete(f'{{self.base_url}}/api/v1/{lower}/{{item_id}}', headers=self.headers)");
+                sb.AppendLine($"        res = requests.delete(f'{{self.base_url}}{route}/{{item_id}}', headers=self.headers)");
                 sb.AppendLine("        res.raise_for_status()\n");
             }
         }

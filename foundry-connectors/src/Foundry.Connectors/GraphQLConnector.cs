@@ -66,21 +66,8 @@ public class GraphQLConnector : IFoundryConnector
         // entirely: a rejected query was indistinguishable from a query that legitimately returned
         // nothing, and the server's explanation never reached the caller. That is the normal GraphQL
         // failure mode, not an edge case.
-        if (json.ValueKind == JsonValueKind.Object
-            && json.TryGetProperty("errors", out var errorsProp)
-            && errorsProp.ValueKind == JsonValueKind.Array
-            && errorsProp.GetArrayLength() > 0)
+        if (TryReadErrors(json, out var messages))
         {
-            var messages = new List<string>();
-            foreach (var error in errorsProp.EnumerateArray())
-            {
-                messages.Add(error.ValueKind == JsonValueKind.Object
-                    && error.TryGetProperty("message", out var messageProp)
-                    && messageProp.ValueKind == JsonValueKind.String
-                        ? messageProp.GetString() ?? error.GetRawText()
-                        : error.GetRawText());
-            }
-
             throw new HttpRequestException(
                 $"[{Name}] GraphQL query returned {messages.Count} error(s): {string.Join("; ", messages)}");
         }
@@ -99,12 +86,52 @@ public class GraphQLConnector : IFoundryConnector
         {
             var healthQuery = new { query = "{ __typename }" };
             var response = await _http.PostAsJsonAsync("", healthQuery, cancellationToken);
-            return response.IsSuccessStatusCode;
+
+            if (!response.IsSuccessStatusCode) return false;
+
+            // The status code alone is not enough, for the same reason it is not enough in
+            // ExecuteAsync: GraphQL reports application-level failure in the body with a 200. A
+            // server that answers every query with an `errors` array is not healthy, and reading only
+            // the status made the dashboard say so during an outage -- the one moment it is read.
+            var json = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken: cancellationToken);
+            return !TryReadErrors(json, out _);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[GraphQLConnector:{Name}] GraphQL health check failed for {BaseUrl}", Name, _options.BaseUrl);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Reads a GraphQL response's <c>errors</c> array, if it carries one.
+    /// </summary>
+    /// <remarks>
+    /// Shared by <c>ExecuteAsync</c> and the health check deliberately. Both have to agree on what
+    /// counts as a failed response, and the health check previously did not check at all -- it read
+    /// the status code, so a server rejecting every query reported healthy.
+    /// </remarks>
+    private static bool TryReadErrors(JsonElement json, out List<string> messages)
+    {
+        messages = new List<string>();
+
+        if (json.ValueKind != JsonValueKind.Object
+            || !json.TryGetProperty("errors", out var errorsProp)
+            || errorsProp.ValueKind != JsonValueKind.Array
+            || errorsProp.GetArrayLength() == 0)
+        {
+            return false;
+        }
+
+        foreach (var error in errorsProp.EnumerateArray())
+        {
+            messages.Add(error.ValueKind == JsonValueKind.Object
+                && error.TryGetProperty("message", out var messageProp)
+                && messageProp.ValueKind == JsonValueKind.String
+                    ? messageProp.GetString() ?? error.GetRawText()
+                    : error.GetRawText());
+        }
+
+        return true;
     }
 }

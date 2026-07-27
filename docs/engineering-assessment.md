@@ -8,11 +8,11 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-751, on a repository whose CI had never passed once.
+783, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
-> **Six separate features had never executed.** Not under-tested — never run.
+> **Eight separate features had never executed.** Not under-tested — never run.
 >
 > 1. **Multi-tenancy** did not compile. `IMultiTenant` needs a `set`; the compiler emitted `init`.
 > 2. **Generated APIs were anonymous**, while their own OpenAPI output named the roles they required.
@@ -22,16 +22,21 @@ The single most important finding is not any individual bug. It is this:
 >    startup — which is why nobody noticed.
 > 6. **Hot/cold partitioning** archived nothing: the sweep ran inside a MongoDB transaction, which a
 >    standalone server does not support, and the failure was caught and logged.
+> 7. **The generated client SDKs** called `/api/v1/{singular}` in all three languages while the
+>    application serves `/api/{plural}`, so every request 404'd — and the C# one did not compile.
+> 8. **The real-time channels** required no authentication, in an application where every CRUD
+>    endpoint answers 401 without a token.
 
 Each looked correct in source. Each had convincing scaffolding around it — a meticulous validator, a
 pipeline behaviour with its own tests, an OpenAPI description naming the roles. Reading the code
-would have confirmed all six were fine. That is the disposition worth naming: this codebase was
+would have confirmed all eight were fine. That is the disposition worth naming: this codebase was
 consistently good at *appearing* to work, and the appearance was load-bearing.
 
-The enumerated backlog is now clear. But the sixth was found *after* that sentence was first written,
-by picking the most-advertised feature with no tests and running it — and it failed within minutes.
-That is the honest state: the known list is done, and the base rate for "never run" in this codebase
-is six for six. Section 5 lists what is still unexercised, in that spirit.
+Every item on every list is now done. Three of the eight were not on any list until someone asked
+whether an unverified feature worked and then went and ran it — and each failed within minutes of
+being run for the first time. **The base rate for "never executed" in this codebase is eight for
+eight.** Section 5 lists what is still unexercised, and should be read in that light rather than as a
+tidy backlog.
 
 ---
 
@@ -120,11 +125,11 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 746 C# tests across 13 suites |
+| `Build and test` | 778 C# tests across 13 suites |
 | `Outbox round trip` | 5 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
-| `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication, declared roles, row-level ownership and workflow transitions**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
+| `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication, declared roles, row-level ownership, workflow transitions and the real-time channels**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
 
 CI first went green on `bf3e227`. The runtime smoke test is the one that matters most, because it is the
 only gate that runs a generated application rather than compiling one — and reaching it required six
@@ -380,6 +385,53 @@ HTML served with a 200, malformed JSON, an oversized error body — and all pass
 code. Worth stating plainly: coverage that finds nothing is still worth having, and reporting it as a
 finding would be dishonest.
 
+### The generated SDKs called URLs that do not exist
+
+Three generators — TypeScript, C# and Python — and none had ever been executed by a test. All three
+composed a route as `/api/v1/{singular-lowercase}`:
+
+> `/api/v1/customer`, against an application serving `/api/customers`. **Every SDK the framework has
+> ever produced, in every language, 404'd on every call.**
+
+That is the identical mistake found and fixed in Studio's designer and playground earlier in this
+session. It was fixed there and left here, which is the sharpest available argument for deriving a
+route from `ApiManifestGenerator` rather than composing one: **a rule fixed in one copy is not
+fixed.** All three now ask the single producer.
+
+Two more, each characteristic of its language:
+
+- **The C# SDK did not compile.** It emitted `public ObjectId Id` into a file with no
+  `using MongoDB.Bson` and no driver reference, and named enums it never declared. Since the SDK
+  ships as *source*, that was a build error in the consumer's project rather than in ours. Ids now
+  map to `string` — a REST client has no business taking a MongoDB dependency to read an id the API
+  sends as a JSON string — and the enums are emitted alongside.
+- **The TypeScript SDK compiled and was wrong.** It lower-cased every field name, and the API applies
+  no JSON naming policy: it serialises `FullName`, not `fullname`. Every field on every generated
+  interface read back `undefined`, with no error anywhere. TypeScript compiling it happily is exactly
+  why nothing caught it.
+
+The C# SDK is now built by the same real-compile gate that has caught this class four times.
+
+### The real-time channels were open to anyone
+
+`/realtime/sse`, `/realtime/ws` and the SignalR hub required no authentication. Verified against a
+scaffolded application, side by side:
+
+| Request, no token | Response |
+| --- | --- |
+| `GET /api/customers` | **401** |
+| `GET /realtime/sse` | **200**, streaming, with a connection id |
+| `POST /realtime/hub/negotiate` | **200** |
+
+These channels carry `AuditLogEntry` notifications, and an `AuditLogEntry` carries `PropertyDiffs` —
+the changed values. So an anonymous client could watch every mutation in the system while being
+refused the endpoint that produced it.
+
+`NotificationHub` authorises subscriptions against the caller's roles, which an anonymous connection
+does not have: that check was doing careful work on a principal nobody had established. All three
+channels now require an authenticated caller, and the smoke test asserts 401 for each and acceptance
+for a token holder.
+
 ### Hot/cold partitioning archived nothing
 
 Named in section 1 as part of what makes the data layer senior-level work, and it had **no tests at
@@ -444,11 +496,11 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **751 in total**, from 258 at the start:
+Every module has tests. **783 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
-| `foundry-schema` | 184 | — |
+| `foundry-schema` | 201 | — |
 | `foundry-rules` | 87 | — |
 | `foundry-integration-tests` | 75 | MongoDB |
 | `foundry-file-io` | 75 | — |
@@ -456,7 +508,7 @@ Every module has tests. **751 in total**, from 258 at the start:
 | `foundry-api` | 54 | MongoDB |
 | `foundry-core` | 52 | — |
 | `foundry-kafka` | 39 | — |
-| `foundry-connectors` | 37 | — |
+| `foundry-connectors` | 52 | — |
 | `foundry-studio` | 33 | — |
 | `foundry-realtime` | 26 | — |
 | `foundry-testing` | 26 | — |
@@ -614,11 +666,11 @@ generator does not do for custom endpoints.
 ### Verified thinly, or only by inspection
 
 **Coverage is a floor, not a finish.** The suites target each module's highest-consequence surface, not
-its whole surface area. Still unexercised, and listed because the base rate for "never run" in this
-codebase is now six for six: `CheckHealthAsync` on the connectors, the CSV exporter's streaming path,
-GraphQL (mapped by the template, never in the smoke test), a real-time client connecting to a running
-application, and the generated SDKs — the CLI suite covers `validate`, `schema build`, `ai-spec` and
-LSP framing, not `sdk` or `export`.
+its whole surface area. The five named in the previous cycle have been run: connector health checks,
+the generated SDKs and the real-time channels each yielded a defect; the CSV exporter's streaming path
+turned out to be **already covered** — that entry was wrong, from a grep rather than a look; and
+GraphQL is covered only as a *connector*, not as a server. `app.MapGraphQL()` in the template is still
+never exercised, and `foundry export` (OpenAPI, AsyncAPI, Postman, Mermaid) has no test at all.
 
 **Archival is verified on a standalone server, which is not how it should be deployed.** The
 copy-verify-delete path is what the tests exercise, because that is what the project's own
@@ -660,16 +712,16 @@ and hot/cold partitioning. **Three of those were not on any list before the cycl
 they came from asking whether the framework was production-ready, then checking rather than answering
 from memory. That remains the more useful lesson than any item below.
 
-Two items, and the first exists because checking one unverified feature immediately found a sixth
-failure. The order matters: finish looking before building more.
+Two items, and the order is the recommendation: finish looking before building more. Every time that
+order has been inverted in this codebase's history, the result was a feature that read well and had
+never run.
 
-1. **Run the five remaining unexercised features once, end to end** — `CheckHealthAsync`, the CSV
-   exporter's streaming path, GraphQL, a real-time client, and the generated SDKs. This was not on
-   the list until partitioning was checked and failed; six for six is no longer a coincidence, and
-   this is cheap relative to what it keeps finding.
+1. **Run what is still unexercised** — `app.MapGraphQL()` as a *server* (it is covered only as a
+   connector), and `foundry export` in all four formats. The previous round of this found three
+   defects in three features, so the expected yield is not zero.
 2. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than
-   precede it. Item 1 is the last of that.
+   precede it.
 
 Worth adding to that list before starting it, from section 5 rather than from this one: resource-level
 authorization beyond ownership, a read path for workflow history, and the outbox under failure rather
@@ -704,7 +756,7 @@ while its own documentation named the roles it required.** A reviewer reading th
 the schema, or the `Produces(401)` on the route, would have concluded access control was working. The
 one thing that would have shown otherwise was sending a request without a token, and nothing did.
 
-By the end the shape had repeated six times, which stops it being a coincidence and makes it a
+By the end the shape had repeated eight times, which stops it being a coincidence and makes it a
 property of how the project was built: **layers were completed in isolation and connected on faith.**
 Each layer was reviewable and correct. The connection between them was neither, because nothing
 executed it, and code review cannot see an absence.
@@ -715,7 +767,7 @@ Three lessons, in order of how much they would have saved:
    verified by assertion-in-documentation, and both survived years of green builds.
 2. **Ask the blunt question and then check.** "Is this production-ready?" was answered by reading the
    code rather than by recalling the design — which is the only reason the authorization gap was found.
-   Three of the six were found this way, from a question rather than a plan.
+   Five of the eight were found this way, from a question rather than a plan.
 3. **A comment claiming coverage is indistinguishable from coverage.** The Excel gap survived because a
    remark in a neighbouring test file explained it away, and nobody checked whether the thing it
    pointed at existed.

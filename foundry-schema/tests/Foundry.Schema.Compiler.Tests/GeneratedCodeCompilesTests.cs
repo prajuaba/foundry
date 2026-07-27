@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Foundry.Schema.Compiler;
+using Foundry.Schema.Compiler.Generators;
 using Xunit;
 
 namespace Foundry.Schema.Compiler.Tests;
@@ -105,6 +106,13 @@ public class GeneratedCodeCompilesTests
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                 File.WriteAllText(target, file.Content);
             }
+
+            // The generated C# client SDK, compiled in its own namespace. It shipped as source with
+            // `public ObjectId Id` and no `using MongoDB.Bson`, and referred to enums it never
+            // declared -- so it was a build error in the *consumer's* project, which is the worst
+            // place for one. Text assertions cover its routes; only a compile covers this.
+            File.WriteAllText(
+                Path.Combine(work, "ClientSdk.cs"), CsharpSdkGenerator.Generate(SdkSchema()));
 
             // A library project referencing the same runtime libraries a scaffolded app would.
             var csproj = $"""
@@ -218,6 +226,28 @@ public class GeneratedCodeCompilesTests
                         ToState = "Done",
                         Trigger = "FinishWorkflowScopedOrder"
                     }
+                ]
+            }
+        ]
+    };
+
+    /// <summary>A document whose client SDK must compile: an id, an enum and a decimal.</summary>
+    private static SchemaModel SdkSchema() => new()
+    {
+        Namespace = "Foundry.CompileCheck.Sdk",
+        Enums = [new Enum { Name = "SdkCustomerTier", Values = ["Standard", "Premium"] }],
+        Entities =
+        [
+            new Entity
+            {
+                Name = "SdkCustomer",
+                ApiEnabledMethods = ["GET", "POST", "GET_BY_ID", "DELETE"],
+                Properties =
+                [
+                    new Property { Name = "Id", Type = "ObjectId", IsKey = true },
+                    new Property { Name = "FullName", Type = "string" },
+                    new Property { Name = "CreditLimit", Type = "decimal" },
+                    new Property { Name = "Tier", Type = "SdkCustomerTier", IsEnum = true }
                 ]
             }
         ]
