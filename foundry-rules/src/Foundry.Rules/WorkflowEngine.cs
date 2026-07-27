@@ -97,7 +97,7 @@ public class WorkflowEngine : IWorkflowEngine
 
             try
             {
-                var payload = SubstituteTokens(payloadTemplate ?? "{}", requestPayload);
+                var payload = SubstituteTokens(payloadTemplate ?? "{}", requestPayload, TokenContext.Json);
                 var resolvedType = AppDomain.CurrentDomain.GetAssemblies()
                     .SelectMany(a => {
                         try { return a.GetTypes(); } catch { return Array.Empty<Type>(); }
@@ -170,8 +170,8 @@ public class WorkflowEngine : IWorkflowEngine
             var actionName = $"{method ?? "POST"} {url}";
             try
             {
-                var targetUrl = SubstituteTokens(url, requestPayload);
-                var body = SubstituteTokens(bodyTemplate ?? "{}", requestPayload);
+                var targetUrl = SubstituteTokens(url, requestPayload, TokenContext.Url);
+                var body = SubstituteTokens(bodyTemplate ?? "{}", requestPayload, TokenContext.Json);
 
                 var httpClientFactory = _serviceProvider.GetService<IHttpClientFactory>();
                 using var client = httpClientFactory != null ? httpClientFactory.CreateClient("FoundryWorkflow") : new HttpClient();
@@ -181,7 +181,7 @@ public class WorkflowEngine : IWorkflowEngine
                 {
                     foreach (var header in headers)
                     {
-                        requestMsg.Headers.TryAddWithoutValidation(header.Key, SubstituteTokens(header.Value, requestPayload));
+                        requestMsg.Headers.TryAddWithoutValidation(header.Key, SubstituteTokens(header.Value, requestPayload, TokenContext.HeaderValue));
                     }
                 }
 
@@ -225,23 +225,83 @@ public class WorkflowEngine : IWorkflowEngine
         };
     }
 
-    private string SubstituteTokens(string template, object source)
+    /// <summary>
+    /// The grammar a substituted value is being placed into.
+    /// </summary>
+    /// <remarks>
+    /// Every value substituted into an action template comes from the request, which is the MediatR
+    /// command bound from an HTTP body — so it is caller-controlled. Escaping has to match the
+    /// grammar it lands in, and there is no single escape that is correct for all three.
+    /// </remarks>
+    private enum TokenContext
+    {
+        /// <summary>Inside a JSON string literal.</summary>
+        Json,
+
+        /// <summary>Inside a URL, as one path segment or query value.</summary>
+        Url,
+
+        /// <summary>An HTTP header value.</summary>
+        HeaderValue
+    }
+
+    /// <summary>
+    /// Replaces <c>{{Property}}</c> tokens with values from the request, escaped for their context.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Substitution was raw string replacement into a JSON template, a URL and a set of header
+    /// values alike, so a caller controlled the syntax of all three. Demonstrated before this was
+    /// written: a reference of <c>", "approved": true, "x": "</c> closed its own JSON string and
+    /// added a field the workflow never intended to send; a reference of <c>../../admin/shutdown</c>
+    /// escaped its path segment; and one of <c>INV-001?admin=true</c> appended a query parameter to
+    /// an internal endpoint.
+    /// </para>
+    /// <para>
+    /// URL values are escaped as a single path segment or query value, so a token cannot introduce
+    /// a slash, a query, a fragment or an authority. A template that needs a caller-supplied path or
+    /// whole URL is therefore not expressible — deliberately, since that is the shape that turns an
+    /// action into a server-side request forgery.
+    /// </para>
+    /// </remarks>
+    private static string SubstituteTokens(string template, object source, TokenContext context)
     {
         if (string.IsNullOrEmpty(template) || source == null) return template;
-        
+
         var result = template;
         var properties = source.GetType().GetProperties();
         foreach (var prop in properties)
         {
             var token = $"{{{{{prop.Name}}}}}";
-            if (result.Contains(token))
-            {
-                var val = prop.GetValue(source)?.ToString() ?? "";
-                result = result.Replace(token, val);
-            }
+            if (!result.Contains(token)) continue;
+
+            var raw = prop.GetValue(source)?.ToString() ?? "";
+            result = result.Replace(token, Escape(raw, context));
         }
+
         return result;
     }
+
+    private static string Escape(string value, TokenContext context) => context switch
+    {
+        // Produces the escaped *inner* text of a JSON string, which is what a token inside quotes in
+        // a template needs. A numeric or boolean token substituted outside quotes is unaffected,
+        // because digits and letters have no JSON escapes.
+        TokenContext.Json => JsonEncodedText.Encode(value).ToString(),
+
+        TokenContext.Url => Uri.EscapeDataString(value),
+
+        // Not escaped but rejected: there is no meaningful header value containing a line break, and
+        // silently stripping one would hide that the caller sent something the template did not
+        // expect. HttpClient refuses these too, but only some of them and only at send time.
+        TokenContext.HeaderValue => value.Contains('\r') || value.Contains('\n')
+            ? throw new WorkflowException(
+                "A workflow action header value contains a line break, which cannot be sent as a "
+                + "header. The value came from the request payload.")
+            : value,
+
+        _ => value
+    };
 
     private static bool IsNumericType(Type type)
     {

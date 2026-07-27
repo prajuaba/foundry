@@ -93,7 +93,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 700 C# tests across 12 suites |
+| `Build and test` | 732 C# tests across 12 suites |
 | `Studio tests and typecheck` | 28 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
 | `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication, declared roles, row-level ownership and workflow transitions**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
@@ -158,6 +158,45 @@ The smoke test drives this with genuine HS256 tokens it mints itself — anonymo
 token signed with a different key gets 401, a `Clerk` gets 403 where the schema requires `Admin`, and an
 `Admin` gets 204. Enforcement that refuses everyone is not enforcement, so the positive case is asserted
 alongside the negatives.
+
+### The outside-world paths are covered, and one was injectable
+
+Three paths were named in earlier cycles as where untrusted input meets the framework. Covering them
+found one real defect class, in the place with the most surface:
+
+**A workflow action interpolated caller data into three grammars at once, unescaped.**
+`ExecuteActionAsync` builds a URL, a set of headers and a JSON body by substituting `{{Property}}`
+tokens from the request — which is the MediatR command bound from an HTTP body, so every value is
+caller-controlled. Substitution was raw `string.Replace`. Demonstrated by test before the fix:
+
+| Value sent by the caller | Effect |
+| --- | --- |
+| `", "approved": true, "x": "` | Closed its own JSON string and added a field the workflow never intended to send |
+| `../../admin/shutdown` | Escaped its path segment |
+| `INV-001?admin=true` | Appended a query parameter to an internal endpoint |
+
+Escaping is now chosen by context: JSON values through `JsonEncodedText`, URL values as a single path
+segment, and header values containing a line break refused outright rather than stripped. URL escaping
+means a template cannot accept a caller-supplied path or whole URL — deliberately, since that is the
+shape that turns a workflow action into server-side request forgery. `ExecuteActionAsync` had no tests
+at all; it now has 17.
+
+**The Excel path had never been executed.** `ExcelDataParser.ParseAsync` was not run by any test, and
+the cell-conversion suite carried a remark saying the end-to-end path was "covered by the integration
+suite" — it was not; the integration test of that shape drives the *CSV* parser. **The claim is what
+made the gap look deliberate**, which is a more useful finding than any defect would have been: a
+comment asserting coverage is indistinguishable from coverage until someone checks. It now has 12
+tests that build real workbooks.
+
+One gap surfaced there and is now visible rather than fixed: a column absent from a file leaves every
+row at the type's default, with a row count exactly matching what the user expected. The parser cannot
+decide that is an error — plenty of imports fill only some fields — so it reports the unmatched
+properties and lets the caller decide.
+
+**The REST connector came back clean.** Six tests on how it handles a response it did not expect —
+HTML served with a 200, malformed JSON, an oversized error body — and all passed against the existing
+code. Worth stating plainly: coverage that finds nothing is still worth having, and reporting it as a
+finding would be dishonest.
 
 ### Workflows reach a running application
 
@@ -276,12 +315,12 @@ Every module has tests:
 | ----- | ----: |
 | `foundry-schema` | 184 |
 | `foundry-integration-tests` | 75 |
-| `foundry-rules` | 73 |
-| `foundry-file-io` | 63 |
+| `foundry-rules` | 87 |
+| `foundry-file-io` | 75 |
 | `foundry-core` | 52 |
 | `foundry-kafka` | 34 |
 | `foundry-mongo` | 61 |
-| `foundry-connectors` | 31 |
+| `foundry-connectors` | 37 |
 | `foundry-studio` | 28 |
 | `foundry-realtime` | 26 |
 | `foundry-testing` | 26 |
@@ -375,9 +414,10 @@ Recorded as evidence, not omitted for being unexciting:
 
 Stated plainly, because a document that only lists wins is not useful for planning.
 
-**Coverage is a floor, not a finish.** The suites target each module's highest-consequence surface, not
-its whole surface area. `ExecuteActionAsync`'s HTTP path, SOAP envelope parsing, and the Excel
-end-to-end path are still uncovered.
+**Coverage is a floor, not a finish.** The suites target each module's highest-consequence surface,
+not its whole surface area. The outside-world paths named in previous cycles are now covered;
+`CheckHealthAsync`, the CSV exporter's streaming path and the partitioned repository's archival
+worker are not.
 
 **One mirrored implementation remains, deliberately.** `crudRouteFor` in Studio duplicates the
 compiler's route derivation so the designer and playground can show a route without a request per
@@ -453,19 +493,19 @@ not, and a scaffolded project prints those warnings on its first build.
 
 ## 6. Recommended priority for the next cycle
 
-Everything on the previous list above item 2 is done: the catch-site audit, the smoke test extension,
-endpoint authorization, row-level ownership, and workflows reaching a running application. Two of
-those were not on any list before the cycle that found them — they came from asking whether the
-framework was production-ready and then checking rather than answering from memory, which remains the
-more useful lesson than any item below.
+The verification backlog is now clear: the catch-site audit, the smoke test extension, endpoint
+authorization, row-level ownership, workflows reaching a running application, and coverage on the
+outside-world paths are all done. Two of those were not on any list before the cycle that found them —
+they came from asking whether the framework was production-ready and then checking rather than
+answering from memory, which remains the more useful lesson than any item below.
 
-1. **Deepen coverage on the paths that talk to the outside world** — the connectors' HTTP and SOAP
-   paths, the workflow engine's `ExecuteActionAsync`, the Excel import end to end. These are where
-   untrusted input meets the framework and where the remaining silent failures most likely live.
-2. **Add a Kafka job to CI** and take the outbox round trip end to end.
-3. **Remove the last mirrored implementation** by having the designer and playground read routes from a
+What remains is smaller and better understood, which is itself the point: for the first time the list
+is work someone chose rather than damage someone discovered.
+
+1. **Add a Kafka job to CI** and take the outbox round trip end to end.
+2. **Remove the last mirrored implementation** by having the designer and playground read routes from a
    cached manifest rather than deriving them.
-4. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
+3. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than precede
    it.
 

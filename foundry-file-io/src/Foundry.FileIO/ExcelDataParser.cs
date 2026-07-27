@@ -38,6 +38,25 @@ public sealed class ExcelDataParser<TOut> : IDataParser<TOut> where TOut : class
     public IList<ExcelCellError> UnconvertibleValues { get; } = new List<ExcelCellError>();
 
     /// <summary>
+    /// Writable properties of <typeparamref name="TOut"/> that no column in the file supplied.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Populated once the header row has been read. A column absent from the spreadsheet is not an
+    /// error the parser can decide on its own — plenty of imports legitimately fill only some fields
+    /// — but it is silent, and silence here has the shape this codebase keeps producing: every row
+    /// gets the type's default, the row count matches what the user expected, and nothing looks
+    /// wrong. A caller that knows which columns matter can now check.
+    /// </para>
+    /// <para>
+    /// Empty until <see cref="ParseAsync"/> has been enumerated at least as far as the header.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyCollection<string> UnmatchedProperties => _unmatchedProperties;
+
+    private readonly List<string> _unmatchedProperties = new();
+
+    /// <summary>
     /// Converts a cell value to <paramref name="targetType"/>, reporting failure rather than throwing.
     /// </summary>
     /// <remarks>
@@ -114,6 +133,14 @@ public sealed class ExcelDataParser<TOut> : IDataParser<TOut> where TOut : class
         var properties = typeof(TOut).GetProperties(BindingFlags.Public | BindingFlags.Instance)
             .Where(p => p.CanWrite)
             .ToList();
+
+        // Recorded rather than rejected. A file that supplies no column for a property leaves it at
+        // the type's default on every row, which is indistinguishable from a file that supplied the
+        // default -- so a caller that knows the column matters needs to be able to see it.
+        _unmatchedProperties.Clear();
+        _unmatchedProperties.AddRange(properties
+            .Where(p => !headers.ContainsKey(p.Name))
+            .Select(p => p.Name));
 
         // Read records
         // Row 1 is the header, so data starts at 2 -- matching what a user sees in the spreadsheet.

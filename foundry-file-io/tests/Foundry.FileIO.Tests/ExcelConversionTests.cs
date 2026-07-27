@@ -7,9 +7,13 @@ namespace Foundry.FileIO.Tests;
 /// Cell-to-property conversion used by <see cref="ExcelDataParser{TOut}"/>.
 /// </summary>
 /// <remarks>
-/// Tested directly rather than through a real workbook: this is where the defect was, and building a
-/// valid .xlsx in a test would exercise ExcelDataReader rather than Foundry. The end-to-end path is
-/// covered by the integration suite.
+/// Tested directly rather than through a real workbook: this is where the defect was, and a
+/// conversion table is clearer read as a table.
+///
+/// An earlier version of this remark claimed the end-to-end path was "covered by the integration
+/// suite". It was not — the integration test of that shape drives the *CSV* parser, and
+/// ExcelDataParser.ParseAsync had never been executed by anything. The claim is what made the gap
+/// look deliberate. It is now covered by ExcelWorkbookTests, which builds real workbooks.
 /// </remarks>
 public class ExcelConversionTests
 {
