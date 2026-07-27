@@ -9,6 +9,15 @@ import {
   type OnConnect 
 } from '@xyflow/react';
 import type { Entity, Property, Index, AppNode, ClassNode, EnumNode, CustomEndpoint, DtoModel, WorkflowDefinition, Connector } from './types';
+import { deriveApiManifest, parseManifestRoutes } from './compiler';
+
+/**
+ * Schema signature the cached routes were derived from.
+ *
+ * Module-level rather than store state: it is bookkeeping for the cache, not something a component
+ * should be able to read or react to.
+ */
+let lastRouteSignature: string | null = null;
 
 interface StoreState {
   namespace: string;
@@ -48,6 +57,22 @@ interface StoreState {
   
   // Custom setter for bulk node/edge updates
   setCanvasData: (nodes: AppNode[], edges: Edge[]) => void;
+
+  /**
+   * Entity-to-route map, as the compiler derives it, cached from the last successful refresh.
+   *
+   * An entity absent from this map has no generated route -- either it declares no API methods, or
+   * the routes have not been derived yet. Callers must distinguish those with `routesStatus` rather
+   * than filling the gap with a guess. Guessing is what the removed `crudRouteFor` mirror amounted
+   * to, and its predecessors in the UI guessed wrongly -- `/api/v1/customer` against an application
+   * serving `/api/customers`.
+   */
+  routes: Readonly<Record<string, string>>;
+  routesStatus: 'idle' | 'loading' | 'ready' | 'unavailable';
+  routesError: string | null;
+
+  /** Derives routes from the current schema, unless the schema has not changed since the last one. */
+  refreshRoutes: () => Promise<void>;
 
   customEndpoints: CustomEndpoint[];
   addCustomEndpoint: () => void;
@@ -991,6 +1016,41 @@ export const useStore = create<StoreState>((rawSet, get) => {
         return node;
       }),
     })),
+
+  // Routes, as the compiler derives them
+  routes: {},
+  routesStatus: 'idle',
+  routesError: null,
+
+  refreshRoutes: async () => {
+    const schema = get().exportToSchema();
+
+    // Only the entities and their declared methods affect routing, so a keystroke in a property name
+    // must not cost a round trip. The signature is what makes reading routes from the backend
+    // affordable enough to delete the local mirror that existed to avoid it.
+    const signature = JSON.stringify(
+      (schema.Entities ?? []).map((e: any) => [e.Name, e.ApiEnabledMethods ?? []]),
+    );
+
+    if (signature === lastRouteSignature && get().routesStatus === 'ready') return;
+
+    set({ routesStatus: 'loading', routesError: null });
+
+    try {
+      const routes = parseManifestRoutes(await deriveApiManifest(schema));
+      lastRouteSignature = signature;
+      set({ routes, routesStatus: 'ready', routesError: null });
+    } catch (error) {
+      // Deliberately keeps the previous routes rather than clearing them: a backend that went away
+      // does not make the last known-good routes wrong, and blanking the designer mid-edit is worse
+      // than showing what was last derived alongside the error.
+      lastRouteSignature = null;
+      set({
+        routesStatus: 'unavailable',
+        routesError: error instanceof Error ? error.message : String(error),
+      });
+    }
+  },
 
   // Serialization
   exportToSchema: () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { compileToCs, deriveApiManifest, crudRouteFor } from './compiler';
+import { compileToCs, deriveApiManifest, parseManifestRoutes } from './compiler';
 
 /**
  * Obtaining the manifest from the compiler.
@@ -70,32 +70,63 @@ describe('deriveApiManifest', () => {
 });
 
 /**
- * The display-side route helper.
+ * Reading routes out of a compiler-derived manifest.
  *
- * The table below is deliberately the same one used by ApiManifestGeneratorTests on the C# side. It is
- * what keeps a mirrored implementation honest: if the compiler's derivation changes, this fails.
+ * This replaces a test table that was deliberately duplicated from `ApiManifestGeneratorTests` to
+ * keep a mirrored `crudRouteFor` honest. A shared table catches a derivation that *changes*; it
+ * cannot catch a rule the compiler gains and the mirror never hears about, because a rule nobody
+ * wrote down twice is not in the table. There is now one derivation, and these tests cover reading
+ * its output rather than reproducing it.
  */
-describe('crudRouteFor', () => {
-  it.each([
-    ['Customer', '/api/customers'],
-    ['Category', '/api/categories'],
-    ['Address', '/api/addresses'],
-    ['Box', '/api/boxes'],
-    ['Branch', '/api/branches'],
-    ['Day', '/api/days'],
-    ['Order', '/api/orders'],
-  ])('derives %s as %s, matching the compiler', (name, expected) => {
-    expect(crudRouteFor(name)).toBe(expected);
+describe('parseManifestRoutes', () => {
+  it('maps each entity to the route the compiler generated', () => {
+    const manifest = JSON.stringify({
+      Namespace: 'Test.Domain',
+      Endpoints: [
+        { Entity: 'Customer', Route: '/api/customers', Methods: ['GET'] },
+        { Entity: 'Category', Route: '/api/categories', Methods: ['GET', 'POST'] },
+      ],
+    });
+
+    expect(parseManifestRoutes(manifest)).toEqual({
+      Customer: '/api/customers',
+      Category: '/api/categories',
+    });
   });
 
-  it('never emits a version segment', () => {
-    // Three places in the UI used to emit /api/v1/..., which the compiler does not generate, so the
-    // designer displayed and the playground called URLs the running application never served.
-    expect(crudRouteFor('Customer')).not.toContain('/v1/');
+  it('omits an entity the compiler generated no endpoint for', () => {
+    // An entity declaring no methods is skipped by the compiler. The designer used to show a route
+    // for it anyway, which advertised an endpoint the application would never serve.
+    const manifest = JSON.stringify({
+      Endpoints: [{ Entity: 'Customer', Route: '/api/customers', Methods: ['GET'] }],
+    });
+
+    expect(parseManifestRoutes(manifest)).not.toHaveProperty('Order');
   });
 
-  it('handles an empty name without producing a broken route', () => {
-    expect(crudRouteFor('')).toBe('/api');
+  it('returns nothing for a manifest with no endpoints', () => {
+    expect(parseManifestRoutes(JSON.stringify({ Namespace: 'X' }))).toEqual({});
+    expect(parseManifestRoutes(JSON.stringify({ Endpoints: [] }))).toEqual({});
+  });
+
+  it('skips malformed entries rather than inventing a route', () => {
+    const manifest = JSON.stringify({
+      Endpoints: [
+        { Entity: 'Customer', Route: '/api/customers' },
+        { Entity: 'NoRoute' },
+        { Route: '/api/orphans' },
+        { Entity: '', Route: '/api/empty' },
+        null,
+      ],
+    });
+
+    expect(parseManifestRoutes(manifest)).toEqual({ Customer: '/api/customers' });
+  });
+
+  it('reports invalid JSON rather than returning an empty map', () => {
+    // An empty map is indistinguishable from "this schema has no endpoints", which would make a
+    // broken backend look like an empty design.
+    expect(() => parseManifestRoutes('{not json')).toThrow(/not valid JSON/);
   });
 });
 

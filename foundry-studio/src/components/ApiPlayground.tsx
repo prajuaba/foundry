@@ -1,6 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useStore } from '../store';
-import { crudRouteFor } from '../compiler';
 import { Play, Send, AlertCircle, Clock, CheckCircle2, ShieldCheck, Cpu, FileText, Zap, RefreshCw } from 'lucide-react';
 
 interface ProtocolResult {
@@ -12,8 +11,12 @@ interface ProtocolResult {
 }
 
 export const ApiPlayground: React.FC = () => {
-  const { nodes } = useStore();
+  const { nodes, routes, routesStatus, routesError, refreshRoutes } = useStore();
   const entityNodes = nodes.filter(n => n.type === 'classNode');
+
+  // The playground sends real requests, so its routes must be the ones the application serves. The
+  // store skips the round trip when nothing route-affecting has changed since the last derive.
+  useEffect(() => { void refreshRoutes(); }, [nodes, refreshRoutes]);
   
   const [activeTab, setActiveTab] = useState<'playground' | 'testEngine'>('testEngine');
 
@@ -52,9 +55,27 @@ export const ApiPlayground: React.FC = () => {
     setLoading(true);
     setResponse(null);
     const startTime = performance.now();
-    // Must match what the running application serves. This used to build `/api/v1/customer`
-    // -- wrong prefix and not pluralised -- so every request 404'd and looked like a broken app.
-    const route = crudRouteFor(selectedEntity || 'sample');
+
+    // The route comes from a manifest the compiler derived, so it is the URL the running application
+    // actually serves. Two earlier versions of this built the URL here and got it wrong -- one
+    // emitted an `/api/v1/` prefix, the other did not pluralise -- so every request 404'd and looked
+    // like a broken application rather than a broken playground.
+    //
+    // With no derived route the request is refused. Sending to a guessed URL is how that class of
+    // bug reads as a server problem.
+    const route = routes[selectedEntity];
+    if (!route) {
+      setLoading(false);
+      setResponse({
+        error:
+          routesStatus === 'unavailable'
+            ? `Cannot send: the route is derived by the compiler and the backend is unreachable. ${routesError ?? ''}`
+            : routesStatus === 'ready'
+              ? `Cannot send: '${selectedEntity}' declares no API methods, so no endpoint is generated for it.`
+              : 'Cannot send: routes have not been derived yet.',
+      });
+      return;
+    }
 
     try {
       const res = await fetch(`http://localhost:5000${route}`, {
@@ -349,9 +370,10 @@ export const ApiPlayground: React.FC = () => {
               >
                 {entityNodes.map((n) => {
                   const entName = n.data?.entity?.name || 'Unknown';
+                  const route = routes[entName];
                   return (
                     <option key={entName} value={entName}>
-                      {crudRouteFor(entName)} (Entity: {entName})
+                      {route ?? '(no route)'} (Entity: {entName})
                     </option>
                   );
                 })}

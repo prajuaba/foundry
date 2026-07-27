@@ -19,6 +19,13 @@ namespace Foundry.Schema.Compiler.Tests;
 /// These assertions were ported from the Studio test suite when that producer was removed, so the
 /// contract they encode is preserved rather than deleted along with the code that used to satisfy it.
 /// </para>
+/// <para>
+/// They are now its <em>only</em> home. Studio kept a mirrored <c>crudRouteFor</c> for display, held
+/// to this table by a duplicate of it in TypeScript; the designer and playground read routes from a
+/// derived manifest instead, and that duplicate is gone. A shared table catches a derivation that
+/// changes and cannot catch a rule the compiler gains, since a rule nobody wrote down twice is not
+/// in the table.
+/// </para>
 /// </remarks>
 public class ApiManifestGeneratorTests
 {

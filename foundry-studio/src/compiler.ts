@@ -49,43 +49,48 @@ export async function deriveApiManifest(schema: unknown): Promise<string> {
   return response.text();
 }
 
+/** Entity name to the route the compiler generates for it. */
+export type RouteMap = Readonly<Record<string, string>>;
+
 /**
- * The CRUD route the compiler will generate for `entityName`.
+ * Reads the entity-to-route map out of a manifest the compiler produced.
  *
- * Mirrors `ApiManifestGenerator.RouteFor` in the C# compiler, which is the authority. This exists only
- * for *display* — the API designer and playground need a route without a server round trip per
- * keystroke — and is pinned to the compiler's behaviour by a test table shared with
- * `ApiManifestGeneratorTests`.
+ * This replaces `crudRouteFor`, a TypeScript reimplementation of `ApiManifestGenerator.RouteFor` and
+ * its pluraliser. That mirror was the last one left, kept because the designer and playground need a
+ * route to display and a request per keystroke would be absurd. It was pinned by a test table
+ * duplicated on the C# side — which catches a *changed* derivation and not a *new* rule, since a
+ * shared table only tests the cases someone thought to write down twice.
  *
- * It replaces three separate derivations in the UI, all of which were wrong: two emitted an
- * `/api/v1/` prefix the compiler does not use, and the playground did not pluralise at all, so it sent
- * requests to `/api/v1/customer` while the running application served `/api/customers`. Nothing
- * reported that; the request simply 404'd and looked like a broken application.
+ * Routes are now read from a manifest the compiler derived and Studio cached, so there is one
+ * implementation. Two consequences worth stating, because both are improvements rather than costs:
  *
- * A mirrored function is a weaker guarantee than a single implementation. It is the trade for keeping
- * the editor responsive and offline, and the shared test table is what keeps it honest.
+ * - An entity that declares no methods has no route here, because the compiler generates none for it.
+ *   The designer previously displayed a route for it anyway.
+ * - With no manifest — the backend is down, or the schema has not been derived yet — a route is
+ *   *unknown* rather than guessed. The playground refuses to send instead of calling a URL it made up.
  */
-export function crudRouteFor(entityName: string): string {
-  if (!entityName) return '/api';
-  return `/api/${pluralize(entityName).toLowerCase()}`;
-}
-
-/** Minimal English pluraliser, matching `ApiManifestGenerator.Pluralize`. */
-function pluralize(word: string): string {
-  if (!word) return word;
-
-  const lower = word.toLowerCase();
-
-  // "Category" -> "Categories", but "Day" -> "Days".
-  if (lower.length > 1 && lower.endsWith('y') && !'aeiou'.includes(lower[lower.length - 2])) {
-    return `${word.slice(0, -1)}ies`;
+export function parseManifestRoutes(manifestJson: string): RouteMap {
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(manifestJson);
+  } catch {
+    throw new Error('The backend returned a manifest that is not valid JSON.');
   }
 
-  if (['s', 'x', 'z', 'ch', 'sh'].some((suffix) => lower.endsWith(suffix))) {
-    return `${word}es`;
+  const endpoints = (manifest as { Endpoints?: unknown })?.Endpoints;
+  if (!Array.isArray(endpoints)) return {};
+
+  const routes: Record<string, string> = {};
+  for (const endpoint of endpoints) {
+    const entity = (endpoint as { Entity?: unknown })?.Entity;
+    const route = (endpoint as { Route?: unknown })?.Route;
+
+    if (typeof entity === 'string' && entity && typeof route === 'string' && route) {
+      routes[entity] = route;
+    }
   }
 
-  return `${word}s`;
+  return routes;
 }
 
 /**

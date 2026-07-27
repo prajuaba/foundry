@@ -95,7 +95,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Clean clone builds | The repository is usable by someone other than its author |
 | `Build and test` | 737 C# tests across 12 suites |
 | `Outbox round trip` | 5 tests driving a mutation through MongoDB and a **real Kafka broker** |
-| `Studio tests and typecheck` | 28 TypeScript tests, plus the bundle builds |
+| `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
 | `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication, declared roles, row-level ownership and workflow transitions**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
 
@@ -159,6 +159,32 @@ The smoke test drives this with genuine HS256 tokens it mints itself — anonymo
 token signed with a different key gets 401, a `Clerk` gets 403 where the schema requires `Admin`, and an
 `Admin` gets 204. Enforcement that refuses everyone is not enforcement, so the positive case is asserted
 alongside the negatives.
+
+### The last mirrored implementation is gone
+
+Studio derived CRUD routes itself, in a `crudRouteFor` that reimplemented the compiler's `RouteFor`
+and its pluraliser in TypeScript. It was kept deliberately — the designer and playground need a route
+to display, and a request per keystroke would be absurd — and held to the compiler by a test table
+duplicated on the C# side.
+
+That table is the part worth examining, because it looked like a sufficient guarantee and was not:
+
+> A shared table catches a derivation that **changes**. It cannot catch a rule the compiler
+> **gains**, because a rule nobody thought to write down twice is not in the table.
+
+Routes now come from a manifest the compiler derived and the store cached, keyed on a signature of
+entity names and their declared methods — so a keystroke that cannot affect routing costs no request,
+which is what made deleting the mirror affordable. Two behaviours changed, and both are improvements:
+
+- An entity declaring no API methods now shows **no route**, because the compiler generates none for
+  it. The designer previously displayed one, advertising an endpoint that would never be served.
+- With no derived manifest the playground **refuses to send** rather than calling a URL it made up.
+  Two earlier versions of that code guessed wrongly — one emitted an `/api/v1/` prefix, the other did
+  not pluralise — and every request 404'd, which reads as a broken application rather than a broken
+  playground.
+
+The pluralisation contract did not move to a weaker place: `ApiManifestGeneratorTests` still owns it,
+and is now its only home rather than one of two copies. Studio's suite went from 28 tests to 33.
 
 ### The outbox publishes, and the compose file never started a broker
 
@@ -355,7 +381,7 @@ Every module has tests:
 | `foundry-kafka` | 39 + 5 |
 | `foundry-mongo` | 61 |
 | `foundry-connectors` | 37 |
-| `foundry-studio` | 28 |
+| `foundry-studio` | 33 |
 | `foundry-realtime` | 26 |
 | `foundry-testing` | 26 |
 | `foundry-api` | 54 |
@@ -453,11 +479,11 @@ not its whole surface area. The outside-world paths named in previous cycles are
 `CheckHealthAsync`, the CSV exporter's streaming path and the partitioned repository's archival
 worker are not.
 
-**One mirrored implementation remains, deliberately.** `crudRouteFor` in Studio duplicates the
-compiler's route derivation so the designer and playground can show a route without a request per
-keystroke. It is pinned to the compiler by a test table shared with `ApiManifestGeneratorTests`, which is
-a weaker guarantee than a single implementation. It is the only copy left, and it is a trade rather than
-an oversight.
+**Studio needs the backend running to show a route.** Removing the last mirror means the designer and
+playground read routes from a derived manifest, so with the backend down a route is *unknown* rather
+than guessed — which is correct, and is also a worse offline experience than the wrong answer it
+replaced. The last successfully derived routes are kept and shown beside the error, so an editing
+session survives a backend restart; a cold start with no backend shows none.
 
 **A flake was mitigated, not diagnosed.** Two `FoundryMongo.Tests` audit tests failed once in a
 solution-wide run and were **never reproduced** across ~27 subsequent runs (isolated, under CPU load,
@@ -530,19 +556,21 @@ not, and a scaffolded project prints those warnings on its first build.
 
 The verification backlog is now clear: the catch-site audit, the smoke test extension, endpoint
 authorization, row-level ownership, workflows reaching a running application, coverage on the
-outside-world paths, and the outbox round trip against a real broker are all done. Two of those were
-not on any list before the cycle that found them — they came from asking whether the framework was
-production-ready and then checking rather than answering from memory, which remains the more useful
-lesson than any item below.
+outside-world paths, the outbox round trip against a real broker, and the last mirrored
+implementation are all done. Two of those were not on any list before the cycle that found them —
+they came from asking whether the framework was production-ready and then checking rather than
+answering from memory, which remains the more useful lesson than any item below.
 
-What remains is smaller and better understood, which is itself the point: for the first time the list
-is work someone chose rather than damage someone discovered.
+One item is left, and its position is the point: for the first time the next thing to do is work
+someone chose rather than damage someone discovered.
 
-1. **Remove the last mirrored implementation** by having the designer and playground read routes from a
-   cached manifest rather than deriving them.
-2. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
-   rewrite — but it doubles the surface, and it should follow the verification work rather than precede
-   it.
+1. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
+   rewrite — but it doubles the surface, and it should follow the verification work rather than
+   precede it. That condition is now met.
+
+Worth adding to that list before starting it, from section 5 rather than from this one: resource-level
+authorization beyond ownership, a read path for workflow history, and the outbox under failure rather
+than for a single message. None of those is damage; all three are gaps a buyer would find.
 
 ---
 

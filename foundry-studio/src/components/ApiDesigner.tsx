@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useStore } from '../store';
-import { compileToCs, crudRouteFor } from '../compiler';
+import { compileToCs } from '../compiler';
 import type { ClassNode, DtoProperty, CustomEndpoint, Assignment } from '../types';
 import { Search, Plus, Trash2, Shield, Globe, Clock, Copy, Check, Link, Type, Braces, Database } from 'lucide-react';
 
@@ -30,7 +30,11 @@ export const ApiDesigner: React.FC = () => {
     deleteDto,
     addConnector,
     updateConnector,
-    deleteConnector
+    deleteConnector,
+    routes,
+    routesStatus,
+    routesError,
+    refreshRoutes
   } = useStore();
 
   // C# previews are the compiler's output, fetched rather than reimplemented. Debounced, because the
@@ -38,6 +42,13 @@ export const ApiDesigner: React.FC = () => {
   const [compiledFiles, setCompiledFiles] = useState<Record<string, string>>({});
   const [compileMessage, setCompileMessage] = useState<string | null>(null);
   const { exportToSchema } = useStore();
+
+  // Routes come from a manifest the compiler derived, not from a local derivation. The store skips
+  // the request when nothing route-affecting changed, so this is cheap on an ordinary keystroke.
+  useEffect(() => {
+    const timer = setTimeout(() => { void refreshRoutes(); }, 400);
+    return () => clearTimeout(timer);
+  }, [nodes, refreshRoutes]);
 
   useEffect(() => {
     let cancelled = false;
@@ -95,7 +106,10 @@ export const ApiDesigner: React.FC = () => {
     const query = searchQuery.toLowerCase();
     
     const standard = entitiesList.map(entity => {
-      const routePath = crudRouteFor(entity.name);
+      // Undefined when the compiler generates no route for this entity -- it declares no methods --
+      // or when the routes have not been derived. The two are told apart by routesStatus below,
+      // rather than by substituting a plausible-looking URL.
+      const routePath = routes[entity.name];
       return {
         id: `entity-${entity.name}`,
         type: 'standard' as const,
@@ -146,7 +160,7 @@ export const ApiDesigner: React.FC = () => {
     if (!query) return all;
 
     return all.filter(r => 
-      r.route.toLowerCase().includes(query) || 
+      (r.route ?? '').toLowerCase().includes(query) || 
       r.name.toLowerCase().includes(query)
     );
   }, [entitiesList, customEndpoints, dtos, connectors, searchQuery]);
@@ -437,7 +451,11 @@ export const ApiDesigner: React.FC = () => {
                       )}
                     </div>
                     <div className="text-xs text-slate-800 font-mono font-bold truncate dark:text-white">
-                      {route.route}
+                      {route.route ?? (
+                        <span className="italic opacity-60">
+                          {routesStatus === 'ready' ? 'no route \u2014 declare a method' : 'route not derived'}
+                        </span>
+                      )}
                     </div>
                   </button>
                 );
@@ -497,7 +515,15 @@ export const ApiDesigner: React.FC = () => {
                     </h2>
                   </div>
                   <span className="text-xs text-slate-600 font-mono mt-1 bg-slate-100 px-3 py-1.5 border border-slate-200 rounded dark:bg-slate-950 dark:border-slate-800 dark:text-slate-400">
-                    {selectedItemDetail.route}
+                    {selectedItemDetail.route ?? (
+                      <span className="italic opacity-60">
+                        {routesStatus === 'ready'
+                          ? 'No route: this entity declares no API methods, so the compiler generates none.'
+                          : routesStatus === 'unavailable'
+                            ? `Route unavailable: ${routesError}`
+                            : 'Deriving route from the compiler...'}
+                      </span>
+                    )}
                   </span>
                 </div>
 
@@ -634,7 +660,15 @@ export const ApiDesigner: React.FC = () => {
                     </h2>
                   </div>
                   <span className="text-xs text-slate-600 font-mono mt-1 bg-slate-100 px-3 py-1.5 border border-slate-200 rounded dark:bg-slate-950 dark:border-slate-800 dark:text-slate-400">
-                    {selectedItemDetail.route}
+                    {selectedItemDetail.route ?? (
+                      <span className="italic opacity-60">
+                        {routesStatus === 'ready'
+                          ? 'No route: this entity declares no API methods, so the compiler generates none.'
+                          : routesStatus === 'unavailable'
+                            ? `Route unavailable: ${routesError}`
+                            : 'Deriving route from the compiler...'}
+                      </span>
+                    )}
                   </span>
                 </div>
 
