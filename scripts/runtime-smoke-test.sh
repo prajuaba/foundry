@@ -10,10 +10,14 @@
 #
 # Two applications are scaffolded, because they prove different things:
 #
-#   Phase 1 (default schema)     the CRUD contract -- create, read, update, delete, filter,
-#                                validate, concurrency, and durability across a restart.
-#   Phase 2 (multi-tenant schema) tenant isolation, which is the framework's headline claim and
-#                                which no test had ever built, let alone run.
+#   Phase 1 (default schema)  authentication, and the CRUD contract -- create, read, update,
+#                             delete, filter, validate, concurrency, durability across a restart.
+#   Phase 2 (rich schema)     the access-control and behaviour claims, none of which any test had
+#                             ever built, let alone run: tenant isolation, row-level ownership,
+#                             declared roles, and workflow transitions.
+#
+# Every request carries a real HS256 JWT minted by this script, so the authentication path is
+# exercised rather than stubbed.
 #
 # Requires: .NET 10 SDK, and MongoDB on localhost:27017 (docker compose up -d).
 
@@ -419,6 +423,24 @@ cat > "$WORK_DIR/tenant-schema.json" <<'SCHEMA'
       ],
       "ApiEnabledMethods": ["GET", "POST", "GET_BY_ID", "PUT", "DELETE"]
     }
+  ],
+  "Workflows": [
+    {
+      "Id": "invoice-approval",
+      "Name": "Invoice Approval",
+      "Entity": "Invoice",
+      "Version": "1.0",
+      "IsActive": true,
+      "States": [
+        { "Name": "Draft", "IsInitial": true },
+        { "Name": "Submitted" },
+        { "Name": "Approved", "IsFinal": true }
+      ],
+      "Transitions": [
+        { "Id": "submit", "Name": "Submit", "FromState": "Draft", "ToState": "Submitted", "Trigger": "SubmitInvoice" },
+        { "Id": "approve", "Name": "Approve", "FromState": "Submitted", "ToState": "Approved", "Trigger": "ApproveInvoice", "RequiredRoles": ["Approver"] }
+      ]
+    }
   ]
 }
 SCHEMA
@@ -641,6 +663,81 @@ grep -q 'BOB-NOTE' "$WORK_DIR/body.json" \
 pass "the globex supervisor sees none of acme's notes"
 
 expect_status 404 "GET an acme note as a globex Supervisor" "$BASE/api/notes/$ALICE_NOTE"
+
+# ── Workflow transitions ────────────────────────────────────────────────────
+#
+# A workflow declared in a schema used to be compiled, validated, and then go nowhere: the manifest
+# never carried the definitions, the scaffolder never registered the engine, and no route could send
+# a transition command. Every layer downstream was in place and waiting for a list that arrived
+# empty. This drives one from a running application.
+log "A new record starts outside the workflow"
+authenticate_as "$ACME_ADMIN"
+expect_status 201 "POST /api/invoices for the workflow" \
+  -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' -d '{"reference":"WF-001"}'
+WF_ID=$(json_field "$WORK_DIR/body.json" Id id)
+
+expect_status 200 "GET the new invoice" "$BASE/api/invoices/$WF_ID"
+WF_STATE=$(json_field "$WORK_DIR/body.json" CurrentState currentState)
+[[ -z "$WF_STATE" ]] \
+  || fail "a new record already reports state '$WF_STATE'; it should not have entered the workflow yet"
+pass "the invoice has no workflow state yet"
+
+log "A transition advances the record and is persisted"
+expect_status 200 "POST /api/invoices/transitions/submitinvoice" \
+  -X POST "$BASE/api/invoices/transitions/submitinvoice" \
+  -H 'Content-Type: application/json' -d "{\"entityId\":\"$WF_ID\"}"
+
+expect_status 200 "GET after the transition" "$BASE/api/invoices/$WF_ID"
+WF_STATE=$(json_field "$WORK_DIR/body.json" CurrentState currentState)
+[[ "$WF_STATE" == "Submitted" ]] \
+  || fail "expected state 'Submitted' after the transition, got '$WF_STATE'"
+grep -q 'invoice-approval' "$WORK_DIR/body.json" \
+  || fail "the record does not record which workflow it is in"
+pass "the invoice advanced Draft -> Submitted and carries its workflow id"
+
+# The state machine is the point: a transition whose source state does not match must be refused,
+# not applied. Unmapped this surfaced as a bare 500 with the engine's explanation swallowed.
+log "A transition from the wrong state is refused"
+expect_status 409 "POST submitinvoice again, now that it is Submitted" \
+  -X POST "$BASE/api/invoices/transitions/submitinvoice" \
+  -H 'Content-Type: application/json' -d "{\"entityId\":\"$WF_ID\"}"
+grep -q 'Submitted' "$WORK_DIR/body.json" \
+  || fail "the refusal does not say what state the record is actually in"
+pass "the conflict names the current state"
+
+expect_status 200 "GET after the refused transition" "$BASE/api/invoices/$WF_ID"
+WF_STATE=$(json_field "$WORK_DIR/body.json" CurrentState currentState)
+[[ "$WF_STATE" == "Submitted" ]] || fail "the refused transition changed the state to '$WF_STATE'"
+pass "the refused transition left the record where it was"
+
+# The transition declares "RequiredRoles": ["Approver"], which reaches the endpoint as well as the
+# workflow engine.
+log "A transition's declared roles are enforced"
+authenticate_as "$ACME_CLERK"
+expect_status 403 "POST approveinvoice as Clerk" \
+  -X POST "$BASE/api/invoices/transitions/approveinvoice" \
+  -H 'Content-Type: application/json' -d "{\"entityId\":\"$WF_ID\"}"
+
+log "The declared role completes the workflow"
+authenticate_as "$(mint_token acme-approver Approver acme)"
+expect_status 200 "POST approveinvoice as Approver" \
+  -X POST "$BASE/api/invoices/transitions/approveinvoice" \
+  -H 'Content-Type: application/json' -d "{\"entityId\":\"$WF_ID\"}"
+
+authenticate_as "$ACME_ADMIN"
+expect_status 200 "GET after approval" "$BASE/api/invoices/$WF_ID"
+WF_STATE=$(json_field "$WORK_DIR/body.json" CurrentState currentState)
+[[ "$WF_STATE" == "Approved" ]] || fail "expected state 'Approved', got '$WF_STATE'"
+pass "the invoice reached its final state"
+
+# A transition is a write, so tenant isolation applies to it like any other.
+log "A transition cannot be driven against another tenant's record"
+authenticate_as "$GLOBEX_ADMIN"
+code=$(status -X POST "$BASE/api/invoices/transitions/submitinvoice" \
+  -H 'Content-Type: application/json' -d "{\"entityId\":\"$WF_ID\"}")
+[[ "$code" != "200" ]] \
+  || fail "globex drove a transition on an acme invoice -- workflow writes are not tenant-scoped"
+pass "a cross-tenant transition was refused with $code"
 
 # A multi-tenant row with no tenant is invisible to every tenant once isolation is on, and
 # visible to all of them until then. The write is refused rather than silently orphaned.

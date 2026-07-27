@@ -99,8 +99,18 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
 
         // 4. Caller identity and authorisation.
         var operatorId = _userContext?.OperatorId ?? "system";
+
+        // Role claims are read under both the raw name and the WS-Federation URI. Only the URI was
+        // matched, and the framework's own authentication sets MapInboundClaims=false with a
+        // configurable RoleClaimType -- so a caller whose token said `"role": "Approver"` arrived
+        // here with no roles at all, and every role-gated transition was refused. Silent in the safe
+        // direction, and still wrong: it makes a correctly-configured workflow look broken.
         var userRoles = _userContext?.User is ClaimsPrincipal principal
-            ? principal.Claims.Where(c => c.Type == ClaimTypes.Role).Select(c => c.Value).ToList()
+            ? principal.Claims
+                .Where(c => c.Type == ClaimTypes.Role || c.Type == "role" || c.Type == "roles")
+                .Select(c => c.Value)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList()
             : new List<string>();
 
         var fromStateConfig = workflowConfig.States?

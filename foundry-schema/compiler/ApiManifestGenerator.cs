@@ -91,15 +91,197 @@ namespace Foundry.Schema.Compiler
                 });
             }
 
+            var workflows = new JsonArray();
+            foreach (var workflow in schema.Workflows ?? new List<WorkflowModel>())
+            {
+                if (string.IsNullOrWhiteSpace(workflow.Entity)) continue;
+
+                workflows.Add(BuildWorkflow(workflow));
+
+                // Each transition also becomes a route, so a workflow declared in a schema is
+                // reachable over HTTP. Without this the definitions arrive, the pipeline behaviour is
+                // registered, the commands are generated -- and nothing can ever send one.
+                foreach (var endpoint in BuildTransitionEndpoints(workflow))
+                {
+                    customEndpoints.Add(endpoint);
+                }
+            }
+
             var manifest = new JsonObject
             {
                 ["Namespace"] = schema.Namespace ?? string.Empty,
                 ["Endpoints"] = endpoints,
-                ["CustomEndpoints"] = customEndpoints
+                ["CustomEndpoints"] = customEndpoints,
+                ["Workflows"] = workflows
             };
 
             return manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
         }
+
+        /// <summary>
+        /// Copies a workflow definition into the manifest shape the runtime reads.
+        /// </summary>
+        /// <remarks>
+        /// The manifest is the only channel between the compiler and the running application, and
+        /// <c>Workflows</c> was never written to it — so <c>ApiManifestWorkflowDefinitionProvider</c>
+        /// always found an empty list, and a workflow declared in a schema was compiled, validated
+        /// and then went nowhere. Every layer downstream was in place and waiting for a definition
+        /// that never arrived.
+        /// </remarks>
+        private static JsonObject BuildWorkflow(WorkflowModel workflow)
+        {
+            var states = new JsonArray();
+            foreach (var state in workflow.States ?? new List<WorkflowStateModel>())
+            {
+                if (string.IsNullOrWhiteSpace(state.Name)) continue;
+
+                states.Add(new JsonObject
+                {
+                    ["Name"] = state.Name,
+                    ["IsInitial"] = state.IsInitial,
+                    ["IsFinal"] = state.IsFinal,
+                    ["AllowedRoles"] = ToArray(state.AllowedRoles)
+                });
+            }
+
+            var transitions = new JsonArray();
+            foreach (var transition in workflow.Transitions ?? new List<WorkflowTransitionModel>())
+            {
+                if (string.IsNullOrWhiteSpace(transition.Trigger)) continue;
+
+                var conditions = new JsonArray();
+                foreach (var condition in transition.Conditions ?? new List<WorkflowConditionModel>())
+                {
+                    if (string.IsNullOrWhiteSpace(condition.Property)) continue;
+
+                    conditions.Add(new JsonObject
+                    {
+                        ["Property"] = condition.Property,
+                        ["Operator"] = condition.Operator ?? string.Empty,
+                        ["Value"] = condition.Value ?? string.Empty
+                    });
+                }
+
+                transitions.Add(new JsonObject
+                {
+                    // The engine matches on Id, so a transition that declares none is keyed by its
+                    // trigger. Leaving it empty would make every such transition match the first one.
+                    ["Id"] = TransitionId(transition),
+                    ["Name"] = transition.Name ?? transition.Trigger,
+                    ["FromState"] = transition.FromState ?? string.Empty,
+                    ["ToState"] = transition.ToState ?? string.Empty,
+                    ["Trigger"] = transition.Trigger,
+                    ["RequiredRoles"] = ToArray(transition.RequiredRoles),
+                    ["Conditions"] = conditions
+                });
+            }
+
+            // Decision gates. The IR carries them, WorkflowConfig has a property for them and the
+            // behaviour resolves them -- so omitting them here would leave a declared gate silently
+            // absent at runtime, with its transition landing on whatever target state it named. That
+            // is the same defect as the workflow list itself, one level down.
+            var choiceNodes = new JsonArray();
+            foreach (var node in workflow.ChoiceNodes ?? new List<WorkflowChoiceNodeModel>())
+            {
+                if (string.IsNullOrWhiteSpace(node.Id)) continue;
+
+                var branches = new JsonArray();
+                foreach (var branch in node.Branches ?? new List<WorkflowBranchModel>())
+                {
+                    if (string.IsNullOrWhiteSpace(branch.TargetState)) continue;
+
+                    var branchConditions = new JsonArray();
+                    if (!string.IsNullOrWhiteSpace(branch.Condition?.Property))
+                    {
+                        branchConditions.Add(new JsonObject
+                        {
+                            ["Property"] = branch.Condition!.Property,
+                            ["Operator"] = branch.Condition.Operator ?? string.Empty,
+                            ["Value"] = branch.Condition.Value ?? string.Empty
+                        });
+                    }
+
+                    branches.Add(new JsonObject
+                    {
+                        ["ToState"] = branch.TargetState,
+                        ["Conditions"] = branchConditions
+                    });
+                }
+
+                choiceNodes.Add(new JsonObject
+                {
+                    ["Id"] = node.Id,
+                    ["Name"] = node.Name ?? node.Id,
+
+                    // No default state in the IR: the engine treats an unmatched gate as a routing
+                    // failure rather than guessing, which is the safer of the two.
+                    ["DefaultState"] = string.Empty,
+                    ["Branches"] = branches
+                });
+            }
+
+            return new JsonObject
+            {
+                ["Id"] = string.IsNullOrWhiteSpace(workflow.Id) ? workflow.Name : workflow.Id,
+                ["Name"] = workflow.Name ?? string.Empty,
+                ["Entity"] = workflow.Entity,
+                ["Version"] = workflow.Version ?? string.Empty,
+                ["EffectiveDate"] = workflow.EffectiveDate ?? string.Empty,
+                ["ExpirationDate"] = workflow.ExpirationDate ?? string.Empty,
+
+                // A definition the IR did not mark active is still emitted, but the engine skips it.
+                // Emitting it keeps the manifest a faithful record of the schema.
+                ["IsActive"] = workflow.IsActive,
+                ["States"] = states,
+                ["Transitions"] = transitions,
+                ["ChoiceNodes"] = choiceNodes
+            };
+        }
+
+        /// <summary>
+        /// Emits one endpoint per transition, so a transition can actually be triggered.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately expressed as custom endpoints rather than as a new kind of route. The
+        /// generated transition command already implements <c>IRequest</c>, the endpoint generator
+        /// already maps a custom endpoint by POSTing its request type, and the workflow behaviour
+        /// already intercepts anything implementing <c>IWorkflowTransitionRequest</c> — so the whole
+        /// path exists and only needed connecting. Roles declared on the transition are carried onto
+        /// the endpoint, where they are enforced before the request reaches the pipeline.
+        /// </remarks>
+        private static IEnumerable<JsonObject> BuildTransitionEndpoints(WorkflowModel workflow)
+        {
+            foreach (var transition in workflow.Transitions ?? new List<WorkflowTransitionModel>())
+            {
+                if (string.IsNullOrWhiteSpace(transition.Trigger)) continue;
+
+                yield return new JsonObject
+                {
+                    ["Route"] = TransitionRouteFor(workflow.Entity, transition.Trigger),
+                    ["Method"] = "POST",
+
+                    // The command is emitted into the '<namespace>.Commands' namespace, and the
+                    // endpoint generator qualifies the request type with the manifest namespace.
+                    ["RequestType"] = "Commands." + transition.Trigger,
+                    ["Roles"] = ToArray(transition.RequiredRoles),
+                    ["BusinessRules"] = new JsonArray()
+                };
+            }
+        }
+
+        /// <summary>Route for triggering one transition, e.g. <c>/api/orders/transitions/approve</c>.</summary>
+        internal static string TransitionRouteFor(string entityName, string trigger)
+            => RouteFor(entityName) + "/transitions/" + trigger.ToLowerInvariant();
+
+        /// <summary>The identifier the workflow engine matches a transition on.</summary>
+        internal static string TransitionId(WorkflowTransitionModel transition)
+            => string.IsNullOrWhiteSpace(transition.Id) ? transition.Trigger : transition.Id;
+
+        private static JsonArray ToArray(IEnumerable<string>? values)
+            => new((values ?? Enumerable.Empty<string>())
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Select(v => (JsonNode)v!)
+                .ToArray());
 
         /// <summary>
         /// Copies a per-method map, keeping only entries for methods actually exposed.

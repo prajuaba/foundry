@@ -1234,7 +1234,10 @@ namespace {@namespace}.Commands;
 /// <summary>
 /// Command to trigger the workflow transition '{transition.Name}' from '{transition.FromState}' to '{transition.ToState}'.
 /// </summary>
-public partial record {CodeGen.Ident(transition.Trigger, "Transition trigger")} : IRequest, IWorkflowTransitionRequest
+// IRequest<Unit> rather than the void IRequest. ISender.Send returns a bare Task for the void form,
+// which the generated endpoint cannot assign to a result -- so a transition command could be built
+// and dispatched from code, and never routed. Unit is what MediatR provides for exactly this.
+public partial record {CodeGen.Ident(transition.Trigger, "Transition trigger")} : IRequest<Unit>, IWorkflowTransitionRequest
 {{
     /// <summary>
     /// Gets the unique ID of the target entity document.
@@ -1248,7 +1251,10 @@ public partial record {CodeGen.Ident(transition.Trigger, "Transition trigger")} 
     public string EntityType => ""{CodeGen.Lit(entity.Name)}"";
 
     /// <inheritdoc />
-    public string TransitionId => ""{CodeGen.Lit(transition.Id)}"";
+    // Falls back to the trigger exactly as ApiManifestGenerator does. The engine matches a request
+    // to a definition on this value, so the two must agree: when a transition declares no id, an
+    // empty string here would match the first transition in the workflow, or none at all.
+    public string TransitionId => ""{CodeGen.Lit(ApiManifestGenerator.TransitionId(transition))}"";
 
     /// <inheritdoc />
     public string FromState => ""{CodeGen.Lit(transition.FromState)}"";
@@ -1261,23 +1267,30 @@ public partial record {CodeGen.Ident(transition.Trigger, "Transition trigger")} 
 
         private static string GenerateTransitionHandler(WorkflowTransitionModel transition, string @namespace)
         {
+            var trigger = CodeGen.Ident(transition.Trigger, "Transition trigger");
+
+            // The command lives in '<namespace>.Commands' and this handler in '<namespace>.Handlers'.
+            // Without the using directive the handler names a type it cannot see (CS0246), so every
+            // workflow the compiler emitted produced a project that did not build. Nothing caught it
+            // because no test and no sample had ever compiled a schema with a workflow in it.
             return $@"using System;
 using System.Threading;
 using System.Threading.Tasks;
 using MediatR;
+using {@namespace}.Commands;
 
 namespace {@namespace}.Handlers;
 
 /// <summary>
 /// Handler for {transition.Trigger} workflow state transition command.
 /// </summary>
-public partial class {CodeGen.Ident(transition.Trigger, "Transition trigger")}Handler : IRequestHandler<{CodeGen.Ident(transition.Trigger, "Transition trigger")}>
+public partial class {trigger}Handler : IRequestHandler<{trigger}, Unit>
 {{
     /// <inheritdoc />
-    public Task Handle({transition.Trigger} request, CancellationToken ct)
+    public Task<Unit> Handle({trigger} request, CancellationToken ct)
     {{
         // State updates, roles audits, guard evaluation, and logging are automatically processed by WorkflowTransitionBehavior.
-        return Task.CompletedTask;
+        return Task.FromResult(Unit.Value);
     }}
 }}
 ";

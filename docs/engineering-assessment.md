@@ -93,10 +93,10 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 689 C# tests across 12 suites |
+| `Build and test` | 700 C# tests across 12 suites |
 | `Studio tests and typecheck` | 28 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
-| `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication, declared roles and row-level ownership**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
+| `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication, declared roles, row-level ownership and workflow transitions**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
 
 CI first went green on `bf3e227`. The runtime smoke test is the one that matters most, because it is the
 only gate that runs a generated application rather than compiling one — and reaching it required six
@@ -158,6 +158,41 @@ The smoke test drives this with genuine HS256 tokens it mints itself — anonymo
 token signed with a different key gets 401, a `Clerk` gets 403 where the schema requires `Admin`, and an
 `Admin` gets 204. Enforcement that refuses everyone is not enforcement, so the positive case is asserted
 alongside the negatives.
+
+### Workflows reach a running application
+
+A workflow declared in a schema was compiled, validated, and went nowhere. This was the clearest
+remaining instance of the section 2 defect class, at feature scale — and the shape is worth stating
+precisely, because it is not the shape people expect:
+
+> **Every layer was already built.** The definition provider, the Mongo state store, the pipeline
+> behaviour with 24 tests, the generated command implementing `IWorkflowTransitionRequest`, the
+> generated handler — all present, all correct, all waiting on a list that arrived empty every time.
+
+`ApiManifestGenerator` emitted `Namespace`, `Endpoints` and `CustomEndpoints`, and never `Workflows`.
+The manifest is the only channel between the compiler and a running application, so
+`ApiManifestWorkflowDefinitionProvider.GetWorkflows()` returned nothing on every request that had
+ever been served. The scaffolder never called `AddFoundryWorkflows`, and no route could send a
+transition command even if one had been built.
+
+Four defects sat behind that, none reachable without building and running a workflow schema — which
+nothing did:
+
+| Defect | Effect |
+| ------ | ------ |
+| The transition handler never imported the command's namespace | CS0246: **no schema with a workflow in it had ever compiled** |
+| The command implemented the void `IRequest` | `ISender.Send` returns a bare `Task`, which the endpoint generator cannot assign a result from |
+| A transition declaring no `id` emitted an empty `TransitionId` | The engine matches on that value, so it would match the wrong transition or none |
+| `WorkflowTransitionBehavior` read roles only from `ClaimTypes.Role` | The framework's own authentication emits raw `role` claims, so every role-gated transition refused everybody |
+
+Transitions are exposed as custom endpoints — `POST /api/orders/transitions/approveorder` — because
+the endpoint generator already maps a custom endpoint by POSTing its request type and the behaviour
+already intercepts anything implementing `IWorkflowTransitionRequest`. The whole path existed and
+needed connecting, not building. Roles declared on a transition are carried onto its endpoint, so
+they are enforced before the request reaches the pipeline as well as inside it.
+
+A refused transition is now a **409** naming the state the record is actually in, rather than a bare
+500 with the engine's explanation swallowed.
 
 ### Authorization reaches individual rows
 
@@ -239,7 +274,7 @@ Every module has tests:
 
 | Suite | Tests |
 | ----- | ----: |
-| `foundry-schema` | 173 |
+| `foundry-schema` | 184 |
 | `foundry-integration-tests` | 75 |
 | `foundry-rules` | 73 |
 | `foundry-file-io` | 63 |
@@ -360,14 +395,21 @@ But the specific failure remains unexplained: the original assertion message was
 several candidate mechanisms were eliminated by reading the code. **If it recurs, capture the assertion
 message before anything else.**
 
-**Workflow transitions are not reachable from a scaffolded application, so the smoke test cannot cover
-them.** This was meant to be part of extending it, and the attempt found the reason it could not be:
-`ApiManifestGenerator` emits `Namespace`, `Endpoints` and `CustomEndpoints` and **never emits
-`Workflows`**, though both the IR and `ApiManifest` carry them. `ApiManifestWorkflowDefinitionProvider`
-therefore always finds an empty list. The scaffolder also never calls `AddFoundryWorkflows`, and no HTTP
-route triggers a transition. The orchestrator itself is well covered by unit tests — but a workflow
-declared in a schema does not reach a running application at all. That is a feature gap, not a test gap,
-and it is now the clearest one.
+**Workflow choice nodes cross the manifest boundary but nothing runs one.** They are emitted and the
+behaviour resolves them, but no test and no smoke-test phase drives a decision gate, so this is the
+one part of the workflow path still verified only by inspection — which is exactly the standing this
+whole document argues is worth little. The IR also has nowhere to express a gate's default target,
+so an unmatched gate is a routing failure rather than a fallback.
+
+**A transition's endpoint takes the entity id in the request body**, not in the route
+(`POST /api/orders/transitions/approve` with `{"entityId":"..."}`). That falls out of reusing the
+custom-endpoint machinery, which binds one request object from the body. `POST
+/api/orders/{id}/transitions/approve` would read better and needs route-parameter binding the
+generator does not do for custom endpoints.
+
+**Workflow history has no read path.** `AppendActivityLogAsync` writes an entry per transition, and
+nothing serves it. For a regulated buyer the audit trail is the point, so a record that can be
+written and not read is half a feature.
 
 **The Kafka outbox is still unexercised end to end.** The CI job provisions MongoDB only, so a real
 broker round trip has nowhere to run. Worth doing as a separate job rather than by weakening the
@@ -411,22 +453,19 @@ not, and a scaffolded project prints those warnings on its first build.
 
 ## 6. Recommended priority for the next cycle
 
-The catch-site audit, the smoke test extension, endpoint authorization and row-level ownership are all
-done. None of the last two was on the list before this cycle — they were found by asking whether the
+Everything on the previous list above item 2 is done: the catch-site audit, the smoke test extension,
+endpoint authorization, row-level ownership, and workflows reaching a running application. Two of
+those were not on any list before the cycle that found them — they came from asking whether the
 framework was production-ready and then checking rather than answering from memory, which remains the
 more useful lesson than any item below.
 
-1. **Make workflows reach a running application.** Emit `Workflows` into `api-manifest.json`, have the
-   scaffolder register `AddFoundryWorkflows`, and expose a route that triggers a transition. Today a
-   workflow declared in a schema is compiled, validated and then goes nowhere — the same shape as the
-   defect class in section 2, at feature scale. Once it runs, the smoke test can cover it in a few lines.
-2. **Deepen coverage on the paths that talk to the outside world** — the connectors' HTTP and SOAP
+1. **Deepen coverage on the paths that talk to the outside world** — the connectors' HTTP and SOAP
    paths, the workflow engine's `ExecuteActionAsync`, the Excel import end to end. These are where
    untrusted input meets the framework and where the remaining silent failures most likely live.
-3. **Add a Kafka job to CI** and take the outbox round trip end to end.
-4. **Remove the last mirrored implementation** by having the designer and playground read routes from a
+2. **Add a Kafka job to CI** and take the outbox round trip end to end.
+3. **Remove the last mirrored implementation** by having the designer and playground read routes from a
    cached manifest rather than deriving them.
-5. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
+4. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than precede
    it.
 

@@ -85,7 +85,7 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **689 C# tests passing**: 173 compiler, 75 integration, 73 rules, 63 file-IO, 61 MongoDB,
+Expect **700 C# tests passing**: 184 compiler, 75 integration, 73 rules, 63 file-IO, 61 MongoDB,
 54 API, 52 core, 34 Kafka, 31 connectors, 26 real-time, 26 testing, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
@@ -98,9 +98,9 @@ cd foundry-studio && npm test
 
 The suites above check that code is generated and that it compiles. Neither says an application
 *works*, so one gate scaffolds two projects, runs them, and drives them over HTTP with real JWTs it
-mints itself — authentication, the roles a schema declares, row-level ownership, CRUD, validation,
-filtering, optimistic concurrency, a restart, and tenant isolation across two tenants. It needs
-MongoDB on `localhost:27017`:
+mints itself — authentication, the roles a schema declares, row-level ownership, workflow
+transitions, CRUD, validation, filtering, optimistic concurrency, a restart, and tenant isolation
+across two tenants. It needs MongoDB on `localhost:27017`:
 
 ```bash
 ./scripts/runtime-smoke-test.sh
@@ -144,6 +144,11 @@ mark an entity owner-scoped:
   ]
 }
 ```
+
+A workflow declared in a schema becomes a route per transition, `POST
+/api/orders/transitions/{trigger}` with `{"entityId": "..."}`. The engine refuses a transition whose
+source state does not match with a **409** naming the state the record is actually in, and a
+transition's `requiredRoles` are enforced on its endpoint as well as inside the pipeline.
 
 `OwnerId` is assigned from the caller's `sub` claim and overwritten if a request body sets it.
 Lists, reads by id, updates and deletes are all narrowed to the caller's own rows; roles in

@@ -12,4 +12,12 @@
     <Version>1.0.0</Version>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Route and transition-id derivation are internal because they are a contract between the
+         compiler's own emitters, not a public API. The tests still need to pin them: the manifest
+         and the generated command must agree on a transition's id, and nothing else would catch
+         them drifting apart. -->
+    <InternalsVisibleTo Include="Foundry.Schema.Compiler.Tests" />
+  </ItemGroup>
+
 </Project>

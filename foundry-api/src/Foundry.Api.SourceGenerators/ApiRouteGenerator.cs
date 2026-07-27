@@ -393,10 +393,17 @@ namespace Foundry.Api.SourceGenerators
             foreach (var customEp in customEndpoints)
             {
                 var method = customEp.Method.ToUpperInvariant();
+
+                // A request type may be namespace-qualified relative to the manifest namespace --
+                // workflow transition commands are emitted into '<namespace>.Commands'. The dots are
+                // fine in the type reference and illegal in the local variable names built from it,
+                // which produced source that did not compile.
+                var localSuffix = customEp.RequestType.Replace('.', '_');
+
                 sb.AppendLine($"            // Custom Endpoint: {customEp.Route} -> {customEp.RequestType}");
                 if (method == "GET" || method == "DELETE")
                 {
-                    sb.AppendLine($"            var builder_{customEp.RequestType} = endpoints.MapMethods(\"{customEp.Route}\", new[] {{ \"{method}\" }}, async (HttpContext context, ISender sender) =>");
+                    sb.AppendLine($"            var builder_{localSuffix} = endpoints.MapMethods(\"{customEp.Route}\", new[] {{ \"{method}\" }}, async (HttpContext context, ISender sender) =>");
                     sb.AppendLine("            {");
                     sb.AppendLine($"                var command = new {ns}.{customEp.RequestType}();");
                     sb.AppendLine("                var result = await sender.Send(command, context.RequestAborted);");
@@ -406,7 +413,7 @@ namespace Foundry.Api.SourceGenerators
                 }
                 else
                 {
-                    sb.AppendLine($"            var builder_{customEp.RequestType} = endpoints.MapMethods(\"{customEp.Route}\", new[] {{ \"{method}\" }}, async ({ns}.{customEp.RequestType} command, HttpContext context, ISender sender) =>");
+                    sb.AppendLine($"            var builder_{localSuffix} = endpoints.MapMethods(\"{customEp.Route}\", new[] {{ \"{method}\" }}, async ({ns}.{customEp.RequestType} command, HttpContext context, ISender sender) =>");
                     sb.AppendLine("            {");
                     sb.AppendLine("                var result = await sender.Send(command, context.RequestAborted);");
                     sb.AppendLine("                if (result == null) return Results.NoContent();");
@@ -414,16 +421,16 @@ namespace Foundry.Api.SourceGenerators
                     sb.AppendLine("            });");
                 }
 
-                sb.AppendLine($"            var config_{customEp.RequestType} = new EndpointConfig");
+                sb.AppendLine($"            var config_{localSuffix} = new EndpointConfig");
                 sb.AppendLine("            {");
                 sb.AppendLine($"                Route = \"{customEp.Route}\",");
                 sb.AppendLine($"                Entity = \"{customEp.RequestType}\",");
                 sb.AppendLine($"                Methods = new List<string> {{ \"{method}\" }},");
                 sb.AppendLine($"                Roles = new Dictionary<string, List<string>> {{ {{ \"{method}\", new List<string> {{ {string.Join(", ", customEp.Roles.Select(r => $"\"{r}\""))} }} }} }}");
                 sb.AppendLine("            };");
-                sb.AppendLine($"            RequireDeclaredRoles(builder_{customEp.RequestType}, config_{customEp.RequestType}.Roles[\"{method}\"]);");
-                sb.AppendLine($"            builder_{customEp.RequestType}.WithMetadata(config_{customEp.RequestType})");
-                sb.AppendLine($"                         .WithName(\"{method}_{customEp.RequestType}\")");
+                sb.AppendLine($"            RequireDeclaredRoles(builder_{localSuffix}, config_{localSuffix}.Roles[\"{method}\"]);");
+                sb.AppendLine($"            builder_{localSuffix}.WithMetadata(config_{localSuffix})");
+                sb.AppendLine($"                         .WithName(\"{method}_{localSuffix}\")");
                 sb.AppendLine($"                         .WithTags(\"{customEp.RequestType}\")");
                 sb.AppendLine("                         .Produces(200)");
                 sb.AppendLine("                         .Produces(400, typeof(Microsoft.AspNetCore.Mvc.ProblemDetails))");

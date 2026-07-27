@@ -831,6 +831,27 @@ volumes:
 
         var kafkaRegistration = hasKafka ? "\n// Register generated Kafka consumer handlers\nbuilder.Services.AddGeneratedKafkaHandlers();\n" : "";
 
+        // Workflow wiring, emitted only when the schema declares a workflow.
+        //
+        // AddFoundryWorkflows requires each workflow-bearing entity to be named explicitly: that
+        // registration is what replaced an AppDomain scan which bound to whichever assembly was
+        // enumerated first. Nothing generated it, so a workflow declared in a schema reached a
+        // scaffolded application with no definitions, no state store and no pipeline behaviour --
+        // compiled, validated, and inert.
+        var workflowEntities = (manifestSchema.Workflows ?? new List<Foundry.Schema.Compiler.WorkflowModel>())
+            .Where(w => !string.IsNullOrWhiteSpace(w.Entity))
+            .Select(w => w.Entity)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        var workflowRegistration = workflowEntities.Count == 0
+            ? ""
+            : "\n// Workflow transitions. Each entity naming a workflow is registered by type so the\n"
+              + "// engine resolves it without scanning loaded assemblies.\n"
+              + "builder.Services.AddFoundryWorkflows(registry => registry\n"
+              + string.Join("\n", workflowEntities.Select(e =>
+                    $"    .Register<{projectName}.Domain.{e}>()")) + ");\n";
+
         // 7. Write Program.cs.
         //
         // This previously called AddControllers()/MapControllers(), but the compiler emits no
@@ -909,7 +930,7 @@ builder.Services.AddMediatR(cfg =>
 
 // Generated request handlers, one per entity method in the manifest.
 builder.Services.AddGeneratedHandlers();
-{kafkaRegistration}
+{kafkaRegistration}{workflowRegistration}
 // SecurityBehavior re-checks the manifest's roles inside the pipeline, against the same
 // EndpointConfig metadata the endpoint's own RequireAuthorization uses, so the two cannot disagree.
 // The template registered it and the scaffolder did not -- so `foundry new` produced an application

@@ -76,6 +76,29 @@ public class GlobalExceptionHandler : IExceptionHandler
             return true;
         }
 
+        // A refused transition is a client-resolvable conflict, not a server fault: the entity is in
+        // a state this transition does not apply to, or a guard rejected it. Unmapped it surfaced as
+        // a bare 500 with the reason swallowed, so a caller could not tell "you cannot do that yet"
+        // from "the server is broken" -- and the workflow engine's own explanation, which names the
+        // current state and the one required, never reached them.
+        if (exception is Foundry.Rules.WorkflowException workflowEx)
+        {
+            httpContext.Response.StatusCode = StatusCodes.Status409Conflict;
+            httpContext.Response.ContentType = "application/json";
+
+            var problemDetails = new ProblemDetails
+            {
+                Status = StatusCodes.Status409Conflict,
+                Title = "Workflow Transition Refused",
+                Detail = workflowEx.Message,
+                Instance = httpContext.Request.Path
+            };
+
+            var json = JsonSerializer.Serialize(problemDetails);
+            await httpContext.Response.WriteAsync(json, cancellationToken);
+            return true;
+        }
+
         if (exception is UnauthorizedAccessException unauthEx)
         {
             httpContext.Response.StatusCode = StatusCodes.Status403Forbidden;

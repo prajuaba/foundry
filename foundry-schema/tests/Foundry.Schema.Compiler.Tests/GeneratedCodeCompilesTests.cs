@@ -86,6 +86,26 @@ public class GeneratedCodeCompilesTests
 
             File.WriteAllText(Path.Combine(work, "TenantScopedInvoice.cs"), tenantEntity.Content);
 
+            // A workflow, for the same reason. The showcase declares none, so no schema with a
+            // workflow in it had ever been compiled -- and none of them built: the emitted handler
+            // named its command without importing the namespace it lives in (CS0246), and the command
+            // implemented the void IRequest, which the endpoint generator cannot assign a result
+            // from. Both are invisible to a text-level assertion and obvious to a real build.
+            foreach (var file in PocoGenerator.GenerateFiles(WorkflowSchema()))
+            {
+                if (file.Path.StartsWith("Serialization/", StringComparison.Ordinal)
+                    || file.Path.StartsWith("Diagnostics/", StringComparison.Ordinal))
+                {
+                    // One JsonSerializerContext per project; a second collides inside
+                    // System.Text.Json's own generator.
+                    continue;
+                }
+
+                var target = Path.Combine(work, "Workflow", file.Path + ".cs");
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.WriteAllText(target, file.Content);
+            }
+
             // A library project referencing the same runtime libraries a scaffolded app would.
             var csproj = $"""
 <Project Sdk="Microsoft.NET.Sdk">
@@ -154,6 +174,53 @@ public class GeneratedCodeCompilesTests
                 }
             }
         }
+    };
+
+    /// <summary>
+    /// A document with a workflow, whose commands, handlers and state-bearing entity must all build.
+    /// </summary>
+    private static SchemaModel WorkflowSchema() => new()
+    {
+        Namespace = "Foundry.CompileCheck.Workflows",
+        Entities =
+        [
+            new Entity
+            {
+                Name = "WorkflowScopedOrder",
+                Properties =
+                [
+                    new Property { Name = "Id", Type = "ObjectId", IsKey = true },
+                    new Property { Name = "Reference", Type = "string" }
+                ]
+            }
+        ],
+        Workflows =
+        [
+            new WorkflowModel
+            {
+                Id = "compile-check",
+                Name = "Compile Check",
+                Entity = "WorkflowScopedOrder",
+                Version = "1.0",
+                IsActive = true,
+                States =
+                [
+                    new WorkflowStateModel { Name = "Draft", IsInitial = true },
+                    new WorkflowStateModel { Name = "Done", IsFinal = true }
+                ],
+                Transitions =
+                [
+                    new WorkflowTransitionModel
+                    {
+                        Id = "finish",
+                        Name = "Finish",
+                        FromState = "Draft",
+                        ToState = "Done",
+                        Trigger = "FinishWorkflowScopedOrder"
+                    }
+                ]
+            }
+        ]
     };
 
     private static (int ExitCode, string Output) RunDotnetBuild(string workingDirectory)
