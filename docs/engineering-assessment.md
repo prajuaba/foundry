@@ -1,15 +1,33 @@
-# Engineering Assessment — 2026-07-26
+# Engineering Assessment — 2026-07-26 to 2026-07-27
 
-An honest read of where Foundry stands, written from a full working session *inside* the codebase
-rather than from reading it. It is deliberately blunt: the point is to be useful for planning the next
-cycle, not to market the project.
+An honest read of where Foundry stands, written from a working session *inside* the codebase rather
+than from reading it. It is deliberately blunt: the point is to be useful for planning the next cycle,
+not to market the project.
 
 **Summary.** The architecture is strong and the differentiation is real. The implementation was
-demo-grade, and it is now *verified at its edges* — the repository builds from a clean clone, CI passes
-for the first time, a generated application is proven to boot and persist, and every module has tests.
-That is a floor, not a finish. The single most important finding is not any individual bug: it is that
-the codebase had a consistent disposition toward **silent failure**, which is the worst possible default
-for a code generator, and that disposition is only partly corrected.
+demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
+jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
+authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
+742, on a repository whose CI had never passed once.
+
+The single most important finding is not any individual bug. It is this:
+
+> **Five separate features had never executed.** Not under-tested — never run.
+>
+> 1. **Multi-tenancy** did not compile. `IMultiTenant` needs a `set`; the compiler emitted `init`.
+> 2. **Generated APIs were anonymous**, while their own OpenAPI output named the roles they required.
+> 3. **Workflows** were compiled, validated, and went nowhere: the manifest never carried them.
+> 4. **The Excel import path** had never been called by any test.
+> 5. **The outbox** had never published, and the compose file meant to supply a broker exited on
+>    startup — which is why nobody noticed.
+
+Each looked correct in source. Each had convincing scaffolding around it — a meticulous validator, a
+pipeline behaviour with its own tests, an OpenAPI description naming the roles. Reading the code
+would have confirmed all five were fine. That is the disposition worth naming: this codebase was
+consistently good at *appearing* to work, and the appearance was load-bearing.
+
+The verification backlog is now clear. What remains in section 5 is a list of gaps someone would
+choose to close, not damage someone discovered.
 
 ---
 
@@ -119,7 +137,49 @@ collaborators by scanning `AppDomain` for simple-name matches and invoking metho
 Two interfaces preserve the `Foundry.Rules` → `Foundry.Api` layering constraint that the reflection was
 working around, with compile-time contracts instead. It now has 24 tests.
 
+The sections below are ordered by what a regulated buyer would ask about first, not by the order the
+work happened in. Most of them share one shape, which is why they are worth reading together rather
+than separately: a capability the framework advertised, every supporting layer present and correct,
+and nothing that had ever run the path end to end. Several describe work to make a feature function
+at all, not merely to test it.
+
+### Tenant isolation now exists
+
+
+It did not before, in four independent ways, and extending the smoke test is what surfaced them. The
+first is the one that reframes the rest:
+
+> **No multi-tenant Foundry application had ever compiled.** `IMultiTenant` declares
+> `string TenantId { get; set; }`; the compiler emitted the tenant key as `init` like every other
+> property, and C# will not accept `init` as an implementation of `set` (CS8854). Every multi-tenant
+> schema produced a project that failed to build.
+
+Nothing caught it because no test had ever *built* a multi-tenant schema — the showcase IR declares none,
+and the compiler's own tests assert on generated text, which looked perfectly correct. Behind it sat
+three more breaks that only a running application could show:
+
+| Break | Effect |
+| ----- | ------ |
+| `TenantContextMiddleware` was never wired into any template, sample or scaffold | `HasTenant` was false on every request ever served, and the repository's filter is written `if (HasTenant)` — so it never applied |
+| Nothing stamped the tenant on write | The tenant of a new row was whatever the caller's request body said, so a client could write into another tenant by naming it |
+| The expression overload of the read filter applied soft delete and *not* the tenant | `FindManyAsync`, `CountAsync` and `FindByCriteriaAsync` — the methods behind every generated list endpoint — returned every tenant's rows |
+
+That last one is worth dwelling on. There were two overloads, both named `ApplySoftDeleteFilter`; the
+`FilterDefinition` one applied the tenant, the expression one did not, and it was `static`, which put
+`_tenantContext` out of reach and made the omission look deliberate. The name is why it survived: every
+call site read as though soft delete were the only concern. They are now `ApplyReadFilters`.
+
+Writes addressed by id were unscoped too — an id is not a secret, it is handed out in every `Location`
+header — so knowing one was enough to update, delete or restore another tenant's row.
+
+Isolation is covered at both levels: 13 repository tests against a real MongoDB, and the smoke test
+driving two tenants over HTTP through a scaffolded application. Both were confirmed load-bearing by
+reverting each fix and watching the right tests fail.
+
+---
+
 ### Generated APIs are no longer anonymous
+
 
 The schema lets an entity declare `apiRoles` per method. Those roles reached exactly one place:
 
@@ -160,140 +220,8 @@ token signed with a different key gets 401, a `Clerk` gets 403 where the schema 
 `Admin` gets 204. Enforcement that refuses everyone is not enforcement, so the positive case is asserted
 alongside the negatives.
 
-### The last mirrored implementation is gone
-
-Studio derived CRUD routes itself, in a `crudRouteFor` that reimplemented the compiler's `RouteFor`
-and its pluraliser in TypeScript. It was kept deliberately — the designer and playground need a route
-to display, and a request per keystroke would be absurd — and held to the compiler by a test table
-duplicated on the C# side.
-
-That table is the part worth examining, because it looked like a sufficient guarantee and was not:
-
-> A shared table catches a derivation that **changes**. It cannot catch a rule the compiler
-> **gains**, because a rule nobody thought to write down twice is not in the table.
-
-Routes now come from a manifest the compiler derived and the store cached, keyed on a signature of
-entity names and their declared methods — so a keystroke that cannot affect routing costs no request,
-which is what made deleting the mirror affordable. Two behaviours changed, and both are improvements:
-
-- An entity declaring no API methods now shows **no route**, because the compiler generates none for
-  it. The designer previously displayed one, advertising an endpoint that would never be served.
-- With no derived manifest the playground **refuses to send** rather than calling a URL it made up.
-  Two earlier versions of that code guessed wrongly — one emitted an `/api/v1/` prefix, the other did
-  not pluralise — and every request 404'd, which reads as a broken application rather than a broken
-  playground.
-
-The pluralisation contract did not move to a weaker place: `ApiManifestGeneratorTests` still owns it,
-and is now its only home rather than one of two copies. Studio's suite went from 28 tests to 33.
-
-### The outbox publishes, and the compose file never started a broker
-
-The transactional outbox is the framework's durability claim: a mutation is recorded in the same
-database as the data and published afterwards, so a broker outage cannot lose an event. Every part
-of that chain had unit tests and **the chain had never run**.
-
-The first obstacle was not in the code. The repository's own `docker-compose.yml` configured Kafka
-for ZooKeeper against `confluentinc/cp-kafka:latest`, which is KRaft-only in current versions and
-exits immediately with `environment variable "KAFKA_PROCESS_ROLES" is not set`. Anyone following the
-README's `docker compose up -d` got a broker that was never there. Nothing depended on it closely
-enough to notice — which is the whole reason the round trip had never been run. It is now KRaft,
-single-node, and **pinned**, since floating to a new major is what broke it.
-
-Behind that sat a defect the round trip found immediately:
-
-> A nested event type produced an **illegal Kafka topic name**. The topic is derived from the CLR
-> type name, and the nested-type separator `+` was never stripped — so `Orders+Placed` became
-> `orders+placed-events`, which the broker rejects. The publish failed with librdkafka's
-> `Broker: Invalid topic`, the outbox worker logged it and retried, and the message never left.
-> Forever, quietly: the first symptom is a queue that does not drain.
-
-A nested record is an ordinary way to declare an event. Topic derivation now handles nested and
-generic types explicitly — a generic event is named for what it is *about*, so
-`EntityMutationEvent<Order>` publishes to `order-events` rather than putting every entity's
-mutations on one topic, which had been an accident of where the comma fell in the qualified name —
-and a name that still cannot be made legal is refused before publishing, naming the event type and
-the offending characters.
-
-The new `Outbox round trip` job provisions MongoDB **and** a real broker. The tests fail rather than
-skip without them, so the job cannot pass by doing nothing; they are excluded from the fast job by
-an explicit category filter, which keeps the split visible in the workflow rather than hidden in a
-conditional inside the tests.
-
-### The outside-world paths are covered, and one was injectable
-
-Three paths were named in earlier cycles as where untrusted input meets the framework. Covering them
-found one real defect class, in the place with the most surface:
-
-**A workflow action interpolated caller data into three grammars at once, unescaped.**
-`ExecuteActionAsync` builds a URL, a set of headers and a JSON body by substituting `{{Property}}`
-tokens from the request — which is the MediatR command bound from an HTTP body, so every value is
-caller-controlled. Substitution was raw `string.Replace`. Demonstrated by test before the fix:
-
-| Value sent by the caller | Effect |
-| --- | --- |
-| `", "approved": true, "x": "` | Closed its own JSON string and added a field the workflow never intended to send |
-| `../../admin/shutdown` | Escaped its path segment |
-| `INV-001?admin=true` | Appended a query parameter to an internal endpoint |
-
-Escaping is now chosen by context: JSON values through `JsonEncodedText`, URL values as a single path
-segment, and header values containing a line break refused outright rather than stripped. URL escaping
-means a template cannot accept a caller-supplied path or whole URL — deliberately, since that is the
-shape that turns a workflow action into server-side request forgery. `ExecuteActionAsync` had no tests
-at all; it now has 17.
-
-**The Excel path had never been executed.** `ExcelDataParser.ParseAsync` was not run by any test, and
-the cell-conversion suite carried a remark saying the end-to-end path was "covered by the integration
-suite" — it was not; the integration test of that shape drives the *CSV* parser. **The claim is what
-made the gap look deliberate**, which is a more useful finding than any defect would have been: a
-comment asserting coverage is indistinguishable from coverage until someone checks. It now has 12
-tests that build real workbooks.
-
-One gap surfaced there and is now visible rather than fixed: a column absent from a file leaves every
-row at the type's default, with a row count exactly matching what the user expected. The parser cannot
-decide that is an error — plenty of imports fill only some fields — so it reports the unmatched
-properties and lets the caller decide.
-
-**The REST connector came back clean.** Six tests on how it handles a response it did not expect —
-HTML served with a 200, malformed JSON, an oversized error body — and all passed against the existing
-code. Worth stating plainly: coverage that finds nothing is still worth having, and reporting it as a
-finding would be dishonest.
-
-### Workflows reach a running application
-
-A workflow declared in a schema was compiled, validated, and went nowhere. This was the clearest
-remaining instance of the section 2 defect class, at feature scale — and the shape is worth stating
-precisely, because it is not the shape people expect:
-
-> **Every layer was already built.** The definition provider, the Mongo state store, the pipeline
-> behaviour with 24 tests, the generated command implementing `IWorkflowTransitionRequest`, the
-> generated handler — all present, all correct, all waiting on a list that arrived empty every time.
-
-`ApiManifestGenerator` emitted `Namespace`, `Endpoints` and `CustomEndpoints`, and never `Workflows`.
-The manifest is the only channel between the compiler and a running application, so
-`ApiManifestWorkflowDefinitionProvider.GetWorkflows()` returned nothing on every request that had
-ever been served. The scaffolder never called `AddFoundryWorkflows`, and no route could send a
-transition command even if one had been built.
-
-Four defects sat behind that, none reachable without building and running a workflow schema — which
-nothing did:
-
-| Defect | Effect |
-| ------ | ------ |
-| The transition handler never imported the command's namespace | CS0246: **no schema with a workflow in it had ever compiled** |
-| The command implemented the void `IRequest` | `ISender.Send` returns a bare `Task`, which the endpoint generator cannot assign a result from |
-| A transition declaring no `id` emitted an empty `TransitionId` | The engine matches on that value, so it would match the wrong transition or none |
-| `WorkflowTransitionBehavior` read roles only from `ClaimTypes.Role` | The framework's own authentication emits raw `role` claims, so every role-gated transition refused everybody |
-
-Transitions are exposed as custom endpoints — `POST /api/orders/transitions/approveorder` — because
-the endpoint generator already maps a custom endpoint by POSTing its request type and the behaviour
-already intercepts anything implementing `IWorkflowTransitionRequest`. The whole path existed and
-needed connecting, not building. Roles declared on a transition are carried onto its endpoint, so
-they are enforced before the request reaches the pipeline as well as inside it.
-
-A refused transition is now a **409** naming the state the record is actually in, rather than a bare
-500 with the engine's explanation swallowed.
-
 ### Authorization reaches individual rows
+
 
 Roles decide whether a caller may use an endpoint. They say nothing about which rows come back
 through it, so any caller holding a declared role reached every row in their tenant — adequate for a
@@ -333,65 +261,175 @@ data layer identifies these fields by name, so both keys are now required to be 
 constraint rather than a fix, but it is stated at the point where the message can name the property
 instead of surfacing as a compile error in generated code or an empty result set at runtime.
 
-### Tenant isolation now exists
+### Workflows reach a running application
 
-It did not before, in four independent ways, and extending the smoke test is what surfaced them. The
-first is the one that reframes the rest:
 
-> **No multi-tenant Foundry application had ever compiled.** `IMultiTenant` declares
-> `string TenantId { get; set; }`; the compiler emitted the tenant key as `init` like every other
-> property, and C# will not accept `init` as an implementation of `set` (CS8854). Every multi-tenant
-> schema produced a project that failed to build.
+A workflow declared in a schema was compiled, validated, and went nowhere. This was the clearest
+remaining instance of the section 2 defect class, at feature scale — and the shape is worth stating
+precisely, because it is not the shape people expect:
 
-Nothing caught it because no test had ever *built* a multi-tenant schema — the showcase IR declares none,
-and the compiler's own tests assert on generated text, which looked perfectly correct. Behind it sat
-three more breaks that only a running application could show:
+> **Every layer was already built.** The definition provider, the Mongo state store, the pipeline
+> behaviour with 24 tests, the generated command implementing `IWorkflowTransitionRequest`, the
+> generated handler — all present, all correct, all waiting on a list that arrived empty every time.
 
-| Break | Effect |
-| ----- | ------ |
-| `TenantContextMiddleware` was never wired into any template, sample or scaffold | `HasTenant` was false on every request ever served, and the repository's filter is written `if (HasTenant)` — so it never applied |
-| Nothing stamped the tenant on write | The tenant of a new row was whatever the caller's request body said, so a client could write into another tenant by naming it |
-| The expression overload of the read filter applied soft delete and *not* the tenant | `FindManyAsync`, `CountAsync` and `FindByCriteriaAsync` — the methods behind every generated list endpoint — returned every tenant's rows |
+`ApiManifestGenerator` emitted `Namespace`, `Endpoints` and `CustomEndpoints`, and never `Workflows`.
+The manifest is the only channel between the compiler and a running application, so
+`ApiManifestWorkflowDefinitionProvider.GetWorkflows()` returned nothing on every request that had
+ever been served. The scaffolder never called `AddFoundryWorkflows`, and no route could send a
+transition command even if one had been built.
 
-That last one is worth dwelling on. There were two overloads, both named `ApplySoftDeleteFilter`; the
-`FilterDefinition` one applied the tenant, the expression one did not, and it was `static`, which put
-`_tenantContext` out of reach and made the omission look deliberate. The name is why it survived: every
-call site read as though soft delete were the only concern. They are now `ApplyReadFilters`.
+Four defects sat behind that, none reachable without building and running a workflow schema — which
+nothing did:
 
-Writes addressed by id were unscoped too — an id is not a secret, it is handed out in every `Location`
-header — so knowing one was enough to update, delete or restore another tenant's row.
+| Defect | Effect |
+| ------ | ------ |
+| The transition handler never imported the command's namespace | CS0246: **no schema with a workflow in it had ever compiled** |
+| The command implemented the void `IRequest` | `ISender.Send` returns a bare `Task`, which the endpoint generator cannot assign a result from |
+| A transition declaring no `id` emitted an empty `TransitionId` | The engine matches on that value, so it would match the wrong transition or none |
+| `WorkflowTransitionBehavior` read roles only from `ClaimTypes.Role` | The framework's own authentication emits raw `role` claims, so every role-gated transition refused everybody |
 
-Isolation is covered at both levels: 13 repository tests against a real MongoDB, and the smoke test
-driving two tenants over HTTP through a scaffolded application. Both were confirmed load-bearing by
-reverting each fix and watching the right tests fail.
+Transitions are exposed as custom endpoints — `POST /api/orders/transitions/approveorder` — because
+the endpoint generator already maps a custom endpoint by POSTing its request type and the behaviour
+already intercepts anything implementing `IWorkflowTransitionRequest`. The whole path existed and
+needed connecting, not building. Roles declared on a transition are carried onto its endpoint, so
+they are enforced before the request reaches the pipeline as well as inside it.
 
----
+A refused transition is now a **409** naming the state the record is actually in, rather than a bare
+500 with the engine's explanation swallowed.
+
+### The outbox publishes, and the compose file never started a broker
+
+
+The transactional outbox is the framework's durability claim: a mutation is recorded in the same
+database as the data and published afterwards, so a broker outage cannot lose an event. Every part
+of that chain had unit tests and **the chain had never run**.
+
+The first obstacle was not in the code. The repository's own `docker-compose.yml` configured Kafka
+for ZooKeeper against `confluentinc/cp-kafka:latest`, which is KRaft-only in current versions and
+exits immediately with `environment variable "KAFKA_PROCESS_ROLES" is not set`. Anyone following the
+README's `docker compose up -d` got a broker that was never there. Nothing depended on it closely
+enough to notice — which is the whole reason the round trip had never been run. It is now KRaft,
+single-node, and **pinned**, since floating to a new major is what broke it.
+
+Behind that sat a defect the round trip found immediately:
+
+> A nested event type produced an **illegal Kafka topic name**. The topic is derived from the CLR
+> type name, and the nested-type separator `+` was never stripped — so `Orders+Placed` became
+> `orders+placed-events`, which the broker rejects. The publish failed with librdkafka's
+> `Broker: Invalid topic`, the outbox worker logged it and retried, and the message never left.
+> Forever, quietly: the first symptom is a queue that does not drain.
+
+A nested record is an ordinary way to declare an event. Topic derivation now handles nested and
+generic types explicitly — a generic event is named for what it is *about*, so
+`EntityMutationEvent<Order>` publishes to `order-events` rather than putting every entity's
+mutations on one topic, which had been an accident of where the comma fell in the qualified name —
+and a name that still cannot be made legal is refused before publishing, naming the event type and
+the offending characters.
+
+The new `Outbox round trip` job provisions MongoDB **and** a real broker. The tests fail rather than
+skip without them, so the job cannot pass by doing nothing; they are excluded from the fast job by
+an explicit category filter, which keeps the split visible in the workflow rather than hidden in a
+conditional inside the tests.
+
+### The outside-world paths are covered, and one was injectable
+
+
+Three paths were named in earlier cycles as where untrusted input meets the framework. Covering them
+found one real defect class, in the place with the most surface:
+
+**A workflow action interpolated caller data into three grammars at once, unescaped.**
+`ExecuteActionAsync` builds a URL, a set of headers and a JSON body by substituting `{{Property}}`
+tokens from the request — which is the MediatR command bound from an HTTP body, so every value is
+caller-controlled. Substitution was raw `string.Replace`. Demonstrated by test before the fix:
+
+| Value sent by the caller | Effect |
+| --- | --- |
+| `", "approved": true, "x": "` | Closed its own JSON string and added a field the workflow never intended to send |
+| `../../admin/shutdown` | Escaped its path segment |
+| `INV-001?admin=true` | Appended a query parameter to an internal endpoint |
+
+Escaping is now chosen by context: JSON values through `JsonEncodedText`, URL values as a single path
+segment, and header values containing a line break refused outright rather than stripped. URL escaping
+means a template cannot accept a caller-supplied path or whole URL — deliberately, since that is the
+shape that turns a workflow action into server-side request forgery. `ExecuteActionAsync` had no tests
+at all; it now has 17.
+
+**The Excel path had never been executed.** `ExcelDataParser.ParseAsync` was not run by any test, and
+the cell-conversion suite carried a remark saying the end-to-end path was "covered by the integration
+suite" — it was not; the integration test of that shape drives the *CSV* parser. **The claim is what
+made the gap look deliberate**, which is a more useful finding than any defect would have been: a
+comment asserting coverage is indistinguishable from coverage until someone checks. It now has 12
+tests that build real workbooks.
+
+One gap surfaced there and is now visible rather than fixed: a column absent from a file leaves every
+row at the type's default, with a row count exactly matching what the user expected. The parser cannot
+decide that is an error — plenty of imports fill only some fields — so it reports the unmatched
+properties and lets the caller decide.
+
+**The REST connector came back clean.** Six tests on how it handles a response it did not expect —
+HTML served with a 200, malformed JSON, an oversized error body — and all passed against the existing
+code. Worth stating plainly: coverage that finds nothing is still worth having, and reporting it as a
+finding would be dishonest.
+
+### The last mirrored implementation is gone
+
+
+Studio derived CRUD routes itself, in a `crudRouteFor` that reimplemented the compiler's `RouteFor`
+and its pluraliser in TypeScript. It was kept deliberately — the designer and playground need a route
+to display, and a request per keystroke would be absurd — and held to the compiler by a test table
+duplicated on the C# side.
+
+That table is the part worth examining, because it looked like a sufficient guarantee and was not:
+
+> A shared table catches a derivation that **changes**. It cannot catch a rule the compiler
+> **gains**, because a rule nobody thought to write down twice is not in the table.
+
+Routes now come from a manifest the compiler derived and the store cached, keyed on a signature of
+entity names and their declared methods — so a keystroke that cannot affect routing costs no request,
+which is what made deleting the mirror affordable. Two behaviours changed, and both are improvements:
+
+- An entity declaring no API methods now shows **no route**, because the compiler generates none for
+  it. The designer previously displayed one, advertising an endpoint that would never be served.
+- With no derived manifest the playground **refuses to send** rather than calling a URL it made up.
+  Two earlier versions of that code guessed wrongly — one emitted an `/api/v1/` prefix, the other did
+  not pluralise — and every request 404'd, which reads as a broken application rather than a broken
+  playground.
+
+The pluralisation contract did not move to a weaker place: `ApiManifestGeneratorTests` still owns it,
+and is now its only home rather than one of two copies. Studio's suite went from 28 tests to 33.
 
 ## 4. Coverage and what covering it found
 
-Every module has tests:
+Every module has tests. **742 in total**, from 258 at the start:
 
-| Suite | Tests |
-| ----- | ----: |
-| `foundry-schema` | 184 |
-| `foundry-integration-tests` | 75 |
-| `foundry-rules` | 87 |
-| `foundry-file-io` | 75 |
-| `foundry-core` | 52 |
-| `foundry-kafka` | 39 + 5 |
-| `foundry-mongo` | 61 |
-| `foundry-connectors` | 37 |
-| `foundry-studio` | 33 |
-| `foundry-realtime` | 26 |
-| `foundry-testing` | 26 |
-| `foundry-api` | 54 |
-| `foundry-cli` | 21 |
+| Suite | Tests | Needs |
+| ----- | ----: | ----- |
+| `foundry-schema` | 184 | — |
+| `foundry-rules` | 87 | — |
+| `foundry-integration-tests` | 75 | MongoDB |
+| `foundry-file-io` | 75 | — |
+| `foundry-mongo` | 61 | MongoDB |
+| `foundry-api` | 54 | MongoDB |
+| `foundry-core` | 52 | — |
+| `foundry-kafka` | 39 | — |
+| `foundry-connectors` | 37 | — |
+| `foundry-studio` | 33 | — |
+| `foundry-realtime` | 26 | — |
+| `foundry-testing` | 26 | — |
+| `foundry-cli` | 21 | — |
+| `foundry-kafka-integration` | 5 | MongoDB **and** a Kafka broker |
+
+The suites that need infrastructure **fail rather than skip** without it. That is the house rule, and
+it is why the Kafka suite is split out and excluded from the fast job by an explicit category filter
+rather than by a conditional inside the tests: a gate that quietly skips its own subject reports
+success for something it never checked.
 
 **Nine modules went from zero tests to a suite each, and seven of the nine yielded five defects.** The
 count did not decline as the work went on, which is the strongest available evidence that the pattern
-was systemic rather than local. Around fifty defects were fixed in total: three repository-level, six in
-the scaffold-to-running-application path, roughly thirty-six across the nine modules, and the rest in
-the workflow orchestrator and the Studio duplications.
+was systemic rather than local. Well over eighty defects were fixed across the session — the module
+sweep alone accounted for roughly thirty-six, before the six features in section 3 were made to work
+at all. An exact figure would be false precision: several "defects" were one cause with four symptoms,
+and several were a feature that had never run rather than a line that was wrong.
 
 The two exceptions are informative rather than lucky:
 
@@ -472,55 +510,44 @@ Recorded as evidence, not omitted for being unexciting:
 
 ## 5. What is not fixed
 
-Stated plainly, because a document that only lists wins is not useful for planning.
+Stated plainly, because a document that only lists wins is not useful for planning. Grouped by what
+each would actually cost, because a flat list of fifteen caveats reads as uniformly alarming and is
+not.
 
-**Coverage is a floor, not a finish.** The suites target each module's highest-consequence surface,
-not its whole surface area. The outside-world paths named in previous cycles are now covered;
-`CheckHealthAsync`, the CSV exporter's streaming path and the partitioned repository's archival
-worker are not.
+### Would block a regulated deployment
 
-**Studio needs the backend running to show a route.** Removing the last mirror means the designer and
-playground read routes from a derived manifest, so with the backend down a route is *unknown* rather
-than guessed — which is correct, and is also a worse offline experience than the wrong answer it
-replaced. The last successfully derived routes are kept and shown beside the error, so an editing
-session survives a backend restart; a cold start with no backend shows none.
+**Ownership is one relationship, not an authorization language.** `ownerScoped` answers "this row
+belongs to one caller", which covers the common case and nothing beyond it. Sharing, delegation, team
+or hierarchy scoping, and field-level restrictions all have nowhere to be expressed. A schema needing
+those writes them by hand in a business rule, where nothing checks the rule was applied to every path.
 
-**A flake was mitigated, not diagnosed.** Two `FoundryMongo.Tests` audit tests failed once in a
-solution-wide run and were **never reproduced** across ~27 subsequent runs (isolated, under CPU load,
-and solution-wide). The suites that share process-global state now run serially and the MongoDB
-serialization configuration is registered from a module initializer, which removes a real class of
-nondeterminism — xUnit runs classes in parallel, MongoDB freezes a class map on first use, and
-NSubstitute queues matchers per thread. This suite had already produced one confirmed bug of that shape.
-But the specific failure remains unexplained: the original assertion message was not captured, and
-several candidate mechanisms were eliminated by reading the code. **If it recurs, capture the assertion
-message before anything else.**
+**Exempt roles are per entity, not per operation.** A `Supervisor` exempted from the owner filter on
+an entity is exempted for reads, updates and deletes alike. Read-only oversight — the common shape for
+an auditor — cannot be expressed; combining `ownerExemptRoles` with `apiRoles` on DELETE is the closest
+approximation.
 
-**Workflow choice nodes cross the manifest boundary but nothing runs one.** They are emitted and the
-behaviour resolves them, but no test and no smoke-test phase drives a decision gate, so this is the
-one part of the workflow path still verified only by inspection — which is exactly the standing this
-whole document argues is worth little. The IR also has nowhere to express a gate's default target,
-so an unmatched gate is a routing failure rather than a fallback.
+**Workflow history has no read path.** `AppendActivityLogAsync` writes an entry per transition and
+nothing serves it. For a regulated buyer the audit trail is the point, so a record that can be written
+and not read is half a feature.
 
-**A transition's endpoint takes the entity id in the request body**, not in the route
-(`POST /api/orders/transitions/approve` with `{"entityId":"..."}`). That falls out of reusing the
-custom-endpoint machinery, which binds one request object from the body. `POST
-/api/orders/{id}/transitions/approve` would read better and needs route-parameter binding the
-generator does not do for custom endpoints.
+**No token issuance, and no refresh or revocation story.** The framework validates tokens; it does not
+mint them. That is the right split — an identity provider's job is not a code generator's — but a team
+adopting this still has to stand one up, and the scaffolded project says so only by leaving the
+configuration empty.
 
-**Workflow history has no read path.** `AppendActivityLogAsync` writes an entry per transition, and
-nothing serves it. For a regulated buyer the audit trail is the point, so a record that can be
-written and not read is half a feature.
+**Scaffolded projects pull in `MessagePack` 2.5.187, which carries known high-severity advisories**
+(transitively, via SignalR). The framework's own dependencies are clean; the generated application's
+are not, and a scaffolded project prints those warnings on its first build.
 
-**The outbox is proven for one message, not under load or failure.** The round trip runs; what it
-does not cover is a broker that goes away mid-publish, the retry ceiling of five attempts, or
-ordering across a partition under concurrent writers. Those are the properties an outbox exists for,
-and they need a test that can stop and start the broker.
+**MongoDB is still the only data provider.** That is the commercial ceiling for enterprise .NET shops.
 
-**A multi-tenant write with no tenant returns 500.** Deliberate — an application that declares
-multi-tenant entities and cannot resolve a tenant is misconfigured, and refusing is much better than
-writing a row that belongs to nobody. The caller is authenticated and their token simply carries no
-tenant, which is a deployment mistake rather than a bad request. The smoke test asserts the exact status
-so a later decision to make it a 4xx has to be made deliberately.
+### Deliberate limits, chosen with the reasoning recorded
+
+**A multi-tenant write with no tenant returns 500.** An application that declares multi-tenant entities
+and cannot resolve a tenant is misconfigured, and refusing is much better than writing a row belonging
+to nobody. The caller is authenticated and their token simply carries no tenant — a deployment mistake
+rather than a bad request. The smoke test asserts the exact status, so making it a 4xx later has to be
+a decision rather than a drift.
 
 **`TenantContextMiddleware` still falls back to the `X-Tenant-ID` header and a query parameter.** The
 signed claim now wins whenever the caller is authenticated, which closes the override. The fallback
@@ -528,27 +555,47 @@ remains for callers a token cannot describe — a gateway that has already termi
 background job, local development — and in those deployments the tenant is caller-asserted. Issue
 tenants in the token where clients reach the service directly.
 
-**No token issuance, and no refresh or revocation story.** The framework validates tokens; it does not
-mint them. That is the right split — an identity provider's job is not a code generator's — but a team
-adopting this still has to stand one up, and the scaffolded project does not say so beyond the
-configuration it leaves empty.
+**Studio needs the backend running to show a route.** Removing the last mirror means the designer and
+playground read routes from a derived manifest, so with the backend down a route is *unknown* rather
+than guessed. That is correct, and it is also a worse offline experience than the wrong answer it
+replaced. The last successfully derived routes are kept and shown beside the error, so an editing
+session survives a backend restart; a cold start with no backend shows none.
 
-**Ownership is one relationship, not an authorization language.** `ownerScoped` answers "this row
-belongs to one caller", which covers the common case and nothing beyond it. Sharing, delegation,
-team or hierarchy scoping, and field-level restrictions all have nowhere to be expressed. A schema
-needing those still writes them by hand in a business rule, where nothing checks that the rule was
-applied to every path.
+**A transition's endpoint takes the entity id in the request body**, not in the route
+(`POST /api/orders/transitions/approve` with `{"entityId":"..."}`). That falls out of reusing the
+custom-endpoint machinery, which binds one request object from the body.
+`POST /api/orders/{id}/transitions/approve` would read better and needs route-parameter binding the
+generator does not do for custom endpoints.
 
-**Exempt roles are per entity, not per operation.** A `Supervisor` exempted from the owner filter on
-an entity is exempted for reads, updates and deletes alike. Read-only oversight — the common shape
-for an auditor — cannot be expressed, and combining `ownerExemptRoles` with `apiRoles` on DELETE is
-the closest approximation.
+### Verified thinly, or only by inspection
 
-**Scaffolded projects pull in `MessagePack` 2.5.187, which carries known high-severity advisories**
-(transitively, via SignalR). The framework's own dependencies are clean; the generated application's are
-not, and a scaffolded project prints those warnings on its first build.
+**Coverage is a floor, not a finish.** The suites target each module's highest-consequence surface, not
+its whole surface area. The outside-world paths named in earlier cycles are now covered;
+`CheckHealthAsync`, the CSV exporter's streaming path and the partitioned repository's archival worker
+are not.
 
-**MongoDB is still the only data provider.** That is the commercial ceiling for enterprise .NET shops.
+**The outbox is proven for one message, not under load or failure.** The round trip runs; what it does
+not cover is a broker that goes away mid-publish, the retry ceiling of five attempts, or ordering
+across a partition under concurrent writers. Those are the properties an outbox exists for, and they
+need a test that can stop and start the broker.
+
+**Workflow choice nodes cross the manifest boundary but nothing runs one.** They are emitted and the
+behaviour resolves them, but no test and no smoke-test phase drives a decision gate — so this is the
+one part of the workflow path still verified only by inspection, which is exactly the standing this
+document argues is worth little. The IR also has nowhere to express a gate's default target, so an
+unmatched gate is a routing failure rather than a fallback.
+
+### Unexplained
+
+**A flake was mitigated, not diagnosed.** Two `FoundryMongo.Tests` audit tests failed once in a
+solution-wide run and were **never reproduced** across ~27 subsequent runs (isolated, under CPU load,
+and solution-wide). The suites that share process-global state now run serially and the MongoDB
+serialization configuration is registered from a module initializer, which removes a real class of
+nondeterminism — xUnit runs classes in parallel, MongoDB freezes a class map on first use, and
+NSubstitute queues matchers per thread. This suite had already produced one confirmed bug of that
+shape. But the specific failure remains unexplained: the original assertion message was not captured,
+and several candidate mechanisms were eliminated by reading the code. **If it recurs, capture the
+assertion message before anything else.**
 
 ---
 
@@ -601,13 +648,29 @@ while its own documentation named the roles it required.** A reviewer reading th
 the schema, or the `Produces(401)` on the route, would have concluded access control was working. The
 one thing that would have shown otherwise was sending a request without a token, and nothing did.
 
-Two general lessons, both cheap and neither followed here until late:
+By the end the shape had repeated five times, which stops it being a coincidence and makes it a
+property of how the project was built: **layers were completed in isolation and connected on faith.**
+Each layer was reviewable and correct. The connection between them was neither, because nothing
+executed it, and code review cannot see an absence.
 
-1. **A guarantee is only as good as the request that tests it.** Both of these were verified by
-   assertion-in-documentation, and both survived years of green builds.
+Three lessons, in order of how much they would have saved:
+
+1. **A guarantee is only as good as the request that tests it.** Tenancy and authorization were both
+   verified by assertion-in-documentation, and both survived years of green builds.
 2. **Ask the blunt question and then check.** "Is this production-ready?" was answered by reading the
-   code rather than by recalling the design — which is the only reason the authorization gap was found
-   at all.
+   code rather than by recalling the design — which is the only reason the authorization gap was found.
+   Two of the five were found this way, from a question rather than a plan.
+3. **A comment claiming coverage is indistinguishable from coverage.** The Excel gap survived because a
+   remark in a neighbouring test file explained it away, and nobody checked whether the thing it
+   pointed at existed.
 
-What has changed is not that the code is now correct, but that it can now tell you when it is not. That
-is the prerequisite for everything else.
+### Where this leaves it
+
+Not production-ready, and much closer than it was. The front door works, the rooms have locks, and the
+building tells you when something is wrong. What it still lacks is the paperwork a regulated buyer
+asks for after they are satisfied it works at all: authorization richer than one ownership
+relationship, a readable audit trail, and durability proven under failure rather than in the happy
+case. Those are in section 5, and none of them is damage.
+
+The honest one-line version: **what changed is not that the code is now correct, but that it can now
+tell you when it is not.** Everything else depends on that, and it was the thing most missing.
