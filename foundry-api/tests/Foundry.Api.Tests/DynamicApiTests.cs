@@ -24,16 +24,16 @@ using Paperclip.OrderingSystem.Domain;
 
 namespace Foundry.Api.Tests;
 
-public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
+public class DynamicApiTests : IClassFixture<AuthenticatedApiFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly AuthenticatedApiFactory _factory;
 
     static DynamicApiTests()
     {
         Environment.SetEnvironmentVariable("MONGODB_ENCRYPTION_KEY", "12345678901234567890123456789012");
     }
 
-    public DynamicApiTests(WebApplicationFactory<Program> factory)
+    public DynamicApiTests(AuthenticatedApiFactory factory)
     {
         _factory = factory;
     }
@@ -88,7 +88,7 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
                 services.AddSingleton<IRepository<Order>>(mockRepo);
                 services.AddScoped<ICurrentUserContext>(_ => mockUserContext);
             });
-        }).CreateClient();
+        }).CreateClient().As("Admin");
 
         // Act
         var response = await client.GetAsync("/api/v1/orders");
@@ -144,7 +144,7 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
                 services.AddSingleton<IRepository<Order>>(mockRepo);
                 services.AddScoped<ICurrentUserContext>(_ => mockUserContext);
             });
-        }).CreateClient();
+        }).CreateClient().As("Admin");
 
         var response = await client.GetAsync("/api/v1/orders");
         response.EnsureSuccessStatusCode();
@@ -284,7 +284,7 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
                     new ClaimsIdentity(new List<Claim> { new(ClaimTypes.Role, "Admin") }, "TestAuth")));
                 services.AddScoped<ICurrentUserContext>(_ => mockUserContext);
             });
-        }).CreateClient();
+        }).CreateClient().As("Admin");
 
         var orderId = ObjectId.GenerateNewId();
         var created = new Order { Id = orderId, OrderNumber = "ORD-OCC-001", TotalAmount = 10m };
@@ -338,7 +338,7 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
                 services.AddSingleton<IRepository<Order>>(mockRepo);
                 services.AddScoped<ICurrentUserContext>(_ => mockUserContext);
             });
-        }).CreateClient();
+        }).CreateClient().As("Admin");
 
         // Invalid order details (empty order number, negative amount)
         var invalidOrder = new Order
@@ -358,14 +358,13 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
     [Fact]
     public async Task PostOrder_SecurityFails_WhenRoleIsInvalid_ReturnsForbidden()
     {
-        // Arrange
+        // Arrange -- authenticated, but holding a role the endpoint does not accept.
+        //
+        // This test previously established identity by substituting ICurrentUserContext, which left
+        // HttpContext.User anonymous: it proved SecurityBehavior's role comparison, not that the
+        // request was refused. Authenticating for real means the endpoint's own authorization is what
+        // answers, and the assertion below no longer depends on which layer refuses.
         var mockRepo = Substitute.For<IRepository<Order>>();
-        var mockUserContext = Substitute.For<ICurrentUserContext>();
-        // Bypassing auth check by passing a "User" role, but POST /api/v1/orders requires "Admin" role
-        mockUserContext.OperatorId.Returns("normal-user");
-        var claims = new List<Claim> { new(ClaimTypes.Role, "User") };
-        var identity = new ClaimsIdentity(claims, "TestAuth");
-        mockUserContext.User.Returns(new ClaimsPrincipal(identity));
 
         var client = _factory.WithWebHostBuilder(builder =>
         {
@@ -373,9 +372,8 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
             builder.ConfigureServices(services =>
             {
                 services.AddSingleton<IRepository<Order>>(mockRepo);
-                services.AddScoped<ICurrentUserContext>(_ => mockUserContext);
             });
-        }).CreateClient();
+        }).CreateClient().As("User");
 
         var order = new Order
         {
@@ -389,8 +387,52 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
 
         // Assert
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-        var body = await response.Content.ReadAsStringAsync();
-        Assert.Contains("User does not have permission to execute POST on /api/v1/orders", body);
+
+        // Nothing reached the repository: the refusal happened before the handler ran.
+        await mockRepo.DidNotReceive().InsertAsync(
+            Arg.Any<Order>(), Arg.Any<IClientSessionHandle>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// An anonymous caller is challenged, not refused outright.
+    /// </summary>
+    /// <remarks>
+    /// The distinction is the point. Roles used to be written into the endpoint's OpenAPI description
+    /// and nowhere else, so an anonymous request to a role-protected endpoint got a 200 while the
+    /// documentation advertised 401 and 403. Both statuses are now real.
+    /// </remarks>
+    [Fact]
+    public async Task PostOrder_WithoutCredentials_ReturnsUnauthorized()
+    {
+        var mockRepo = Substitute.For<IRepository<Order>>();
+
+        var client = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureServices(services => services.AddSingleton<IRepository<Order>>(mockRepo));
+        }).CreateClient();
+
+        var order = new Order { Id = ObjectId.GenerateNewId(), OrderNumber = "ORD-ANON", TotalAmount = 1m };
+
+        var response = await client.PostAsJsonAsync(
+            "/api/v1/orders", order, Foundry.Core.Serialization.FoundryJsonDefaults.Options);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+
+        await mockRepo.DidNotReceive().InsertAsync(
+            Arg.Any<Order>(), Arg.Any<IClientSessionHandle>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// Reads are protected too, not just mutations.
+    /// </summary>
+    [Fact]
+    public async Task GetOrders_WithoutCredentials_ReturnsUnauthorized()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.GetAsync("/api/v1/orders");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     [Fact]
@@ -418,7 +460,7 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
                 services.AddSingleton<IRepository<Order>>(mockRepo);
                 services.AddScoped<ICurrentUserContext>(_ => mockUserContext);
             });
-        }).CreateClient();
+        }).CreateClient().As("Admin");
 
         // 1. First GET request - Cache Miss
         var response1 = await client.GetAsync($"/api/v1/orders/{orderId}");
@@ -476,7 +518,7 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
                 mockUserContext.User.Returns(new ClaimsPrincipal(identity));
                 services.AddScoped<ICurrentUserContext>(_ => mockUserContext);
             });
-        }).CreateClient();
+        }).CreateClient().As("Admin");
 
         // 3. Test POST order (insert)
         var orderId = ObjectId.GenerateNewId();
@@ -529,7 +571,7 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
                 services.AddSingleton<IDistributedCache>(mockDistributedCache);
                 services.AddScoped<ICurrentUserContext>(_ => mockUserContext);
             });
-        }).CreateClient();
+        }).CreateClient().As("Admin");
 
         // 1. First GET request - L1 & L2 Cache Miss. Should query repository, and populate both L1 and L2 caches
         var response1 = await httpClient.GetAsync($"/api/v1/orders/{orderId}");
@@ -578,7 +620,7 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
                 services.AddSingleton<IRepository<Order>>(mockRepo);
                 services.AddScoped<ICurrentUserContext>(_ => mockUserContext);
             });
-        }).CreateClient();
+        }).CreateClient().As("Admin");
 
         // Act - Call GET many with search criteria JSON
         var criteriaJson = "[{\"Field\":\"OrderNumber\",\"Operator\":\"Equals\",\"Value\":\"ORD-100\"}]";
@@ -609,7 +651,7 @@ public class DynamicApiTests : IClassFixture<WebApplicationFactory<Program>>
             {
                 services.AddScoped<ICurrentUserContext>(_ => mockUserContext);
             });
-        }).CreateClient();
+        }).CreateClient().As("Admin");
 
         var payload = new { CustomerId = "cust-1", ItemIds = new List<string> { "item-1", "item-2" } };
 

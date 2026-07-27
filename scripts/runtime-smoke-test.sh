@@ -41,11 +41,35 @@ trap cleanup EXIT
 # comes up: a silent timeout here would be indistinguishable from a crash, which is the whole point.
 start_app() {
   local app_dir="$1" port="$2" probe_route="$3" logfile="$4"
-  ( cd "$app_dir" && dotnet run --no-build --urls "http://localhost:$port" >"$logfile" 2>&1 ) &
+  local app_dll="$app_dir/bin/Debug/net10.0/$(basename "$app_dir").dll"
+
+  [[ -f "$app_dll" ]] || fail "no built application at $app_dll"
+
+  # Refuse to start against an occupied port.
+  #
+  # This script used to leak its own applications and then test them. `dotnet run` starts the app as
+  # a *child*, so killing the pid this script held stopped the launcher and left the application
+  # running; the next run failed to bind, and its readiness probe was answered by the previous run's
+  # process. Every assertion then ran against a binary built before the change under test -- a
+  # harness reporting success for something it had not exercised, which is the exact failure this
+  # whole script exists to catch.
+  #
+  # Fixed twice over: the port is checked here, and the application is launched directly below so the
+  # pid is the application's own.
+  if (exec 3<>"/dev/tcp/localhost/$port") 2>/dev/null; then
+    exec 3<&- 2>/dev/null || true
+    fail "port $port is already in use, so this run would test whatever is already listening there."
+  fi
+
+  # `exec` replaces the subshell with the application, so APP_PID is the application itself and the
+  # `cd` still gives it the content root it needs for api-manifest.json and appsettings.
+  ( cd "$app_dir" && exec dotnet "$app_dll" --urls "http://localhost:$port" ) >"$logfile" 2>&1 &
   APP_PID=$!
 
+  # Readiness is "answers with the caller's identity applied", not merely "listens". An
+  # unauthenticated probe would report ready on a 401 and prove nothing about the token chain.
   local waited=0
-  until curl -fsS -o /dev/null -H 'X-Tenant-ID: startup-probe' "http://localhost:$port$probe_route" 2>/dev/null; do
+  until curl -fsS -o /dev/null ${AUTH[@]+"${AUTH[@]}"} "http://localhost:$port$probe_route" 2>/dev/null; do
     if ! kill -0 "$APP_PID" 2>/dev/null; then
       echo "--- application log ---" >&2
       cat "$logfile" >&2
@@ -67,10 +91,13 @@ stop_app() {
   APP_PID=""
 }
 
+# Credentials applied to every request. Set with `authenticate_as`, cleared with `authenticate_as_nobody`.
+AUTH=()
+
 # Emits the HTTP status of a request, with the body left in $WORK_DIR/body.json for inspection.
 # Every assertion in this script goes through here so that a failure can report what came back
 # rather than only that a number differed.
-status() { curl -s -o "$WORK_DIR/body.json" -w '%{http_code}' "$@"; }
+status() { curl -s -o "$WORK_DIR/body.json" -w '%{http_code}' ${AUTH[@]+"${AUTH[@]}"} "$@"; }
 
 expect_status() {
   local expected="$1" description="$2"; shift 2
@@ -110,6 +137,53 @@ print(len(payload) if isinstance(payload, list) else -1)
 ' "$1"
 }
 
+# ─── Identity ────────────────────────────────────────────────────────────────
+#
+# Generated endpoints require an authenticated caller, so the whole script runs as somebody. The
+# tokens below are real HS256 JWTs, minted here and validated by the application: nothing about the
+# authentication path is stubbed, which is the point. The key is supplied through the environment
+# rather than appsettings, which is also the shape a deployment should use.
+export Authentication__Jwt__SigningKey="foundry-runtime-smoke-test-signing-key-0123456789"
+export Authentication__Jwt__Issuer="foundry-smoke-test"
+export Authentication__Jwt__Audience="foundry-smoke-test"
+
+# Mints a token: subject, comma-separated roles, tenant.
+mint_token() {
+  python3 - "$Authentication__Jwt__SigningKey" "$Authentication__Jwt__Issuer" \
+            "$Authentication__Jwt__Audience" "$1" "${2:-}" "${3:-}" <<'PYTHON'
+import base64, hashlib, hmac, json, sys, time
+
+key, issuer, audience, subject, roles, tenant = sys.argv[1:7]
+
+def b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+now = int(time.time())
+payload = {
+    "sub": subject,
+    "iss": issuer,
+    "aud": audience,
+    "iat": now,
+    "nbf": now,
+    "exp": now + 1800,
+}
+if roles:
+    payload["role"] = roles.split(",")
+if tenant:
+    payload["tenant_id"] = tenant
+
+signing_input = "{}.{}".format(
+    b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode()),
+    b64(json.dumps(payload, separators=(",", ":")).encode()),
+)
+signature = hmac.new(key.encode(), signing_input.encode(), hashlib.sha256).digest()
+print("{}.{}".format(signing_input, b64(signature)))
+PYTHON
+}
+
+authenticate_as() { AUTH=(-H "Authorization: Bearer $1"); }
+authenticate_as_nobody() { AUTH=(); }
+
 log "Checking MongoDB is reachable"
 # The suites that need a database fail rather than skip, and so does this: a smoke test that
 # quietly skips its own subject is worse than no smoke test.
@@ -125,11 +199,14 @@ CLI_DLL="$REPO_ROOT/foundry-cli/src/Foundry.Cli/bin/Release/net10.0/foundry.dll"
 pass "CLI built"
 
 log "Rebuilding the endpoint analyser"
-# The scaffolded project references the analyser project and builds in Debug, while everything
-# else here builds in Release. If the Debug output is stale the scaffolded app is generated from
-# an *old* copy of the generator -- which is how this script briefly reported that a fix already
-# present in the emitted source had not taken effect. Building it explicitly, in the configuration
-# the scaffolded project will use, removes the ambiguity: what runs is what the generator emits now.
+# The scaffolded project references the analyser project and builds it in Debug, while everything
+# else here builds Release. Building it explicitly, in the configuration the scaffolded project will
+# use, keeps "what runs" and "what the generator currently emits" the same thing.
+#
+# This was originally added on the theory that a stale Debug analyser had caused a fix to appear not
+# to take effect. That diagnosis was wrong -- the cause was a leaked application from an earlier run
+# still holding the port (see start_app). Kept anyway: it is one cheap build, and it removes a real
+# ambiguity about which copy of the generator produced the code under test.
 dotnet build "$REPO_ROOT/foundry-api/src/Foundry.Api.SourceGenerators/Foundry.Api.SourceGenerators.csproj" \
   -v q --nologo --no-incremental || fail "the endpoint analyser does not build"
 pass "endpoint analyser rebuilt"
@@ -160,10 +237,35 @@ log "Building the scaffolded project"
 pass "scaffolded project compiles"
 
 log "Booting the application"
+authenticate_as "$(mint_token smoke-operator Admin)"
 start_app "$APP_DIR" "$PORT_A" "/api/customers" "$WORK_DIR/app-a.log"
 pass "application started and answered on /api/customers"
 
-log "Both entities are routed"
+# ── Authentication ──────────────────────────────────────────────────────────
+#
+# The roles a schema declares were previously written into each endpoint's OpenAPI description and
+# nowhere else. Every generated endpoint was anonymous while its own documentation stated the roles
+# it required and advertised the 401 and 403 it could never return. These assert the door is locked
+# before anything else asserts what is behind it.
+log "An unauthenticated caller is refused"
+authenticate_as_nobody
+for route in customers orders; do
+  expect_status 401 "GET /api/$route with no token" "$BASE/api/$route"
+done
+expect_status 401 "POST /api/customers with no token" \
+  -X POST "$BASE/api/customers" -H 'Content-Type: application/json' \
+  -d '{"fullName":"Anonymous","email":"anon@example.com"}'
+
+log "A token this API did not issue is refused"
+# Correctly formed, correctly signed -- with the wrong key. Accepting it would mean signature
+# validation is not actually happening.
+FORGED=$(Authentication__Jwt__SigningKey="an-attackers-own-signing-key-0123456789xyz" \
+  mint_token attacker Admin)
+authenticate_as "$FORGED"
+expect_status 401 "GET /api/customers with a token signed by another key" "$BASE/api/customers"
+
+log "Both entities are routed for an authenticated caller"
+authenticate_as "$(mint_token smoke-operator Admin)"
 for route in customers orders; do
   expect_status 200 "GET /api/$route" "$BASE/api/$route"
 done
@@ -301,7 +403,8 @@ cat > "$WORK_DIR/tenant-schema.json" <<'SCHEMA'
         { "Name": "TenantId", "Type": "string", "isTenantKey": true },
         { "Name": "Reference", "Type": "string", "Attributes": ["Required"] }
       ],
-      "ApiEnabledMethods": ["GET", "POST", "GET_BY_ID", "PUT", "DELETE"]
+      "ApiEnabledMethods": ["GET", "POST", "GET_BY_ID", "PUT", "DELETE"],
+      "ApiRoles": { "DELETE": ["Admin"] }
     }
   ]
 }
@@ -317,46 +420,67 @@ log "Building the multi-tenant project"
 pass "multi-tenant project compiles"
 
 log "Booting the multi-tenant application"
+# Tenancy now travels in the caller's token rather than a header they set themselves. That is the
+# production path, and it is the one worth proving: a header is caller-assertable, a signed claim
+# is not.
+ACME_ADMIN=$(mint_token acme-admin Admin acme)
+GLOBEX_ADMIN=$(mint_token globex-admin Admin globex)
+ACME_CLERK=$(mint_token acme-clerk Clerk acme)
+
+authenticate_as "$ACME_ADMIN"
 start_app "$TENANT_DIR" "$PORT_C" "/api/invoices" "$WORK_DIR/app-c.log"
 pass "multi-tenant application started"
 
 log "Each tenant's write is stamped with its own tenant"
 expect_status 201 "POST as tenant acme" \
   -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' \
-  -H 'X-Tenant-ID: acme' -d '{"reference":"ACME-001"}'
+  -d '{"reference":"ACME-001"}'
 ACME_ID=$(json_field "$WORK_DIR/body.json" Id id)
 ACME_TENANT=$(json_field "$WORK_DIR/body.json" TenantId tenantId)
 [[ "$ACME_TENANT" == "acme" ]] || fail "the stored tenant was '$ACME_TENANT', expected 'acme'"
-pass "acme's invoice is stamped acme"
+pass "acme's invoice is stamped acme from the token claim"
 
+authenticate_as "$GLOBEX_ADMIN"
 expect_status 201 "POST as tenant globex" \
   -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' \
-  -H 'X-Tenant-ID: globex' -d '{"reference":"GLOBEX-001"}'
+  -d '{"reference":"GLOBEX-001"}'
 GLOBEX_ID=$(json_field "$WORK_DIR/body.json" Id id)
 
-# The tenant comes from the server's context, never from the body. A caller naming another
-# tenant in the payload must not be able to write into it.
+# The tenant comes from the server's context, never from the body.
 log "A caller cannot write into another tenant by naming it"
-expect_status 201 "POST as acme claiming to be globex" \
+authenticate_as "$ACME_ADMIN"
+expect_status 201 "POST as acme claiming to be globex in the body" \
   -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' \
-  -H 'X-Tenant-ID: acme' -d '{"reference":"FORGED","tenantId":"globex"}'
+  -d '{"reference":"FORGED","tenantId":"globex"}'
 FORGED_TENANT=$(json_field "$WORK_DIR/body.json" TenantId tenantId)
 [[ "$FORGED_TENANT" == "acme" ]] \
   || fail "a request body set the tenant to '$FORGED_TENANT' -- a caller can write into another tenant"
 pass "the body's tenant was overwritten with the caller's own"
 
+# The header used to be read before the token claim, so an authenticated caller could override the
+# tenant their own token asserted simply by setting one.
+log "A tenant header cannot override the tenant in the token"
+expect_status 201 "POST as acme sending X-Tenant-ID: globex" \
+  -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' \
+  -H 'X-Tenant-ID: globex' -d '{"reference":"HEADER-OVERRIDE"}'
+HEADER_TENANT=$(json_field "$WORK_DIR/body.json" TenantId tenantId)
+[[ "$HEADER_TENANT" == "acme" ]] \
+  || fail "the X-Tenant-ID header set the tenant to '$HEADER_TENANT' -- it outranks the signed claim"
+pass "the signed claim won over the header"
+
 # The failure this phase exists for. The list endpoint runs through FindManyAsync, which took the
 # expression overload of the repository's read filter -- the one that applied soft delete and not
 # the tenant. Every tenant saw every other tenant's rows, with a 200.
 log "A list request sees only its own tenant's rows"
-expect_status 200 "GET as acme" "$BASE/api/invoices" -H 'X-Tenant-ID: acme'
+expect_status 200 "GET as acme" "$BASE/api/invoices"
 grep -q 'GLOBEX-001' "$WORK_DIR/body.json" \
   && fail "acme's list contains globex's invoice -- tenant isolation is not applied to reads"
 grep -q 'ACME-001' "$WORK_DIR/body.json" \
   || fail "acme's list is missing acme's own invoice"
 pass "acme sees ACME-001 and not GLOBEX-001"
 
-expect_status 200 "GET as globex" "$BASE/api/invoices" -H 'X-Tenant-ID: globex'
+authenticate_as "$GLOBEX_ADMIN"
+expect_status 200 "GET as globex" "$BASE/api/invoices"
 grep -q 'ACME-001' "$WORK_DIR/body.json" \
   && fail "globex's list contains acme's invoice -- tenant isolation is not applied to reads"
 pass "globex sees only its own invoice"
@@ -364,49 +488,74 @@ pass "globex sees only its own invoice"
 # An id is not a secret: it is handed out in every Location header and list response. Reads were
 # tenant-scoped; writes addressed by id were not.
 log "A known id from another tenant is not reachable"
-expect_status 404 "GET globex's invoice as acme" \
-  "$BASE/api/invoices/$GLOBEX_ID" -H 'X-Tenant-ID: acme'
+authenticate_as "$ACME_ADMIN"
+expect_status 404 "GET globex's invoice as acme" "$BASE/api/invoices/$GLOBEX_ID"
+expect_status 200 "GET acme's invoice as acme" "$BASE/api/invoices/$ACME_ID"
 
-expect_status 404 "GET acme's invoice as globex" \
-  "$BASE/api/invoices/$ACME_ID" -H 'X-Tenant-ID: globex'
-
-expect_status 200 "GET acme's invoice as acme" \
-  "$BASE/api/invoices/$ACME_ID" -H 'X-Tenant-ID: acme'
+authenticate_as "$GLOBEX_ADMIN"
+expect_status 404 "GET acme's invoice as globex" "$BASE/api/invoices/$ACME_ID"
 
 log "A cross-tenant write does not take effect"
 # The update is a whole-document replace, so an unscoped one would both overwrite another
 # tenant's row and move it between tenants.
-curl -s -o /dev/null -X PUT "$BASE/api/invoices/$GLOBEX_ID" \
-  -H 'Content-Type: application/json' -H 'X-Tenant-ID: acme' \
+authenticate_as "$ACME_ADMIN"
+curl -s -o /dev/null ${AUTH[@]+"${AUTH[@]}"} -X PUT "$BASE/api/invoices/$GLOBEX_ID" \
+  -H 'Content-Type: application/json' \
   -d "{\"id\":\"$GLOBEX_ID\",\"reference\":\"STOLEN\",\"version\":1}" || true
 
-expect_status 200 "GET globex's invoice as globex" \
-  "$BASE/api/invoices/$GLOBEX_ID" -H 'X-Tenant-ID: globex'
+authenticate_as "$GLOBEX_ADMIN"
+expect_status 200 "GET globex's invoice as globex" "$BASE/api/invoices/$GLOBEX_ID"
 grep -q 'STOLEN' "$WORK_DIR/body.json" \
   && fail "acme overwrote globex's invoice -- writes addressed by id are not tenant-scoped"
 grep -q 'GLOBEX-001' "$WORK_DIR/body.json" \
   || fail "globex's invoice no longer holds its own value"
 pass "globex's invoice is untouched"
 
-curl -s -o /dev/null -X DELETE "$BASE/api/invoices/$GLOBEX_ID" -H 'X-Tenant-ID: acme' || true
-expect_status 200 "globex's invoice survives a delete issued by acme" \
-  "$BASE/api/invoices/$GLOBEX_ID" -H 'X-Tenant-ID: globex'
+# Issued with Admin, so the delete is authorised and only tenancy can stop it. A Clerk token here
+# would pass for the wrong reason.
+authenticate_as "$ACME_ADMIN"
+curl -s -o /dev/null ${AUTH[@]+"${AUTH[@]}"} -X DELETE "$BASE/api/invoices/$GLOBEX_ID" || true
+authenticate_as "$GLOBEX_ADMIN"
+expect_status 200 "globex's invoice survives a delete issued by acme" "$BASE/api/invoices/$GLOBEX_ID"
 pass "a cross-tenant delete did not remove the row"
+
+# ── Declared roles ──────────────────────────────────────────────────────────
+#
+# The schema declares "ApiRoles": { "DELETE": ["Admin"] }. That declaration used to reach the
+# endpoint's OpenAPI description and nothing else.
+log "A declared role is enforced, not just documented"
+authenticate_as "$ACME_CLERK"
+expect_status 403 "DELETE as Clerk, where the schema requires Admin" \
+  -X DELETE "$BASE/api/invoices/$ACME_ID"
+
+expect_status 200 "the invoice a Clerk could not delete is still there" "$BASE/api/invoices/$ACME_ID"
+pass "the refused delete did not happen"
+
+# A role the schema did not name must not open the door either, however privileged it sounds.
+authenticate_as "$(mint_token acme-super SuperUser,Owner acme)"
+expect_status 403 "DELETE with roles the schema never named" \
+  -X DELETE "$BASE/api/invoices/$ACME_ID"
+
+log "The declared role does grant access"
+# Enforcement that refuses everyone is not enforcement -- it is an outage.
+authenticate_as "$ACME_ADMIN"
+expect_status 204 "DELETE as Admin" -X DELETE "$BASE/api/invoices/$ACME_ID"
+expect_status 404 "GET after the authorised delete" "$BASE/api/invoices/$ACME_ID"
 
 # A multi-tenant row with no tenant is invisible to every tenant once isolation is on, and
 # visible to all of them until then. The write is refused rather than silently orphaned.
 #
 # 500 and not 400: an application that declares multi-tenant entities and cannot resolve a tenant
-# is misconfigured, and in a real deployment the tenant comes from a claim rather than from
-# something the caller supplies. That makes this a server fault, not a malformed request. It is
-# asserted exactly so that a later decision to map it to 401/403 has to change this line
-# deliberately rather than drift.
+# is misconfigured. The caller is authenticated and their token simply carries no tenant, which is
+# a deployment mistake rather than a malformed request.
 log "A multi-tenant write with no tenant is refused"
-expect_status 500 "POST with no tenant header" \
+authenticate_as "$(mint_token tenantless Admin)"
+expect_status 500 "POST with a token carrying no tenant" \
   -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' -d '{"reference":"NO-TENANT"}'
 
 stop_app
 
 printf '\n\033[32mAll runtime checks passed.\033[0m\n'
-printf 'A scaffolded app boots, serves, validates, filters, updates under optimistic concurrency,\n'
-printf 'soft-deletes, survives a restart, and keeps tenants apart on both reads and writes.\n'
+printf 'A scaffolded app boots, refuses anonymous and forged tokens, enforces the roles its schema\n'
+printf 'declares, validates, filters, updates under optimistic concurrency, soft-deletes, survives a\n'
+printf 'restart, and keeps tenants apart on reads and writes using the tenant in the caller token.\n'

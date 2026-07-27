@@ -85,8 +85,8 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **636 C# tests passing**: 157 compiler, 75 integration, 73 rules, 63 file-IO, 52 core,
-42 MongoDB, 36 API, 34 Kafka, 31 connectors, 26 real-time, 26 testing, 21 CLI. Run it this way
+Expect **654 C# tests passing**: 157 compiler, 75 integration, 73 rules, 63 file-IO, 54 API,
+52 core, 42 MongoDB, 34 Kafka, 31 connectors, 26 real-time, 26 testing, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
 
@@ -97,15 +97,41 @@ cd foundry-studio && npm test
 ```
 
 The suites above check that code is generated and that it compiles. Neither says an application
-*works*, so one gate scaffolds two projects, runs them, and drives them over HTTP — CRUD, validation,
-filtering, optimistic concurrency, a restart, and tenant isolation across two tenants. It needs
-MongoDB on `localhost:27017`:
+*works*, so one gate scaffolds two projects, runs them, and drives them over HTTP with real JWTs it
+mints itself — authentication, the roles a schema declares, CRUD, validation, filtering, optimistic
+concurrency, a restart, and tenant isolation across two tenants. It needs MongoDB on
+`localhost:27017`:
 
 ```bash
 ./scripts/runtime-smoke-test.sh
 ```
 
-### 3. CLI Tooling Commands (`foundry`)
+### 3. Calling a Scaffolded API
+
+Generated endpoints **require an authenticated caller**. Roles declared in a schema under
+`apiRoles` are enforced on the endpoint; an entity that declares none still requires a valid
+token, because "no policy stated" is not the same as "open to anyone".
+
+`foundry new` writes a per-project signing key to `appsettings.Development.json` and gitignores
+it. Every other environment must supply its own, and the application **refuses to start**
+without one rather than serving unauthenticated traffic:
+
+```bash
+# An OIDC provider (Entra ID, Keycloak, Auth0) -- the production shape
+export Authentication__Jwt__Authority="https://login.example.com/"
+export Authentication__Jwt__Audience="my-api"
+```
+
+```bash
+# Or a symmetric key, for tokens the system issues itself. At least 32 bytes.
+export Authentication__Jwt__SigningKey="$(openssl rand -base64 48)"
+```
+
+Roles are read from the `role` claim and the tenant from `tenant_id`; both claim names are
+configurable under `Authentication:Jwt`. A signed `tenant_id` always outranks the
+`X-Tenant-ID` header, which remains only for callers a token cannot describe.
+
+### 4. CLI Tooling Commands (`foundry`)
 Run the unified `Foundry.Cli` executable:
 ```bash
 # Export multi-spec documentation (OpenAPI 3.1, AsyncAPI 3.0, Postman, Mermaid)
@@ -126,7 +152,7 @@ foundry studio --port 5100
 foundry validate schema.json
 ```
 
-### 4. AI-Assisted Modelling (Local Models Only)
+### 5. AI-Assisted Modelling (Local Models Only)
 
 Foundry's AI toolchain runs against a local [Ollama](https://ollama.com) instance —
 no domain model leaves the machine. The model authors **IR**, never C#; the compiler
@@ -153,7 +179,7 @@ Measured accuracy for `qwen3-coder:30b`: **100%** on the 30 core cases, **40%** 
 the 10 hard cases (business phrasing, buried requirements, multi-entity domains),
 with **100% schema-valid output in both bands**.
 
-### 5. VS Code Extension Integration
+### 6. VS Code Extension Integration
 Build and launch the Studio IDE directly inside VS Code:
 ```bash
 cd foundry-vscode

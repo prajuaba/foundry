@@ -274,6 +274,11 @@ namespace Foundry.Api.SourceGenerators
             sb.AppendLine("{");
             sb.AppendLine("    public static IEndpointRouteBuilder MapGeneratedEndpoints(this IEndpointRouteBuilder endpoints, ApiManifest manifest)");
             sb.AppendLine("    {");
+            sb.AppendLine("        // Every endpoint below requires an authenticated caller. Fail at startup if nothing");
+            sb.AppendLine("        // can authenticate one, rather than with a 500 from inside the framework on the");
+            sb.AppendLine("        // first request to an endpoint whose source looks correct.");
+            sb.AppendLine("        Foundry.Api.Security.GeneratedEndpointSecurityGuard.EnsureAuthenticationIsConfigured(endpoints.ServiceProvider);");
+            sb.AppendLine();
 
             foreach (var ep in endpoints)
             {
@@ -416,6 +421,7 @@ namespace Foundry.Api.SourceGenerators
                 sb.AppendLine($"                Methods = new List<string> {{ \"{method}\" }},");
                 sb.AppendLine($"                Roles = new Dictionary<string, List<string>> {{ {{ \"{method}\", new List<string> {{ {string.Join(", ", customEp.Roles.Select(r => $"\"{r}\""))} }} }} }}");
                 sb.AppendLine("            };");
+                sb.AppendLine($"            RequireDeclaredRoles(builder_{customEp.RequestType}, config_{customEp.RequestType}.Roles[\"{method}\"]);");
                 sb.AppendLine($"            builder_{customEp.RequestType}.WithMetadata(config_{customEp.RequestType})");
                 sb.AppendLine($"                         .WithName(\"{method}_{customEp.RequestType}\")");
                 sb.AppendLine($"                         .WithTags(\"{customEp.RequestType}\")");
@@ -429,11 +435,41 @@ namespace Foundry.Api.SourceGenerators
             sb.AppendLine("        return endpoints;");
             sb.AppendLine("    }");
             sb.AppendLine();
+            sb.AppendLine("    /// <summary>Applies the access the schema declared for an endpoint.</summary>");
+            sb.AppendLine("    /// <remarks>");
+            sb.AppendLine("    /// These roles were previously interpolated into the endpoint's OpenAPI description and");
+            sb.AppendLine("    /// nowhere else -- and the description defaulted to \"Requires roles: Admin\" when the schema");
+            sb.AppendLine("    /// declared none. Every generated endpoint was anonymous while documenting the roles it");
+            sb.AppendLine("    /// required and advertising the 401 and 403 responses it could never return.");
+            sb.AppendLine("    ///");
+            sb.AppendLine("    /// An endpoint with no declared roles requires an authenticated caller rather than a");
+            sb.AppendLine("    /// particular role: the schema author expressed no policy, and anonymous is not a policy.");
+            sb.AppendLine("    /// </remarks>");
+            sb.AppendLine("    private static void RequireDeclaredRoles(RouteHandlerBuilder builder, List<string>? declaredRoles)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        if (declaredRoles is { Count: > 0 })");
+            sb.AppendLine("        {");
+            sb.AppendLine("            builder.RequireAuthorization(new Microsoft.AspNetCore.Authorization.AuthorizeAttribute");
+            sb.AppendLine("            {");
+            sb.AppendLine("                Roles = string.Join(\",\", declaredRoles)");
+            sb.AppendLine("            });");
+            sb.AppendLine("            return;");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+            sb.AppendLine("        builder.RequireAuthorization();");
+            sb.AppendLine("    }");
+            sb.AppendLine();
             sb.AppendLine("    private static void ConfigureMetadata(RouteHandlerBuilder builder, EndpointConfig config, string method, Type entityType, int successStatusCode)");
             sb.AppendLine("    {");
-            sb.AppendLine("        var rolesStr = config.Roles != null && config.Roles.TryGetValue(method, out var roles)");
-            sb.AppendLine("            ? string.Join(\", \", roles)");
-            sb.AppendLine("            : \"Admin\";");
+            sb.AppendLine("        var declaredRoles = config.Roles != null && config.Roles.TryGetValue(method, out var roles) && roles.Count > 0");
+            sb.AppendLine("            ? roles");
+            sb.AppendLine("            : null;");
+            sb.AppendLine();
+            sb.AppendLine("        RequireDeclaredRoles(builder, declaredRoles);");
+            sb.AppendLine();
+            sb.AppendLine("        var rolesStr = declaredRoles != null");
+            sb.AppendLine("            ? string.Join(\", \", declaredRoles)");
+            sb.AppendLine("            : \"any authenticated caller\";");
             sb.AppendLine("        string summary = $\"{(method == \"GET_BY_ID\" ? \"Fetch by ID\" : method == \"GET\" ? \"List and Search\" : method == \"POST\" ? \"Insert new\" : method == \"PUT\" ? \"Update existing\" : \"Delete\")} endpoint for {entityType.Name} collection\";");
             sb.AppendLine("        builder.WithMetadata(config)");
             sb.AppendLine("               .WithName($\"{method}_{entityType.Name}\")");

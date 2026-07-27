@@ -627,6 +627,13 @@ public class Program
         // Placeholder — actual Program.cs content is written below AFTER schema compilation
 
         // 3. Create appsettings.json
+        //
+        // Deliberately carries no signing key. The generated endpoints require an authenticated
+        // caller, and the key that decides who is authenticated does not belong in a file the
+        // scaffolder writes and the developer commits. Development gets a generated key in
+        // appsettings.Development.json (gitignored below); every other environment must supply one
+        // through user-secrets, an environment variable or a secret store, and the application
+        // refuses to start without it.
         var appsettingsContent = @"{
   ""Logging"": {
     ""LogLevel"": {
@@ -638,10 +645,34 @@ public class Program
     ""MongoDb"": ""mongodb://localhost:27017"",
     ""Kafka"": ""localhost:9092""
   },
+  ""Authentication"": {
+    ""Jwt"": {
+      ""Issuer"": """ + projectName + @""",
+      ""Audience"": """ + projectName + @""",
+      ""RoleClaimType"": ""role"",
+      ""NameClaimType"": ""sub""
+    }
+  },
   ""AllowedHosts"": ""*""
 }";
         File.WriteAllText(Path.Combine(targetDir, "appsettings.json"), appsettingsContent);
         Console.WriteLine("  ✓ Generated appsettings.json");
+
+        // A signing key for local development only, generated per project so two scaffolded
+        // projects never share one and no key is ever baked into the CLI.
+        var devSigningKey = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(48));
+        var devSettingsContent = @"{
+  ""Authentication"": {
+    ""Jwt"": {
+      ""SigningKey"": """ + devSigningKey + @"""
+    }
+  }
+}";
+        File.WriteAllText(Path.Combine(targetDir, "appsettings.Development.json"), devSettingsContent);
+        File.WriteAllText(
+            Path.Combine(targetDir, ".gitignore"),
+            "bin/\nobj/\n\n# Holds a local JWT signing key. Never commit it.\nappsettings.Development.json\n");
+        Console.WriteLine("  ✓ Generated appsettings.Development.json (local JWT signing key, gitignored)");
 
         // 4. Create or copy domain schema manifest (domain.foundry.json)
         string schemaContent;
@@ -851,6 +882,12 @@ builder.Services.AddFoundryRealTime();
 // 3. Business rules engine
 builder.Services.AddFoundryRules();
 
+// Bearer authentication. The generated endpoints call RequireAuthorization, so without a scheme
+// registered the application refuses to start rather than serving 500s. Configuration decides the
+// shape: set Authentication:Jwt:Authority to trust an OIDC provider (Entra ID, Keycloak, Auth0), or
+// Authentication:Jwt:SigningKey for tokens this system issues itself.
+builder.Services.AddFoundryAuthentication(builder.Configuration);
+
 builder.Services.AddHttpContextAccessor();
 
 // Required by the generated DELETE endpoint, and by the repository layer to stamp audit fields.
@@ -873,6 +910,11 @@ builder.Services.AddMediatR(cfg =>
 // Generated request handlers, one per entity method in the manifest.
 builder.Services.AddGeneratedHandlers();
 {kafkaRegistration}
+// SecurityBehavior re-checks the manifest's roles inside the pipeline, against the same
+// EndpointConfig metadata the endpoint's own RequireAuthorization uses, so the two cannot disagree.
+// The template registered it and the scaffolder did not -- so `foundry new` produced an application
+// with one fewer security check than the template it was meant to mirror, and nothing compared them.
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(SecurityBehavior<,>));
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(BusinessRuleBehavior<,>));
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(CachingBehavior<,>));
@@ -890,10 +932,15 @@ var app = builder.Build();
 
 app.UseExceptionHandler();
 
-// Resolves the ambient tenant (X-Tenant-ID header, ?tenantId, or a tenant claim) before any
-// endpoint runs. Without it ITenantContext.HasTenant is false for every request and the
+app.UseAuthentication();
+app.UseAuthorization();
+
+// Resolves the ambient tenant before any endpoint runs, preferring the caller's token claim over
+// the X-Tenant-ID header. Without it ITenantContext.HasTenant is false for every request and the
 // repository's tenant filter -- written as `if (HasTenant)` -- never applies, so a multi-tenant
 // application serves every tenant's rows to every caller.
+//
+// After UseAuthentication, so the claim is available to be preferred.
 app.UseMiddleware<Foundry.Api.Middleware.TenantContextMiddleware>();
 
 // Generated REST endpoints for every entity in the manifest.

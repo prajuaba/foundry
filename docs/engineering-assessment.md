@@ -93,10 +93,10 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 636 C# tests across 12 suites |
+| `Build and test` | 654 C# tests across 12 suites |
 | `Studio tests and typecheck` | 28 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
-| `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP: the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
+| `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication and declared roles**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
 
 CI first went green on `bf3e227`. The runtime smoke test is the one that matters most, because it is the
 only gate that runs a generated application rather than compiling one — and reaching it required six
@@ -117,6 +117,47 @@ And the largest untestable-by-design block is gone: `WorkflowTransitionBehavior`
 collaborators by scanning `AppDomain` for simple-name matches and invoking methods through `MethodInfo`.
 Two interfaces preserve the `Foundry.Rules` → `Foundry.Api` layering constraint that the reflection was
 working around, with compile-time contracts instead. It now has 24 tests.
+
+### Generated APIs are no longer anonymous
+
+The schema lets an entity declare `apiRoles` per method. Those roles reached exactly one place:
+
+```csharp
+.WithDescription($"Access {entityType.Name} documents. Requires roles: {rolesStr}")
+.Produces(401)
+.Produces(403, typeof(ProblemDetails))
+```
+
+The endpoint's OpenAPI description, and nothing else. Where a schema declared no roles the description
+defaulted to `"Requires roles: Admin"` — so an endpoint documented itself as admin-only, advertised the
+401 and 403 it could never return, and was open to anyone. Custom endpoints had the identical defect.
+
+One qualification, because the first version of this section overstated it: role checking was not
+entirely absent. `SecurityBehavior`, a MediatR pipeline behaviour, does compare the manifest's roles
+against the caller's claims. But it was registered in the template and the sample and **not by
+`foundry new`**, so scaffolded applications had no check at all; and nothing anywhere registered an
+authentication scheme, so `IsAuthenticated` was false on every request ever served. In the template an
+endpoint with declared roles refused everybody; in a scaffolded app everything was open. Neither is
+access control.
+
+What changed:
+
+| Layer | Now |
+| ----- | --- |
+| Generated endpoints | `RequireAuthorization` with the declared roles, or authenticated-only where a schema declares none — anonymous is not a policy |
+| `AddFoundryAuthentication` | One entry point for an OIDC authority *or* a symmetric key, refusing to start on a missing, short, or ambiguous configuration |
+| Startup guard | Endpoints requiring authorization with no scheme registered fails at boot, naming the missing call, instead of a 500 on the first request |
+| Scaffold, template, sample | All three wire authentication, `UseAuthentication`/`UseAuthorization`, and `SecurityBehavior` identically |
+| `TenantContextMiddleware` | A signed `tenant_id` claim now outranks the `X-Tenant-ID` header, which it did not |
+
+That last row was its own hole: the header was read first, so an authenticated caller could override the
+tenant their own token asserted just by setting one, and every tenant filter downstream then applied
+faithfully to the wrong tenant.
+
+The smoke test drives this with genuine HS256 tokens it mints itself — anonymous requests get 401, a
+token signed with a different key gets 401, a `Clerk` gets 403 where the schema requires `Admin`, and an
+`Admin` gets 204. Enforcement that refuses everyone is not enforcement, so the positive case is asserted
+alongside the negatives.
 
 ### Tenant isolation now exists
 
@@ -169,7 +210,7 @@ Every module has tests:
 | `foundry-studio` | 28 |
 | `foundry-realtime` | 26 |
 | `foundry-testing` | 26 |
-| `foundry-api` | 36 |
+| `foundry-api` | 54 |
 | `foundry-cli` | 21 |
 
 **Nine modules went from zero tests to a suite each, and seven of the nine yielded five defects.** The
@@ -294,15 +335,28 @@ assertion to something a missing broker would still pass.
 
 **A multi-tenant write with no tenant returns 500.** Deliberate — an application that declares
 multi-tenant entities and cannot resolve a tenant is misconfigured, and refusing is much better than
-writing a row that belongs to nobody. But once authentication exists the tenant should come from a
-claim, and this should become a 401/403. The smoke test asserts the exact status so that change has to
-be made deliberately.
+writing a row that belongs to nobody. The caller is authenticated and their token simply carries no
+tenant, which is a deployment mistake rather than a bad request. The smoke test asserts the exact status
+so a later decision to make it a 4xx has to be made deliberately.
 
-**`TenantContextMiddleware` accepts a tenant from a request header or query parameter.** In a scaffolded
-app with no authentication the tenant is therefore caller-asserted: isolation holds *between* declared
-tenants, but nothing stops a caller declaring a different one. That is adequate for a header set by a
-trusted gateway and not adequate on its own. It is pre-existing behaviour and was left alone rather than
-redesigned mid-change, but it should not be mistaken for an access control.
+**`TenantContextMiddleware` still falls back to the `X-Tenant-ID` header and a query parameter.** The
+signed claim now wins whenever the caller is authenticated, which closes the override. The fallback
+remains for callers a token cannot describe — a gateway that has already terminated authentication, a
+background job, local development — and in those deployments the tenant is caller-asserted. Issue
+tenants in the token where clients reach the service directly.
+
+**No token issuance, and no refresh or revocation story.** The framework validates tokens; it does not
+mint them. That is the right split — an identity provider's job is not a code generator's — but a team
+adopting this still has to stand one up, and the scaffolded project does not say so beyond the
+configuration it leaves empty.
+
+**Authorization is role-based only.** There is no resource-level or ownership check: any caller holding
+a declared role reaches every row their tenant can see. For many domains that is not enough, and the
+manifest has nowhere to express more.
+
+**Scaffolded projects pull in `MessagePack` 2.5.187, which carries known high-severity advisories**
+(transitively, via SignalR). The framework's own dependencies are clean; the generated application's are
+not, and a scaffolded project prints those warnings on its first build.
 
 **MongoDB is still the only data provider.** That is the commercial ceiling for enterprise .NET shops.
 
@@ -310,21 +364,25 @@ redesigned mid-change, but it should not be mistaken for an access control.
 
 ## 6. Recommended priority for the next cycle
 
-Items 1 and 3 of the previous cycle's list are done — the catch-site audit, and extending the runtime
-smoke test to multi-tenant isolation and an OCC conflict. The two halves of item 3 that remain are now
-better understood, and one of them turned out not to be test work at all.
+The catch-site audit, the smoke test extension, and endpoint authorization are done. Authorization was
+not on the previous list at all — it was found by asking whether the framework was production-ready and
+then checking rather than answering from memory, which is the more useful lesson than any item below.
 
-1. **Make workflows reach a running application.** Emit `Workflows` into `api-manifest.json`, have the
+1. **Resource-level authorization.** Roles are now enforced, but a role is coarse: any caller with the
+   right role reaches every row in their tenant. Ownership and record-level rules have nowhere to be
+   expressed in the manifest. This is the largest remaining gap between what a regulated buyer will ask
+   for and what exists.
+2. **Make workflows reach a running application.** Emit `Workflows` into `api-manifest.json`, have the
    scaffolder register `AddFoundryWorkflows`, and expose a route that triggers a transition. Today a
    workflow declared in a schema is compiled, validated and then goes nowhere — the same shape as the
    defect class in section 2, at feature scale. Once it runs, the smoke test can cover it in a few lines.
-2. **Deepen coverage on the paths that talk to the outside world** — the connectors' HTTP and SOAP
+3. **Deepen coverage on the paths that talk to the outside world** — the connectors' HTTP and SOAP
    paths, the workflow engine's `ExecuteActionAsync`, the Excel import end to end. These are where
    untrusted input meets the framework and where the remaining silent failures most likely live.
-3. **Add a Kafka job to CI** and take the outbox round trip end to end.
-4. **Remove the last mirrored implementation** by having the designer and playground read routes from a
+4. **Add a Kafka job to CI** and take the outbox round trip end to end.
+5. **Remove the last mirrored implementation** by having the designer and playground read routes from a
    cached manifest rather than deriving them.
-5. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
+6. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than precede
    it.
 
@@ -351,6 +409,19 @@ Only nothing had ever executed the path, and each layer's correctness made the n
 harder to see. That is the strongest argument in this document for the priority order: features that
 have never run are worth less than features that are checked, and the difference is invisible from the
 inside.
+
+Then the same shape appeared one layer up, and worse. **Every generated API endpoint was anonymous
+while its own documentation named the roles it required.** A reviewer reading the OpenAPI output, or
+the schema, or the `Produces(401)` on the route, would have concluded access control was working. The
+one thing that would have shown otherwise was sending a request without a token, and nothing did.
+
+Two general lessons, both cheap and neither followed here until late:
+
+1. **A guarantee is only as good as the request that tests it.** Both of these were verified by
+   assertion-in-documentation, and both survived years of green builds.
+2. **Ask the blunt question and then check.** "Is this production-ready?" was answered by reading the
+   code rather than by recalling the design — which is the only reason the authorization gap was found
+   at all.
 
 What has changed is not that the code is now correct, but that it can now tell you when it is not. That
 is the prerequisite for everything else.

@@ -30,6 +30,10 @@ public class Program
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddMemoryCache();
 
+        // Bearer authentication. Generated endpoints call RequireAuthorization, so without a scheme
+        // registered the application refuses to start rather than serving 500s.
+        builder.Services.AddFoundryAuthentication(builder.Configuration);
+
         // Load ApiManifest configuration
         var manifestPath = Path.Combine(builder.Environment.ContentRootPath, "api-manifest.json");
         var manifestJson = await File.ReadAllTextAsync(manifestPath);
@@ -111,7 +115,11 @@ public class Program
 
         app.UseExceptionHandler();
 
-        // Resolves the ambient tenant for the request, before anything reads or writes.
+        app.UseAuthentication();
+        app.UseAuthorization();
+
+        // Resolves the ambient tenant for the request, before anything reads or writes, and after
+        // authentication so the caller's own token claim can take precedence over the header.
         //
         // Nothing in the framework, the templates or the scaffolder ever added this, so
         // ITenantContext.HasTenant was false on every request ever served. The repository's tenant

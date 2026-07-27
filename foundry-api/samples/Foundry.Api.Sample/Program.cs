@@ -22,6 +22,11 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddHttpContextAccessor();
+
+// Generated endpoints require an authenticated caller. The sample registers this the same way the
+// template and the scaffolder do -- the three drifting apart is how the missing enforcement went
+// unnoticed for as long as it did.
+builder.Services.AddFoundryAuthentication(builder.Configuration);
 builder.Services.AddMemoryCache();
 
 // Load ApiManifest
@@ -158,6 +163,9 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseExceptionHandler();
+
+app.UseAuthentication();
+app.UseAuthorization();
 
 // Enable Swagger UI
 app.UseSwagger();

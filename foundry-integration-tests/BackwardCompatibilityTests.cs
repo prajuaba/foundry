@@ -23,16 +23,16 @@ namespace Foundry.IntegrationTests;
 /// alongside the new Studio bridge format. Also validates the source generator handles
 /// extra JSON fields gracefully since it uses string-based parsing.
 /// </summary>
-public class BackwardCompatibilityTests : IClassFixture<WebApplicationFactory<Program>>
+public class BackwardCompatibilityTests : IClassFixture<AuthenticatedSampleFactory>
 {
     static BackwardCompatibilityTests()
     {
         Environment.SetEnvironmentVariable("MONGODB_ENCRYPTION_KEY", "12345678901234567890123456789012");
     }
 
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly AuthenticatedSampleFactory _factory;
 
-    public BackwardCompatibilityTests(WebApplicationFactory<Program> factory)
+    public BackwardCompatibilityTests(AuthenticatedSampleFactory factory)
     {
         _factory = factory;
     }

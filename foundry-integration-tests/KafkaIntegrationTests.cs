@@ -24,16 +24,16 @@ using Xunit;
 
 namespace Foundry.IntegrationTests;
 
-public class KafkaIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
+public class KafkaIntegrationTests : IClassFixture<AuthenticatedSampleFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly AuthenticatedSampleFactory _factory;
 
     static KafkaIntegrationTests()
     {
         Environment.SetEnvironmentVariable("MONGODB_ENCRYPTION_KEY", "12345678901234567890123456789012");
     }
 
-    public KafkaIntegrationTests(WebApplicationFactory<Program> factory)
+    public KafkaIntegrationTests(AuthenticatedSampleFactory factory)
     {
         _factory = factory;
     }
@@ -311,9 +311,13 @@ public class KafkaIntegrationTests : IClassFixture<WebApplicationFactory<Program
                 // Register mock outbox queue to bypass outbox database writes
                 services.AddScoped<Foundry.Core.Outbox.IOutboxQueue>(_ => Substitute.For<Foundry.Core.Outbox.IOutboxQueue>());
             });
-        }).CreateClient();
+        }).CreateClient().As("Admin");
 
-        // Create HttpClientFactory that returns the in-memory client
+        // Create HttpClientFactory that returns the in-memory client.
+        //
+        // The bridge now has to present credentials, because the endpoints it forwards to require an
+        // authenticated caller. That is a real deployment consideration and not only a test detail:
+        // a Kafka-to-API bridge is a client of the API like any other, and needs its own identity.
         var mockFactory = Substitute.For<IHttpClientFactory>();
         mockFactory.CreateClient("KafkaBridge").Returns(client);
 

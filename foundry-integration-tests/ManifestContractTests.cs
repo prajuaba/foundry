@@ -25,33 +25,31 @@ namespace Foundry.IntegrationTests;
 /// and (2) a new-format manifest (with Entities/Enums/NavigationProperties)
 /// produces the correct routing configuration.
 /// </summary>
-public class ManifestContractTests : IClassFixture<WebApplicationFactory<Program>>
+public class ManifestContractTests : IClassFixture<AuthenticatedSampleFactory>
 {
     static ManifestContractTests()
     {
         Environment.SetEnvironmentVariable("MONGODB_ENCRYPTION_KEY", "12345678901234567890123456789012");
     }
 
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly AuthenticatedSampleFactory _factory;
 
-    public ManifestContractTests(WebApplicationFactory<Program> factory)
+    public ManifestContractTests(AuthenticatedSampleFactory factory)
     {
         _factory = factory;
     }
 
     private async Task<HttpClient> CreateClientWithAdminRole()
     {
-        var mockUserContext = Substitute.For<ICurrentUserContext>();
-        mockUserContext.OperatorId.Returns("test-admin");
-        var claims = new List<Claim> { new(ClaimTypes.Role, "Admin") };
-        mockUserContext.User.Returns(new ClaimsPrincipal(new ClaimsIdentity(claims, "TestAuth")));
+        // Authenticated for real, rather than by substituting ICurrentUserContext. The substitute
+        // left HttpContext.User anonymous, so these requests only looked like an admin to the code
+        // that read that interface -- and would now be refused by the endpoint itself.
+        await Task.CompletedTask;
 
-        return _factory.WithWebHostBuilder(builder =>
-        {
-            builder.UseEnvironment("Production");
-            builder.ConfigureServices(services =>
-                services.AddScoped<ICurrentUserContext>(_ => mockUserContext));
-        }).CreateClient();
+        return _factory
+            .WithWebHostBuilder(builder => builder.UseEnvironment("Production"))
+            .CreateClient()
+            .As("Admin");
     }
 
     #region Old Format Manifest (pre-bridge)

@@ -17,16 +17,16 @@ namespace Foundry.IntegrationTests;
 /// Verifies the integration of the Foundry.RealTime module, including the 
 /// DI decorator architecture, mutation broker routing, and per-entity attribute filters.
 /// </summary>
-public class RealTimeIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
+public class RealTimeIntegrationTests : IClassFixture<AuthenticatedSampleFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly AuthenticatedSampleFactory _factory;
 
     static RealTimeIntegrationTests()
     {
         Environment.SetEnvironmentVariable("MONGODB_ENCRYPTION_KEY", "12345678901234567890123456789012");
     }
 
-    public RealTimeIntegrationTests(WebApplicationFactory<Program> factory)
+    public RealTimeIntegrationTests(AuthenticatedSampleFactory factory)
     {
         _factory = factory;
     }
