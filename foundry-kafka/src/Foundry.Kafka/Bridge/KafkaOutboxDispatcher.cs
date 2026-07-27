@@ -44,6 +44,20 @@ public class KafkaOutboxDispatcher : IOutboxDispatcher
                 $"Event type '{eventType}' does not yield a usable topic name.", nameof(eventType));
         }
 
+        // Checked here rather than left to the broker. An illegal name is refused at produce time
+        // with librdkafka's "Broker: Invalid topic", which names neither the topic nor the event
+        // type that produced it -- and the outbox worker retries that failure indefinitely while
+        // reporting nothing, so the first symptom is a queue that never drains.
+        if (!topic.All(IsLegalTopicCharacter))
+        {
+            var illegal = new string(topic.Where(c => !IsLegalTopicCharacter(c)).Distinct().ToArray());
+
+            throw new ArgumentException(
+                $"Event type '{eventType}' yields the topic '{topic}', which Kafka will reject: "
+                + $"topic names may contain only letters, digits, '.', '_' and '-' (found: {illegal}).",
+                nameof(eventType));
+        }
+
         // 2. Partition key.
         //
         // Kafka guarantees ordering only within a partition, and the partition is selected by key.
@@ -70,14 +84,45 @@ public class KafkaOutboxDispatcher : IOutboxDispatcher
     private const string TopicSuffix = "-events";
 
     private static string ResolveTopicName(string eventType)
-    {
-        // Extract type name from qualified assembly name
-        var cleanType = eventType.Split(',')[0];
-        var parts = cleanType.Split('.');
-        var name = parts.Last();
+        => $"{CamelToKebab(ExtractTypeName(eventType))}{TopicSuffix}";
 
-        return $"{CamelToKebab(name)}{TopicSuffix}";
+    /// <summary>
+    /// Reduces a CLR type name — possibly assembly-qualified, generic or nested — to the simple name
+    /// the topic is derived from.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This split the assembly-qualified name on a comma and took the last dotted segment, which
+    /// leaves the nested-type separator in place: a nested event type such as
+    /// <c>Orders+Placed</c> produced the topic <c>orders+placed-events</c>, and <c>+</c> is not a
+    /// legal Kafka topic character. The publish failed with librdkafka's <c>Broker: Invalid topic</c>,
+    /// the outbox worker logged it and retried, and the message never left — forever, quietly.
+    /// A nested record is an ordinary way to declare an event.
+    /// </para>
+    /// <para>
+    /// A generic event is named for what it is about: <c>EntityMutationEvent&lt;Order&gt;</c>
+    /// publishes to <c>order-events</c>, not <c>entity-mutation-events</c>, so each entity keeps its
+    /// own topic. That was previously an accident of where the comma fell in the qualified name; it
+    /// is now the stated rule.
+    /// </para>
+    /// </remarks>
+    internal static string ExtractTypeName(string eventType)
+    {
+        // A generic wraps the thing it is about, so the first type argument wins when there is one.
+        var genericStart = eventType.IndexOf("[[", StringComparison.Ordinal);
+        var source = genericStart >= 0 ? eventType.Substring(genericStart + 2) : eventType;
+
+        // Drop the assembly qualification, then any remaining brackets and the arity marker.
+        source = source.Split(',')[0].Split('[')[0].Split('`')[0];
+
+        // '+' separates a nested type from its declaring type, exactly as '.' separates namespaces.
+        var segments = source.Split('.', '+');
+        return segments[segments.Length - 1].Trim();
     }
+
+    /// <summary>Characters Kafka permits in a topic name.</summary>
+    private static bool IsLegalTopicCharacter(char c)
+        => char.IsAsciiLetterOrDigit(c) || c == '.' || c == '_' || c == '-';
 
     /// <summary>
     /// Chooses the Kafka partition key for a message, preferring the mutated entity's id.

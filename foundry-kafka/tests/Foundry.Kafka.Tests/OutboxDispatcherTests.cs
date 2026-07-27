@@ -57,12 +57,36 @@ public class OutboxDispatcherTests
     [InlineData("CustomerAddressChanged", "customer-address-changed-events")]
     [InlineData("MyApp.Domain.OrderEvent", "order-event-events")]
     [InlineData("MyApp.Domain.OrderEvent, MyApp, Version=1.0.0.0", "order-event-events")]
+    // A nested event type. '+' separates it from its declaring type and is not a legal Kafka topic
+    // character, so this used to produce "orders+placed-events" and fail at the broker with
+    // "Broker: Invalid topic" -- which the outbox worker logged and retried forever.
+    [InlineData("MyApp.Domain.Orders+Placed", "placed-events")]
+    [InlineData("MyApp.Domain.Orders+Placed, MyApp", "placed-events")]
+    // A generic event is named for what it is about, so each entity keeps its own topic rather than
+    // everything landing on entity-mutation-events. Previously an accident of where the comma fell.
+    [InlineData("Foundry.Core.Outbox.EntityMutationEvent`1[[MyApp.Domain.Order, MyApp]], Foundry.Core", "order-events")]
+    [InlineData("Foundry.Core.Outbox.EntityMutationEvent`1[[MyApp.Domain.Orders+Placed, MyApp]], Foundry.Core", "placed-events")]
     public async Task TopicName_IsDerivedFromTheEventTypeName(string eventType, string expectedTopic)
     {
         var producer = new RecordingProducer();
         await new KafkaOutboxDispatcher(producer).DispatchAsync(eventType, "{}");
 
         Assert.Equal(expectedTopic, producer.Produced[0].Topic);
+    }
+
+    [Fact]
+    public async Task AnEventTypeYieldingAnIllegalTopicName_IsRejectedBeforePublishing()
+    {
+        // Refused here rather than at the broker, whose error names neither the topic nor the event
+        // type that produced it.
+        var producer = new RecordingProducer();
+        var dispatcher = new KafkaOutboxDispatcher(producer);
+
+        var error = await Assert.ThrowsAnyAsync<ArgumentException>(
+            () => dispatcher.DispatchAsync("My Event!", "{}"));
+
+        Assert.Contains("My Event!", error.Message);
+        Assert.Empty(producer.Produced);
     }
 
     [Fact]

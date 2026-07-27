@@ -93,7 +93,8 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 732 C# tests across 12 suites |
+| `Build and test` | 737 C# tests across 12 suites |
+| `Outbox round trip` | 5 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 28 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
 | `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication, declared roles, row-level ownership and workflow transitions**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
@@ -158,6 +159,39 @@ The smoke test drives this with genuine HS256 tokens it mints itself — anonymo
 token signed with a different key gets 401, a `Clerk` gets 403 where the schema requires `Admin`, and an
 `Admin` gets 204. Enforcement that refuses everyone is not enforcement, so the positive case is asserted
 alongside the negatives.
+
+### The outbox publishes, and the compose file never started a broker
+
+The transactional outbox is the framework's durability claim: a mutation is recorded in the same
+database as the data and published afterwards, so a broker outage cannot lose an event. Every part
+of that chain had unit tests and **the chain had never run**.
+
+The first obstacle was not in the code. The repository's own `docker-compose.yml` configured Kafka
+for ZooKeeper against `confluentinc/cp-kafka:latest`, which is KRaft-only in current versions and
+exits immediately with `environment variable "KAFKA_PROCESS_ROLES" is not set`. Anyone following the
+README's `docker compose up -d` got a broker that was never there. Nothing depended on it closely
+enough to notice — which is the whole reason the round trip had never been run. It is now KRaft,
+single-node, and **pinned**, since floating to a new major is what broke it.
+
+Behind that sat a defect the round trip found immediately:
+
+> A nested event type produced an **illegal Kafka topic name**. The topic is derived from the CLR
+> type name, and the nested-type separator `+` was never stripped — so `Orders+Placed` became
+> `orders+placed-events`, which the broker rejects. The publish failed with librdkafka's
+> `Broker: Invalid topic`, the outbox worker logged it and retried, and the message never left.
+> Forever, quietly: the first symptom is a queue that does not drain.
+
+A nested record is an ordinary way to declare an event. Topic derivation now handles nested and
+generic types explicitly — a generic event is named for what it is *about*, so
+`EntityMutationEvent<Order>` publishes to `order-events` rather than putting every entity's
+mutations on one topic, which had been an accident of where the comma fell in the qualified name —
+and a name that still cannot be made legal is refused before publishing, naming the event type and
+the offending characters.
+
+The new `Outbox round trip` job provisions MongoDB **and** a real broker. The tests fail rather than
+skip without them, so the job cannot pass by doing nothing; they are excluded from the fast job by
+an explicit category filter, which keeps the split visible in the workflow rather than hidden in a
+conditional inside the tests.
 
 ### The outside-world paths are covered, and one was injectable
 
@@ -318,7 +352,7 @@ Every module has tests:
 | `foundry-rules` | 87 |
 | `foundry-file-io` | 75 |
 | `foundry-core` | 52 |
-| `foundry-kafka` | 34 |
+| `foundry-kafka` | 39 + 5 |
 | `foundry-mongo` | 61 |
 | `foundry-connectors` | 37 |
 | `foundry-studio` | 28 |
@@ -451,9 +485,10 @@ generator does not do for custom endpoints.
 nothing serves it. For a regulated buyer the audit trail is the point, so a record that can be
 written and not read is half a feature.
 
-**The Kafka outbox is still unexercised end to end.** The CI job provisions MongoDB only, so a real
-broker round trip has nowhere to run. Worth doing as a separate job rather than by weakening the
-assertion to something a missing broker would still pass.
+**The outbox is proven for one message, not under load or failure.** The round trip runs; what it
+does not cover is a broker that goes away mid-publish, the retry ceiling of five attempts, or
+ordering across a partition under concurrent writers. Those are the properties an outbox exists for,
+and they need a test that can stop and start the broker.
 
 **A multi-tenant write with no tenant returns 500.** Deliberate — an application that declares
 multi-tenant entities and cannot resolve a tenant is misconfigured, and refusing is much better than
@@ -494,18 +529,18 @@ not, and a scaffolded project prints those warnings on its first build.
 ## 6. Recommended priority for the next cycle
 
 The verification backlog is now clear: the catch-site audit, the smoke test extension, endpoint
-authorization, row-level ownership, workflows reaching a running application, and coverage on the
-outside-world paths are all done. Two of those were not on any list before the cycle that found them —
-they came from asking whether the framework was production-ready and then checking rather than
-answering from memory, which remains the more useful lesson than any item below.
+authorization, row-level ownership, workflows reaching a running application, coverage on the
+outside-world paths, and the outbox round trip against a real broker are all done. Two of those were
+not on any list before the cycle that found them — they came from asking whether the framework was
+production-ready and then checking rather than answering from memory, which remains the more useful
+lesson than any item below.
 
 What remains is smaller and better understood, which is itself the point: for the first time the list
 is work someone chose rather than damage someone discovered.
 
-1. **Add a Kafka job to CI** and take the outbox round trip end to end.
-2. **Remove the last mirrored implementation** by having the designer and playground read routes from a
+1. **Remove the last mirrored implementation** by having the designer and playground read routes from a
    cached manifest rather than deriving them.
-3. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
+2. **Then** a second data provider. The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than precede
    it.
 

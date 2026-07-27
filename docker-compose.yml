@@ -28,33 +28,41 @@ services:
     networks:
       - foundry-network
 
-  # ─── Kafka Broker Zookeeper ──────────────────────────────────────────
-  zookeeper:
-    image: confluentinc/cp-zookeeper:latest
-    container_name: foundry-zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    networks:
-      - foundry-network
-
-  # ─── Kafka Broker ────────────────────────────────────────────────────
+  # ─── Kafka Broker (KRaft, no ZooKeeper) ──────────────────────────────
+  #
+  # This service did not start. It was configured for ZooKeeper against
+  # `confluentinc/cp-kafka:latest`, which is KRaft-only in current versions and exits immediately
+  # with `environment variable "KAFKA_PROCESS_ROLES" is not set`. Anyone following the README's
+  # `docker compose up -d` got a broker that was never there, and nothing depended on it closely
+  # enough to notice -- the outbox round trip had never been run.
+  #
+  # Pinned rather than `latest`, because floating to a new major is what broke it.
   kafka:
-    image: confluentinc/cp-kafka:latest
+    image: confluentinc/cp-kafka:7.7.1
     container_name: foundry-kafka-broker
-    depends_on:
-      - zookeeper
     ports:
       - "9092:9092"
-      - "29092:29092"
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      CLUSTER_ID: foundry-local-cluster-0
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      # Two advertised listeners: containers reach the broker as kafka:29092, and the host -- where
+      # the tests run -- reaches it as localhost:9092.
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
     networks:
       - foundry-network
 

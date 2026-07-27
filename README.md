@@ -85,8 +85,8 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **732 C# tests passing**: 184 compiler, 87 rules, 75 integration, 75 file-IO, 61 MongoDB,
-54 API, 52 core, 37 connectors, 34 Kafka, 26 real-time, 26 testing, 21 CLI. Run it this way
+Expect **737 C# tests passing**: 184 compiler, 87 rules, 75 integration, 75 file-IO, 61 MongoDB,
+54 API, 52 core, 39 Kafka, 37 connectors, 26 real-time, 26 testing, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
 
@@ -104,6 +104,14 @@ across two tenants. It needs MongoDB on `localhost:27017`:
 
 ```bash
 ./scripts/runtime-smoke-test.sh
+```
+
+The transactional outbox is proven separately, against a real broker. These tests **fail rather
+than skip** without one, so they are excluded from the solution-wide run by category and have
+their own command:
+
+```bash
+dotnet test foundry-kafka/tests/Foundry.Kafka.IntegrationTests --filter "Category=RequiresKafka"
 ```
 
 ### 3. Calling a Scaffolded API

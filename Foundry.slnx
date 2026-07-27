@@ -60,6 +60,7 @@
   </Folder>
   <Folder Name="/foundry-kafka/tests/">
     <Project Path="foundry-kafka/tests/Foundry.Kafka.Tests/Foundry.Kafka.Tests.csproj" />
+    <Project Path="foundry-kafka/tests/Foundry.Kafka.IntegrationTests/Foundry.Kafka.IntegrationTests.csproj" />
   </Folder>
   <Folder Name="/foundry-realtime/tests/">
     <Project Path="foundry-realtime/tests/Foundry.RealTime.Tests/Foundry.RealTime.Tests.csproj" />
