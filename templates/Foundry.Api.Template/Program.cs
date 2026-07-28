@@ -137,8 +137,13 @@ public class Program
         // Map dynamic interactive docs spec
         app.MapDocsEndpoint(manifest);
 
-        // Map Hot Chocolate GraphQL schema
-        app.MapGraphQL();
+        // Map Hot Chocolate GraphQL schema.
+        //
+        // Behind RequireAuthorization for the same reason the REST endpoints are: the GraphQL schema
+        // exposes create, update and delete over every entity in the manifest, reaching the same
+        // repositories. Left anonymous, it is a full CRUD surface beside an API that refuses
+        // anonymous callers.
+        app.MapGraphQL().RequireAuthorization();
 
         await app.RunAsync();
     }

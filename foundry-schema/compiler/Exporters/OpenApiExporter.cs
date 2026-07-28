@@ -2,140 +2,231 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Foundry.Schema.Compiler.Exporters;
 
 /// <summary>
 /// Exporter that converts a Foundry domain schema into an OpenAPI 3.1.0 JSON specification.
 /// </summary>
+/// <remarks>
+/// <para>
+/// The document is built as a <see cref="JsonObject"/> rather than from anonymous types. The previous
+/// version could not name a key like <c>$ref</c> or <c>200</c> in C#, so it used placeholders
+/// (<c>_ref</c>, <c>_200</c>, <c>application_json</c>) and repaired them with
+/// <c>string.Replace</c> over the whole serialised document — which rewrites those substrings
+/// wherever they occur, including inside entity names, property names and descriptions. An entity
+/// named <c>Report_200</c> came out of the exporter as <c>Report200</c>.
+/// </para>
+/// <para>
+/// Routes and methods come from <see cref="ApiManifestGenerator"/>, which is what the application
+/// actually serves. This composed <c>/api/v1/{lowercase-singular}</c> itself while the generated
+/// endpoints are at <c>/api/{plural}</c>, so every path in the published specification was a 404 —
+/// the same defect, from the same cause, as the one found in the three SDK generators.
+/// </para>
+/// </remarks>
 public static class OpenApiExporter
 {
     public static string ExportJson(SchemaModel schema)
     {
-        var paths = new Dictionary<string, object>();
-        var componentsSchemas = new Dictionary<string, object>();
+        var paths = new JsonObject();
+        var componentSchemas = new JsonObject();
 
-        if (schema.Entities != null)
+        foreach (var entity in schema.Entities ?? new List<Entity>())
         {
-            foreach (var entity in schema.Entities)
-            {
-                var entityName = entity.Name;
-                var entityLower = entityName.ToLowerInvariant();
-                var routePath = $"/api/v1/{entityLower}";
+            componentSchemas[entity.Name] = SchemaFor(entity);
 
-                // Schema component
-                var propertiesDict = new Dictionary<string, object>();
-                foreach (var prop in entity.Properties)
-                {
-                    propertiesDict[prop.Name] = new
-                    {
-                        type = MapOpenApiType(prop.Type),
-                        description = prop.IsKey ? "Primary Key" : null
-                    };
-                }
+            // An entity with no declared methods has no REST surface, so it contributes a component
+            // schema — it may still be referenced — and no paths.
+            var methods = ApiManifestGenerator.EnabledMethods(entity);
+            if (methods.Count == 0) continue;
 
-                componentsSchemas[entityName] = new
-                {
-                    type = "object",
-                    properties = propertiesDict
-                };
+            var route = ApiManifestGenerator.RouteFor(entity.Name);
+            var collection = new JsonObject();
+            var item = new JsonObject();
 
-                // REST Endpoints
-                paths[$"{routePath}"] = new
-                {
-                    get = new
-                    {
-                        summary = $"List all {entityName} records",
-                        tags = new[] { entityName },
-                        responses = new
-                        {
-                            _200 = new
-                            {
-                                description = "Success",
-                                content = new
-                                {
-                                    application_json = new
-                                    {
-                                        schema = new { type = "array", items = new { _ref = $"#/components/schemas/{entityName}" } }
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    post = new
-                    {
-                        summary = $"Create a new {entityName}",
-                        tags = new[] { entityName },
-                        requestBody = new
-                        {
-                            required = true,
-                            content = new
-                            {
-                                application_json = new
-                                {
-                                    schema = new { _ref = $"#/components/schemas/{entityName}" }
-                                }
-                            }
-                        },
-                        responses = new
-                        {
-                            _201 = new { description = "Created" }
-                        }
-                    }
-                };
+            if (methods.Contains("GET")) collection["get"] = ListOperation(entity);
+            if (methods.Contains("POST")) collection["post"] = CreateOperation(entity);
+            if (methods.Contains("GET_BY_ID")) item["get"] = GetByIdOperation(entity);
+            if (methods.Contains("PUT")) item["put"] = UpdateOperation(entity);
+            if (methods.Contains("DELETE")) item["delete"] = DeleteOperation(entity);
 
-                paths[$"{routePath}/{{id}}"] = new
-                {
-                    get = new
-                    {
-                        summary = $"Get {entityName} by ID",
-                        tags = new[] { entityName },
-                        parameters = new[]
-                        {
-                            new { name = "id", @in = "path", required = true, schema = new { type = "string" } }
-                        },
-                        responses = new
-                        {
-                            _200 = new { description = "Success" },
-                            _404 = new { description = "Not Found" }
-                        }
-                    },
-                    delete = new
-                    {
-                        summary = $"Delete {entityName} by ID",
-                        tags = new[] { entityName },
-                        parameters = new[]
-                        {
-                            new { name = "id", @in = "path", required = true, schema = new { type = "string" } }
-                        },
-                        responses = new
-                        {
-                            _204 = new { description = "No Content" }
-                        }
-                    }
-                };
-            }
+            if (collection.Count > 0) paths[route] = collection;
+            if (item.Count > 0) paths[$"{route}/{{id}}"] = item;
         }
 
-        var doc = new
+        // Custom endpoints and workflow transitions are served like anything else and were absent
+        // from the specification entirely.
+        foreach (var custom in schema.CustomEndpoints ?? new List<CustomEndpoint>())
         {
-            openapi = "3.1.0",
-            info = new
+            if (string.IsNullOrWhiteSpace(custom.Route)) continue;
+
+            var operation = new JsonObject
             {
-                title = $"{schema.Namespace} API Specification",
-                version = schema.Version ?? "1.0.0",
-                description = "Auto-generated by Foundry Platform OpenApiExporter"
+                ["summary"] = custom.RequestType ?? custom.Route,
+                ["tags"] = new JsonArray("Custom"),
+                ["responses"] = new JsonObject { ["200"] = Response("Success") }
+            };
+
+            AddOperation(paths, custom.Route, (custom.Method ?? "GET").ToLowerInvariant(), operation);
+        }
+
+        var doc = new JsonObject
+        {
+            ["openapi"] = "3.1.0",
+            ["info"] = new JsonObject
+            {
+                ["title"] = $"{schema.Namespace} API Specification",
+                ["version"] = schema.Version ?? "1.0.0",
+                ["description"] = "Auto-generated by Foundry Platform OpenApiExporter"
             },
-            paths = paths,
-            components = new
-            {
-                schemas = componentsSchemas
-            }
+            ["paths"] = paths,
+            ["components"] = new JsonObject { ["schemas"] = componentSchemas }
         };
 
-        var json = JsonSerializer.Serialize(doc, new JsonSerializerOptions { WriteIndented = true });
-        return json.Replace("_200", "200").Replace("_201", "201").Replace("_204", "204").Replace("_404", "404").Replace("_ref", "$ref").Replace("application_json", "application/json");
+        return doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
     }
+
+    private static void AddOperation(JsonObject paths, string route, string method, JsonObject operation)
+    {
+        if (paths[route] is JsonObject existing)
+        {
+            existing[method] = operation;
+            return;
+        }
+
+        paths[route] = new JsonObject { [method] = operation };
+    }
+
+    private static JsonObject SchemaFor(Entity entity)
+    {
+        var properties = new JsonObject();
+        var required = new JsonArray();
+
+        foreach (var property in entity.Properties ?? new List<Property>())
+        {
+            var node = new JsonObject { ["type"] = MapOpenApiType(property.Type) };
+
+            if (property.IsKey)
+            {
+                // The key is assigned by the server, so it is the one property a caller never sends.
+                node["description"] = "Primary key";
+                node["readOnly"] = true;
+            }
+            else
+            {
+                required.Add(property.Name);
+            }
+
+            properties[property.Name] = node;
+        }
+
+        var result = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = properties
+        };
+
+        if (required.Count > 0) result["required"] = required;
+
+        return result;
+    }
+
+    private static JsonObject ListOperation(Entity entity) => new()
+    {
+        ["summary"] = $"List all {entity.Name} records",
+        ["tags"] = new JsonArray(entity.Name),
+        ["responses"] = new JsonObject
+        {
+            ["200"] = Response("Success", new JsonObject
+            {
+                ["type"] = "array",
+                ["items"] = Ref(entity.Name)
+            })
+        }
+    };
+
+    private static JsonObject CreateOperation(Entity entity) => new()
+    {
+        ["summary"] = $"Create a new {entity.Name}",
+        ["tags"] = new JsonArray(entity.Name),
+        ["requestBody"] = RequestBody(entity),
+        ["responses"] = new JsonObject { ["201"] = Response("Created", Ref(entity.Name)) }
+    };
+
+    private static JsonObject GetByIdOperation(Entity entity) => new()
+    {
+        ["summary"] = $"Get {entity.Name} by id",
+        ["tags"] = new JsonArray(entity.Name),
+        ["parameters"] = new JsonArray(IdParameter()),
+        ["responses"] = new JsonObject
+        {
+            ["200"] = Response("Success", Ref(entity.Name)),
+            ["404"] = Response("Not Found")
+        }
+    };
+
+    private static JsonObject UpdateOperation(Entity entity) => new()
+    {
+        ["summary"] = $"Replace {entity.Name} by id",
+        ["tags"] = new JsonArray(entity.Name),
+        ["parameters"] = new JsonArray(IdParameter()),
+        ["requestBody"] = RequestBody(entity),
+        ["responses"] = new JsonObject
+        {
+            ["200"] = Response("Success", Ref(entity.Name)),
+            ["404"] = Response("Not Found")
+        }
+    };
+
+    private static JsonObject DeleteOperation(Entity entity) => new()
+    {
+        ["summary"] = $"Delete {entity.Name} by id",
+        ["tags"] = new JsonArray(entity.Name),
+        ["parameters"] = new JsonArray(IdParameter()),
+        ["responses"] = new JsonObject
+        {
+            ["204"] = Response("No Content"),
+            ["404"] = Response("Not Found")
+        }
+    };
+
+    private static JsonObject RequestBody(Entity entity) => new()
+    {
+        ["required"] = true,
+        ["content"] = new JsonObject
+        {
+            ["application/json"] = new JsonObject { ["schema"] = Ref(entity.Name) }
+        }
+    };
+
+    private static JsonObject IdParameter() => new()
+    {
+        ["name"] = "id",
+        ["in"] = "path",
+        ["required"] = true,
+        ["schema"] = new JsonObject { ["type"] = "string" }
+    };
+
+    private static JsonObject Response(string description, JsonNode? schema = null)
+    {
+        var response = new JsonObject { ["description"] = description };
+
+        if (schema is not null)
+        {
+            response["content"] = new JsonObject
+            {
+                ["application/json"] = new JsonObject { ["schema"] = schema }
+            };
+        }
+
+        return response;
+    }
+
+    private static JsonObject Ref(string entityName) => new()
+    {
+        ["$ref"] = $"#/components/schemas/{entityName}"
+    };
 
     private static string MapOpenApiType(string type)
     {

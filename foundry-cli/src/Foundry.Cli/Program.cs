@@ -1517,9 +1517,12 @@ jobs:
         Console.ResetColor();
         Console.WriteLine("Boots the embedded Standalone Visual Studio IDE web server.");
         Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("  export -f openapi|kafka ");
+        // The four formats the command actually accepts. This advertised "openapi|kafka", so two of
+        // the four were invisible to anyone reading --help, and "kafka" is an alias rather than the
+        // name of the format it produces.
+        Console.Write("  export -f <format>     ");
         Console.ResetColor();
-        Console.WriteLine("Exports OpenAPI 3.1, AsyncAPI 3.0, Postman, or Mermaid specs.");
+        Console.WriteLine("Exports openapi | asyncapi | postman | mermaid.");
         Console.ForegroundColor = ConsoleColor.Green;
         Console.Write("  doctor                 ");
         Console.ResetColor();

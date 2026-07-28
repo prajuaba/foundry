@@ -85,8 +85,8 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **778 C# tests passing**: 201 compiler, 87 rules, 75 integration, 75 file-IO, 70 MongoDB,
-54 API, 52 core, 39 Kafka, 37 connectors, 26 real-time, 26 testing, 21 CLI. Run it this way
+Expect **811 C# tests passing**: 221 compiler, 87 rules, 75 integration, 75 file-IO, 70 MongoDB,
+67 API, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
 
@@ -100,7 +100,9 @@ The suites above check that code is generated and that it compiles. Neither says
 *works*, so one gate scaffolds two projects, runs them, and drives them over HTTP with real JWTs it
 mints itself — authentication, the roles a schema declares, row-level ownership, workflow
 transitions, CRUD, validation, filtering, optimistic concurrency, a restart, and tenant isolation
-across two tenants. It needs MongoDB on `localhost:27017`:
+across two tenants. It also exports all four specification formats and checks the documented routes
+against the server that is running, which is the one form of that claim two components cannot satisfy
+by agreeing on the same mistake. It needs MongoDB on `localhost:27017`:
 
 ```bash
 ./scripts/runtime-smoke-test.sh
@@ -167,13 +169,17 @@ the compiler rejects any other name rather than emitting a filter that matches n
 ### 4. CLI Tooling Commands (`foundry`)
 Run the unified `Foundry.Cli` executable:
 ```bash
-# Export multi-spec documentation (OpenAPI 3.1, AsyncAPI 3.0, Postman, Mermaid)
-foundry export schema.json --format openapi --output docs/
+# Export multi-spec documentation. The schema is passed with -i, not positionally, and -o
+# names the output *file*: these commands take no positional arguments and silently ignore one.
+foundry export -i schema.json -f openapi  -o docs/openapi.json
+foundry export -i schema.json -f asyncapi -o docs/asyncapi.json
+foundry export -i schema.json -f postman  -o docs/postman_collection.json
+foundry export -i schema.json -f mermaid  -o docs/schema.mmd
 
 # Generate client SDKs for frontend/backend integration
-foundry sdk schema.json --language ts --output sdk/
-foundry sdk schema.json --language cs --output sdk/
-foundry sdk schema.json --language py --output sdk/
+foundry sdk -i schema.json -l ts -o sdk/
+foundry sdk -i schema.json -l cs -o sdk/
+foundry sdk -i schema.json -l py -o sdk/
 
 # Run autonomous multi-protocol test suite
 foundry test schema.json --output-dir tests/

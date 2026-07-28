@@ -2,92 +2,125 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Foundry.Schema.Compiler.Exporters;
 
 /// <summary>
 /// Exporter that converts Kafka event streaming entities/DTOs into AsyncAPI 3.0.0 JSON specification.
 /// </summary>
+/// <remarks>
+/// Built as a <see cref="JsonObject"/> for the same reason as the OpenAPI exporter: the previous
+/// version wrote <c>_ref</c> keys and repaired them with <c>string.Replace("_ref", "$ref")</c> over
+/// the whole serialised document, which rewrites that substring anywhere it appears — including
+/// inside an entity or topic name.
+/// </remarks>
 public static class AsyncApiExporter
 {
     public static string ExportJson(SchemaModel schema)
     {
-        var channels = new Dictionary<string, object>();
-        var operations = new Dictionary<string, object>();
-        var messages = new Dictionary<string, object>();
+        var channels = new JsonObject();
+        var operations = new JsonObject();
+        var messages = new JsonObject();
 
-        var kafkaEntities = (schema.Entities ?? new List<Entity>())
+        var targets = (schema.Entities ?? new List<Entity>())
             .Where(e => e.KafkaOutboxEnabled || !string.IsNullOrEmpty(e.KafkaTopic))
-            .Select(e => new { e.Name, Topic = !string.IsNullOrEmpty(e.KafkaTopic) ? e.KafkaTopic : $"{e.Name.ToLowerInvariant()}-events" })
-            .Concat(
-                (schema.Dtos ?? new List<DtoModel>())
-                    .Where(d => d.KafkaOutboxEnabled || !string.IsNullOrEmpty(d.KafkaTopic))
-                    .Select(d => new { d.Name, Topic = !string.IsNullOrEmpty(d.KafkaTopic) ? d.KafkaTopic : $"{d.Name.ToLowerInvariant()}-events" })
-            ).ToList();
+            .Select(e => (e.Name, Topic: TopicFor(e.Name, e.KafkaTopic)))
+            .Concat((schema.Dtos ?? new List<DtoModel>())
+                .Where(d => d.KafkaOutboxEnabled || !string.IsNullOrEmpty(d.KafkaTopic))
+                .Select(d => (d.Name, Topic: TopicFor(d.Name, d.KafkaTopic))))
+            .ToList();
 
-        foreach (var target in kafkaEntities)
+        foreach (var (name, topic) in targets)
         {
-            var channelKey = target.Topic.Replace("-", "_");
-            channels[channelKey] = new
+            var channelKey = topic.Replace("-", "_");
+
+            channels[channelKey] = new JsonObject
             {
-                address = target.Topic,
-                messages = new Dictionary<string, object>
+                ["address"] = topic,
+                ["messages"] = new JsonObject
                 {
-                    [target.Name + "Event"] = new { _ref = $"#/components/messages/{target.Name}EventMessage" }
+                    [name + "Event"] = Ref($"#/components/messages/{name}EventMessage")
                 }
             };
 
-            messages[target.Name + "EventMessage"] = new
+            messages[name + "EventMessage"] = new JsonObject
             {
-                name = target.Name + "Event",
-                title = $"{target.Name} Kafka Domain Event",
-                contentType = "application/json",
-                payload = new
+                ["name"] = name + "Event",
+                ["title"] = $"{name} Kafka Domain Event",
+                ["contentType"] = "application/json",
+                ["payload"] = new JsonObject
                 {
-                    type = "object",
-                    properties = new
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
                     {
-                        eventId = new { type = "string" },
-                        eventType = new { type = "string" },
-                        timestamp = new { type = "string", format = "date-time" },
-                        payload = new { type = "object" }
+                        ["eventId"] = new JsonObject { ["type"] = "string" },
+                        ["eventType"] = new JsonObject { ["type"] = "string" },
+                        ["timestamp"] = new JsonObject { ["type"] = "string", ["format"] = "date-time" },
+                        ["payload"] = new JsonObject { ["type"] = "object" }
                     }
                 }
             };
 
-            operations[target.Name + "Subscribe"] = new
+            operations[name + "Subscribe"] = new JsonObject
             {
-                action = "receive",
-                channel = new { _ref = $"#/channels/{channelKey}" },
-                summary = $"Consume domain events published on topic {target.Topic}"
+                ["action"] = "receive",
+                ["channel"] = Ref($"#/channels/{channelKey}"),
+                ["summary"] = $"Consume domain events published on topic {topic}"
             };
 
-            operations[target.Name + "Publish"] = new
+            operations[name + "Publish"] = new JsonObject
             {
-                action = "send",
-                channel = new { _ref = $"#/channels/{channelKey}" },
-                summary = $"Publish transactional outbox events to topic {target.Topic}"
+                ["action"] = "send",
+                ["channel"] = Ref($"#/channels/{channelKey}"),
+                ["summary"] = $"Publish transactional outbox events to topic {topic}"
             };
         }
 
-        var doc = new
+        var doc = new JsonObject
         {
-            asyncapi = "3.0.0",
-            info = new
+            ["asyncapi"] = "3.0.0",
+            ["info"] = new JsonObject
             {
-                title = $"{schema.Namespace} Kafka Event AsyncAPI Spec",
-                version = schema.Version ?? "1.0.0",
-                description = "Auto-generated by Foundry Platform AsyncApiExporter"
+                ["title"] = $"{schema.Namespace} Kafka Event AsyncAPI Spec",
+                ["version"] = schema.Version ?? "1.0.0",
+                ["description"] = "Auto-generated by Foundry Platform AsyncApiExporter"
             },
-            channels = channels,
-            operations = operations,
-            components = new
-            {
-                messages = messages
-            }
+            ["channels"] = channels,
+            ["operations"] = operations,
+            ["components"] = new JsonObject { ["messages"] = messages }
         };
 
-        var json = JsonSerializer.Serialize(doc, new JsonSerializerOptions { WriteIndented = true });
-        return json.Replace("_ref", "$ref");
+        return doc.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
     }
+
+    /// <summary>
+    /// The topic a target's events are carried on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The default must match <c>KafkaOutboxDispatcher.ResolveTopicName</c>, which kebab-cases the
+    /// event type before appending the suffix. This lower-cased the whole name instead, so a
+    /// single-word entity agreed by luck and every multi-word one did not: <c>PurchaseOrder</c>
+    /// published to <c>purchase-order-events</c> and was documented here as
+    /// <c>purchaseorder-events</c> — a topic with no publisher.
+    /// </para>
+    /// <para>
+    /// A declared <c>kafkaTopic</c> is reproduced as given, which is what the generated consumer
+    /// subscribes to. Note that the publisher does <em>not</em> read it: the outbox derives the topic
+    /// from the event type alone and <c>OutboxMessage</c> has nowhere to carry one, so declaring a
+    /// topic today yields a consumer listening where nothing is published. That is a defect in the
+    /// outbox rather than in this exporter, and it is recorded as such.
+    /// </para>
+    /// </remarks>
+    internal static string TopicFor(string name, string? declaredTopic)
+        => !string.IsNullOrEmpty(declaredTopic) ? declaredTopic! : CamelToKebab(name) + "-events";
+
+    private static string CamelToKebab(string input)
+        => string.IsNullOrEmpty(input)
+            ? input
+            : System.Text.RegularExpressions.Regex.Replace(input, "([a-z0-9])([A-Z])", "$1-$2")
+                .ToLowerInvariant();
+
+    private static JsonObject Ref(string pointer) => new() { ["$ref"] = pointer };
 }

@@ -48,6 +48,11 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
     private readonly Foundry.Core.Tenant.ITenantContext? _tenantContext;
 
     public IMongoCollection<T> Collection => _activeRepository.Collection;
+
+    /// <inheritdoc />
+    /// <remarks>Hot partition only, matching <see cref="Collection"/>. Archived years are reached
+    /// through the date-range aware read methods, not through a composed query.</remarks>
+    public IQueryable<T> Query() => _activeRepository.Query();
     public string CollectionName => _activeRepository.CollectionName;
     public int MaxDepthCap { get => _activeRepository.MaxDepthCap; set => _activeRepository.MaxDepthCap = value; }
 

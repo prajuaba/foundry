@@ -12,7 +12,25 @@ namespace Foundry.Mongo.Repositories;
 public interface IRepository<T> where T : class, IEntity<ObjectId>
 {
     /// <summary>MongoDB collection abstraction for the entity type.</summary>
+    /// <remarks>
+    /// Raw and unfiltered: soft delete, tenant and owner scoping are all applied by the repository's
+    /// own methods, not by the collection. Reading from this directly reads every tenant's rows and
+    /// every deleted row. Prefer <see cref="Query"/> for anything that needs an
+    /// <see cref="IQueryable{T}"/>.
+    /// </remarks>
     public IMongoCollection<T> Collection { get; }
+
+    /// <summary>
+    /// A queryable over the collection with the same read filters the repository's own methods apply
+    /// — soft delete, tenant, and owner scope.
+    /// </summary>
+    /// <remarks>
+    /// Exists because a caller that needs to compose a query (GraphQL's filtering and sorting
+    /// middleware being the case in hand) previously had nowhere to go but <see cref="Collection"/>,
+    /// which applies none of them. The result was a second read path beside the generated endpoints
+    /// with none of their isolation.
+    /// </remarks>
+    IQueryable<T> Query();
 
     /// <summary>Gets the name of the MongoDB collection this repository targets.</summary>
     public string CollectionName { get; }

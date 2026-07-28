@@ -177,8 +177,12 @@ app.MapGeneratedEndpoints(manifest);
 // Map dynamic docs spec endpoint
 app.MapDocsEndpoint(manifest);
 
-// Map Hot Chocolate GraphQL endpoint
-app.MapGraphQL();
+// Map Hot Chocolate GraphQL endpoint.
+//
+// Behind RequireAuthorization for the same reason the REST endpoints are: the GraphQL schema exposes
+// create, update and delete over every entity in the manifest, reaching the same repositories. Left
+// anonymous, it is a full CRUD surface beside an API that refuses anonymous callers.
+app.MapGraphQL().RequireAuthorization();
 
 // Enable raw WebSockets and map real-time routes (/realtime/hub, /realtime/sse, /realtime/ws)
 app.UseWebSockets();

@@ -1,4 +1,4 @@
-# Engineering Assessment — 2026-07-26 to 2026-07-27
+# Engineering Assessment — 2026-07-26 to 2026-07-28
 
 An honest read of where Foundry stands, written from a working session *inside* the codebase rather
 than from reading it. It is deliberately blunt: the point is to be useful for planning the next cycle,
@@ -8,11 +8,11 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-783, on a repository whose CI had never passed once.
+811, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
-> **Eight separate features had never executed.** Not under-tested — never run.
+> **Ten separate features had never executed.** Not under-tested — never run.
 >
 > 1. **Multi-tenancy** did not compile. `IMultiTenant` needs a `set`; the compiler emitted `init`.
 > 2. **Generated APIs were anonymous**, while their own OpenAPI output named the roles they required.
@@ -26,17 +26,21 @@ The single most important finding is not any individual bug. It is this:
 >    application serves `/api/{plural}`, so every request 404'd — and the C# one did not compile.
 > 8. **The real-time channels** required no authentication, in an application where every CRUD
 >    endpoint answers 401 without a token.
+> 9. **The GraphQL server** could not build its schema, so every GraphQL request any Foundry
+>    application ever served returned a bare 500 — and `MapGraphQL` carried no authorization.
+> 10. **`foundry export`** documented `/api/v1/{singular}` in OpenAPI and Postman, and emitted full
+>     CRUD for entities that declare no REST surface at all.
 
 Each looked correct in source. Each had convincing scaffolding around it — a meticulous validator, a
 pipeline behaviour with its own tests, an OpenAPI description naming the roles. Reading the code
-would have confirmed all eight were fine. That is the disposition worth naming: this codebase was
+would have confirmed all ten were fine. That is the disposition worth naming: this codebase was
 consistently good at *appearing* to work, and the appearance was load-bearing.
 
-Every item on every list is now done. Three of the eight were not on any list until someone asked
+Every item on every list is now done. Several of the ten were not on any list until someone asked
 whether an unverified feature worked and then went and ran it — and each failed within minutes of
-being run for the first time. **The base rate for "never executed" in this codebase is eight for
-eight.** Section 5 lists what is still unexercised, and should be read in that light rather than as a
-tidy backlog.
+being run for the first time. **The base rate for "never executed" in this codebase is ten for ten.**
+The list of never-executed features is now empty for the first time; section 5 records what is
+verified thinly instead, and should be read in that light rather than as a tidy backlog.
 
 ---
 
@@ -125,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 778 C# tests across 13 suites |
+| `Build and test` | 811 C# tests across 13 suites |
 | `Outbox round trip` | 5 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -467,6 +471,90 @@ records by id. Isolation must not depend on how old a record is.
 
 Nine tests now cover routing, the tenant boundary across the partition, and the sweep itself.
 
+### GraphQL had never built its schema
+
+`app.MapGraphQL()` is in both the template and the sample, and GraphQL was recorded as covered
+because there are fifteen tests against the GraphQL *connector* — a different component that shares
+the word.
+
+The server did not work at all, in the most complete sense available:
+
+> `AddDynamicGraphQL` built the collection field as `ListType<Order>`. `ListType<T>` constrains `T` to
+> a GraphQL type, not a CLR entity, so `MakeGenericType` produced a type the schema builder rejected
+> during type discovery. The mutations separately passed the entity's *output* type where an *input*
+> type belongs.
+
+The schema therefore threw `SchemaException` on the first request and every request after it, and the
+global exception handler turned that into a bare 500 with a trace id. **Every GraphQL query any
+Foundry application has ever served returned "an error occurred while processing your request".**
+
+Making it build exposed what it would have been if it had:
+
+- **`MapGraphQL` carried no authorization**, while every REST endpoint beside it did — a full CRUD
+  surface, `deleteOrder` included, open to anyone who could reach the port. This is the second
+  instance of exactly the real-time defect, in a component mapped three lines away from it.
+- **The manifest's roles were not enforced.** `SecurityBehavior` reads the `EndpointConfig` from the
+  matched ASP.NET Core endpoint's metadata; the GraphQL endpoint carries none, so it returned early
+  for every GraphQL request including mutations. Roles were enforced on one transport and documented
+  on the other.
+- **The collection resolver read `repo.Collection.AsQueryable()`** — the raw MongoDB collection,
+  which applies no soft-delete filter, no tenant filter and no owner scope. The isolation failure
+  fixed on the REST path was reachable through a door beside it. `IRepository` now exposes `Query()`,
+  a queryable carrying the same read filters, and `Collection` says in its own summary that it does
+  not.
+- **Every entity got all five operations** regardless of what it declared, so an entity published
+  read-only over REST accepted `create`, `update` and `delete` over GraphQL.
+- **`[JsonIgnore]` meant nothing to it.** HotChocolate builds from CLR properties and does not read
+  `System.Text.Json` attributes, so `isDeleted` was a settable input field. The comment on
+  `Order.IsDeleted` states the exact reason that matters: hiding it "stops a PUT from setting it,
+  which would delete a record via the update route and skip whatever roles the manifest applies to
+  DELETE". `updateOrder(input: { isDeleted: true })` was that bypass, reopened.
+- **The mutations could not be called correctly by anyone.** A non-nullable CLR property becomes a
+  required GraphQL input field, so `createOrder` demanded `id`, `createdAtUtc`, `updatedAtUtc` and
+  `version` — every one of which the repository assigns and then overwrites.
+
+Gating fields by the manifest introduced a new crash of the same family — a read-only manifest
+produces an empty `Mutation` type, which HotChocolate rejects — caught by the test written for the
+gating itself. The root type is now omitted rather than emitted empty, and a manifest with nothing
+readable is refused at startup instead of at first request. 13 tests.
+
+### `foundry export` described an API that did not exist
+
+Four formats, no test in any form, and all four exit 0 whatever they emit — so "it works" had only
+ever meant "the process did not crash".
+
+**OpenAPI and Postman composed `/api/v1/{lowercase-singular}` while the application serves
+`/api/{plural}`.** That is the fifth and sixth copy of a route rule found to disagree with the one
+that runs, after Studio's designer, Studio's playground and the three SDK generators. Both now read
+`ApiManifestGenerator`.
+
+Run against this repository's own showcase schema, the old exporter was wrong twice over: none of
+that schema's three entities declares `apiEnabledMethods`, so the manifest gives them no REST surface
+at all, and the exporter emitted six CRUD paths anyway. Wrong prefix and wrong existence,
+independently.
+
+Three more, each of which had never been looked at because nothing had ever read the output:
+
+- **The OpenAPI exporter corrupted its own document.** C# cannot name a key `$ref` or `200`, so it
+  serialised placeholders (`_ref`, `_200`, `application_json`) and repaired them with
+  `string.Replace` over the whole serialised document — rewriting those substrings wherever they
+  appeared. An entity named `Report_200` came out as `Report200`. Both exporters now build a
+  `JsonObject`.
+- **`PUT` was undocumented** — the collection had `get`/`post` and the item had `get`/`delete`, so
+  update was missing from the specification of an API that serves it. Custom endpoints and workflow
+  transitions were absent entirely.
+- **Every Postman `POST` body was the literal `{"sampleField": "value"}`**, which no endpoint could
+  accept, and no request carried an `Authorization` header against an API that answers 401 without
+  one.
+
+The AsyncAPI topic rule lower-cased the whole entity name where the dispatcher kebab-cases it, so a
+single-word entity agreed by luck and every multi-word one named a topic with no publisher:
+`PurchaseOrder` publishes to `purchase-order-events` and was documented as `purchaseorder-events`.
+
+20 exporter tests, one of which asserts that every path in the OpenAPI document is a path the
+manifest declares. The smoke test now goes further and checks the exported specification against the
+**running server** — a claim two components cannot satisfy by agreeing on the same mistake.
+
 ### The last mirrored implementation is gone
 
 
@@ -496,7 +584,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **783 in total**, from 258 at the start:
+Every module has tests. **811 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
@@ -666,11 +754,25 @@ generator does not do for custom endpoints.
 ### Verified thinly, or only by inspection
 
 **Coverage is a floor, not a finish.** The suites target each module's highest-consequence surface, not
-its whole surface area. The five named in the previous cycle have been run: connector health checks,
-the generated SDKs and the real-time channels each yielded a defect; the CSV exporter's streaming path
-turned out to be **already covered** — that entry was wrong, from a grep rather than a look; and
-GraphQL is covered only as a *connector*, not as a server. `app.MapGraphQL()` in the template is still
-never exercised, and `foundry export` (OpenAPI, AsyncAPI, Postman, Mermaid) has no test at all.
+its whole surface area. Everything previously named here has now been run, and the list is empty for
+the first time — which is a milestone about the *list*, not about the surface area, and the base rate
+below is the reason to keep looking rather than to stop.
+
+**`foundry new` produces an application with no GraphQL endpoint**, while the template and the sample
+both map one and the README lists GraphQL as a first-class protocol. So the smoke test — which drives
+scaffolded applications — cannot reach GraphQL, and its 13 tests run against the sample instead. This
+is the same template-versus-scaffold drift that let generated APIs ship anonymous: `SecurityBehavior`
+was registered in the template and the sample and not in the scaffold. Left alone deliberately —
+adding it would give every generated application a new public endpoint, which is a product decision
+rather than a defect fix.
+
+**A declared `kafkaTopic` never reaches the publisher.** Found while checking the AsyncAPI export
+against the runtime, and left unfixed because it is an outbox contract change rather than an export
+one. `KafkaOutboxDispatcher` derives the topic from the event type alone, and `OutboxMessage` has
+nowhere to carry one — so a schema declaring `kafkaTopic: "orders.v2"` produces a generated consumer
+subscribed to `orders.v2` and a publisher writing to `order-events`. **The generated consumer
+receives nothing, and both halves report success.** Every schema in this repository uses the default,
+which is why it has never shown.
 
 **Archival is verified on a standalone server, which is not how it should be deployed.** The
 copy-verify-delete path is what the tests exercise, because that is what the project's own
@@ -705,27 +807,32 @@ assertion message before anything else.**
 
 ## 6. Recommended priority for the next cycle
 
-Everything that was on a list is done: the catch-site audit, the smoke test extension, endpoint
-authorization, row-level ownership, workflows reaching a running application, coverage on the
-outside-world paths, the outbox round trip against a real broker, the last mirrored implementation,
-and hot/cold partitioning. **Three of those were not on any list before the cycle that found them** —
-they came from asking whether the framework was production-ready, then checking rather than answering
-from memory. That remains the more useful lesson than any item below.
+**The list of never-executed features is empty.** Ten were checked, one at a time, over three cycles:
+multi-tenancy, endpoint authorization, workflows, Excel parsing, the Kafka outbox, hot/cold
+partitioning, the generated SDKs, the real-time channels, the GraphQL server, and `foundry export`.
 
-Two items, and the order is the recommendation: finish looking before building more. Every time that
-order has been inverted in this codebase's history, the result was a feature that read well and had
-never run.
+> **Ten for ten. Every feature that had never been executed was broken.**
 
-1. **Run what is still unexercised** — `app.MapGraphQL()` as a *server* (it is covered only as a
-   connector), and `foundry export` in all four formats. The previous round of this found three
-   defects in three features, so the expected yield is not zero.
-2. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
+That is the single most useful number in this document. It is a statement about a *method*, not about
+these ten features: reading the source found none of them, and running it found every one. Several
+were not on any list before the cycle that found them — they came from asking whether the framework
+was production-ready and then checking, rather than answering from memory.
+
+The base rate also argues against treating the empty list as a finish. What it means is that the
+cheapest question — "has this ever run?" — no longer has an obvious target, so the next cycle has to
+ask a more expensive one.
+
+1. **Run the paths that have executed once but never under stress.** The outbox is proven for a single
+   message, not for a broker that dies mid-publish, the retry ceiling, or ordering under concurrent
+   writers — the properties an outbox exists for. Archival's transactional path is selected by a
+   server capability check and covered only by inspection; a replica set in CI would close it. Nothing
+   drives a workflow choice node.
+2. **Close the three gaps a buyer would find**, from section 5: resource-level authorization beyond
+   ownership, a read path for workflow history, and the `kafkaTopic` a declaration promises and the
+   publisher ignores.
+3. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than
    precede it.
-
-Worth adding to that list before starting it, from section 5 rather than from this one: resource-level
-authorization beyond ownership, a read path for workflow history, and the outbox under failure rather
-than for a single message. None of those is damage; all three are gaps a buyer would find.
 
 ---
 

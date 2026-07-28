@@ -41,6 +41,9 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
     public IMongoCollection<T> Collection => _collection;
 
+    /// <inheritdoc />
+    public IQueryable<T> Query() => _collection.AsQueryable().Where(ApplyReadFilters(null));
+
     public Repository(
         IMongoDatabase db,
         IAuditSink? auditSink = null,

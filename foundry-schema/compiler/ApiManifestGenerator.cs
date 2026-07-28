@@ -50,15 +50,7 @@ namespace Foundry.Schema.Compiler
 
             foreach (var entity in schema.Entities ?? new List<Entity>())
             {
-                // No methods declared means no REST surface was asked for. That is a legitimate
-                // choice (an entity may exist only as a workflow target or a DTO source), so it is
-                // skipped rather than defaulted to full CRUD.
-                var methods = (entity.ApiEnabledMethods ?? new List<string>())
-                    .Where(m => !string.IsNullOrWhiteSpace(m))
-                    .Select(m => m.Trim().ToUpperInvariant())
-                    .Where(KnownMethods.Contains)
-                    .Distinct(StringComparer.Ordinal)
-                    .ToList();
+                var methods = EnabledMethods(entity);
 
                 if (methods.Count == 0) continue;
 
@@ -348,6 +340,26 @@ namespace Foundry.Schema.Compiler
         /// name always yields the same route, or a regenerated manifest would silently move a
         /// published endpoint.
         /// </remarks>
+        /// <summary>
+        /// The HTTP methods an entity actually exposes.
+        /// </summary>
+        /// <remarks>
+        /// No methods declared means no REST surface was asked for. That is a legitimate choice (an
+        /// entity may exist only as a workflow target or a DTO source), so it is skipped rather than
+        /// defaulted to full CRUD.
+        ///
+        /// Shared with the exporters deliberately. They each decided for themselves what an entity
+        /// published — every one of them assuming full CRUD — so the OpenAPI and Postman documents
+        /// described endpoints that returned 404, for entities that had no REST surface at all.
+        /// </remarks>
+        internal static List<string> EnabledMethods(Entity entity)
+            => (entity.ApiEnabledMethods ?? new List<string>())
+                .Where(m => !string.IsNullOrWhiteSpace(m))
+                .Select(m => m.Trim().ToUpperInvariant())
+                .Where(KnownMethods.Contains)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
         internal static string RouteFor(string entityName)
         {
             if (string.IsNullOrWhiteSpace(entityName)) return "/api";

@@ -26,6 +26,9 @@ public sealed class CachedRepository<T> : IRepository<T> where T : class, IEntit
     public string CollectionName => _inner.CollectionName;
     public IMongoCollection<T> Collection => _inner.Collection;
 
+    /// <inheritdoc />
+    public IQueryable<T> Query() => _inner.Query();
+
     public int MaxDepthCap
     {
         get => _inner.MaxDepthCap;

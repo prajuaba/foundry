@@ -776,9 +776,58 @@ authenticate_as "$(mint_token tenantless Admin)"
 expect_status 500 "POST with a token carrying no tenant" \
   -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' -d '{"reference":"NO-TENANT"}'
 
+# ── Exported specifications ─────────────────────────────────────────────────
+#
+# 'foundry export' had no test in any form, and all four formats exit 0 whatever they emit -- so
+# "it works" had only ever meant "the process did not crash". Two of the four described an API that
+# did not exist: OpenAPI and Postman composed /api/v1/{lowercase-singular} while the application
+# serves /api/{plural}, and both emitted full CRUD for every entity regardless of what it declared.
+#
+# The unit tests compare the export against the manifest. This compares it against the running
+# server, which is the only version of the claim that cannot be satisfied by two components agreeing
+# on the same mistake.
+log "The exported OpenAPI describes routes this application actually serves"
+for format in openapi asyncapi postman mermaid; do
+  ( cd "$WORK_DIR" && dotnet "$CLI_DLL" export -i "$WORK_DIR/tenant-schema.json" -f "$format" -o "$WORK_DIR/spec.$format" ) \
+    >/dev/null 2>&1 || fail "'foundry export -f $format' exited non-zero"
+  [[ -s "$WORK_DIR/spec.$format" ]] || fail "'foundry export -f $format' wrote an empty file"
+done
+pass "all four formats exported"
+
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$WORK_DIR/spec.openapi" \
+  || fail "the exported OpenAPI is not valid JSON"
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$WORK_DIR/spec.asyncapi" \
+  || fail "the exported AsyncAPI is not valid JSON"
+python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$WORK_DIR/spec.postman" \
+  || fail "the exported Postman collection is not valid JSON"
+grep -q '^classDiagram' "$WORK_DIR/spec.mermaid" || fail "the exported Mermaid is not a class diagram"
+pass "each export parses as the format it claims to be"
+
+COLLECTION_PATHS=$(python3 - "$WORK_DIR/spec.openapi" <<'PYTHON'
+import json, sys
+
+spec = json.load(open(sys.argv[1]))
+for path, operations in spec["paths"].items():
+    if "{id}" not in path and "get" in operations:
+        print(path)
+PYTHON
+)
+
+[[ -n "$COLLECTION_PATHS" ]] || fail "the exported OpenAPI documents no readable path at all"
+
+authenticate_as "$ACME_ADMIN"
+while read -r documented; do
+  [[ -n "$documented" ]] || continue
+  code=$(status "$BASE$documented")
+  [[ "$code" != "404" ]] \
+    || fail "the OpenAPI export documents GET $documented, which this application answers with 404"
+  pass "GET $documented is documented and served ($code)"
+done <<< "$COLLECTION_PATHS"
+
 stop_app
 
 printf '\n\033[32mAll runtime checks passed.\033[0m\n'
 printf 'A scaffolded app boots, refuses anonymous and forged tokens, enforces the roles its schema\n'
 printf 'declares, validates, filters, updates under optimistic concurrency, soft-deletes, survives a\n'
 printf 'restart, and keeps tenants apart on reads and writes using the tenant in the caller token.\n'
+printf 'Its exported specifications describe routes that server actually answers.\n'
