@@ -556,6 +556,9 @@
         "name": {
           "type": "string"
         },
+        "defaultState": {
+          "type": "string"
+        },
         "branches": {
           "type": "array",
           "items": {

@@ -284,6 +284,9 @@ namespace Foundry.Schema.Compiler
         /// <summary>A role is exempt on reads and on every operation, which says two things at once.</summary>
         public const string OwnerExemptRoleAlsoReadExempt = "FDY3018";
 
+        /// <summary>A decision gate can fail to match any branch and declares no default state.</summary>
+        public const string WorkflowGateWithoutDefault = "FDY3019";
+
         // ---- FDY4xxx: naming and identifier safety ----
 
         /// <summary>A name is not a valid C# identifier and cannot be emitted as code.</summary>
@@ -370,6 +373,7 @@ namespace Foundry.Schema.Compiler
             [SharedWithKeyWithoutOwnerScoped] = "Marking a property 'isSharedWithKey' without 'ownerScoped': true has no effect; a grant widens an owner filter, and there is none to widen.",
             [SharedWithKeyShape] = "The grant set must be a property named 'SharedWith' of type 'List<string>', for the same reason the owner key must be named 'OwnerId': the data layer filters on the stored field by name.",
             [OwnerExemptRoleAlsoReadExempt] = "A role listed in both 'ownerExemptRoles' and 'ownerReadExemptRoles' is fully exempt; the read-only listing has no effect and reads as a restriction that is not applied.",
+            [WorkflowGateWithoutDefault] = "A decision gate whose branches are all conditional declares no 'defaultState', so a transition reaching it when no branch matches is refused at runtime.",
             [KafkaTopicWithoutOutbox] = "Setting 'kafkaTopic' without 'enableKafkaOutbox': true has no effect.",
             [FileIoExtensionsWithoutFileIo] = "Setting 'fileIOAllowedExtensions' without 'enableFileIO': true has no effect.",
             [UnknownAttribute] = "The attribute is not in the supported vocabulary and will be ignored.",

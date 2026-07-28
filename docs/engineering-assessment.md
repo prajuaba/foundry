@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-891, on a repository whose CI had never passed once.
+896, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 891 C# tests across 13 suites |
+| `Build and test` | 896 C# tests across 13 suites |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -555,6 +555,32 @@ single-word entity agreed by luck and every multi-word one named a topic with no
 manifest declares. The smoke test now goes further and checks the exported specification against the
 **running server** — a claim two components cannot satisfy by agreeing on the same mistake.
 
+### Decision gates, driven for the first time
+
+Emitted by the compiler, carried by the manifest, resolved by the behaviour, and never once
+executed. The routing worked. The **unmatched** case did not:
+
+> A gate whose branches all failed assigned `DefaultState` regardless — the empty string, which the
+> manifest emitter hardcoded for every gate because the IR had no field for it — and saved. The
+> record landed in a state no transition matches: unreachable, invisible to every state-based query,
+> behind a 200 and a history entry naming `""`.
+
+The comment beside that emitter said an unmatched gate was "a routing failure rather than guessing".
+Nothing implemented that. It says what it does now: an unmatched gate with no declared default throws
+and names the gate, and `defaultState` is a field the IR can express so the other answer is available
+deliberately rather than by accident. `FDY3019` warns at compile time when a gate's branches are all
+conditional and it declares no fallback.
+
+Driving it end to end also caught the validator and the engine disagreeing about what a transition
+may target. The engine resolves a gate by **id or name**; the validator accepted only the name — so
+targeting a gate by its id, which is the obvious thing to write and what the manifest carries as the
+node's identity, was rejected at compile time by a rule stricter than the one that runs. That is the
+same "two implementations of one rule" that produced six wrong route prefixes, in a place nobody had
+looked because nobody had written the schema that exposes it.
+
+Five behaviour tests plus a smoke-test phase that routes a real record through a gate both ways and
+asserts it never lands in the gate's own id nor in nothing at all.
+
 ### CI runs a replica set, and two things that could not execute now do
 
 MongoDB offers multi-document transactions only on a replica set, and every environment this project
@@ -851,7 +877,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **891 in total**, from 258 at the start:
+Every module has tests. **896 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
@@ -1048,12 +1074,6 @@ publishing and marking the message will re-send it when its lease expires. That 
 means and the reason consumers must be idempotent; the claim removes duplication as the *normal*
 result of running two replicas, not as a possibility.
 
-**Workflow choice nodes cross the manifest boundary but nothing runs one.** They are emitted and the
-behaviour resolves them, but no test and no smoke-test phase drives a decision gate — so this is the
-one part of the workflow path still verified only by inspection, which is exactly the standing this
-document argues is worth little. The IR also has nowhere to express a gate's default target, so an
-unmatched gate is a routing failure rather than a fallback.
-
 ### Unexplained
 
 **A flake was mitigated, not diagnosed.** Two `FoundryMongo.Tests` audit tests failed once in a
@@ -1085,15 +1105,16 @@ The base rate also argues against treating the empty list as a finish. What it m
 cheapest question — "has this ever run?" — no longer has an obvious target, so the next cycle has to
 ask a more expensive one.
 
-1. **Drive a workflow choice node.** The last thing emitted, resolved by the behaviour, and never
-   executed. The IR also has nowhere to express a gate's default target, so an unmatched gate is a
-   routing failure rather than a fallback — which is worth settling before something depends on it.
-2. **Make masking a policy rather than one switch.** A caller with `view:pii` sees every masked
+**Nothing is knowably unexercised any more.** Every feature that had never run has been run, and every
+path recorded as "run once, never under stress" has been driven under it. What follows is design work
+rather than verification, which is a different kind of list and a more expensive one.
+
+1. **Make masking a policy rather than one switch.** A caller with `view:pii` sees every masked
    property on every entity; a claims handler who may see a policy number and not a card number
    cannot be expressed. That is exactly the shape ownership had before grants, and the same answer
    would probably work — declare which roles or scopes unmask which properties — but it is a design
    step rather than a fix.
-3. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
+2. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than
    precede it.
 

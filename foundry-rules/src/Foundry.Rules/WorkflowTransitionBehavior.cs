@@ -249,7 +249,24 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
                 }
             }
 
-            if (!matched) resolved = choiceNode.DefaultState;
+            if (matched) continue;
+
+            // No branch held and no fallback declared, so there is nowhere to route.
+            //
+            // This assigned DefaultState regardless -- an empty string when none was declared, which
+            // the manifest emitter hardcoded for every gate -- and saved it. The record landed in a
+            // state no transition matches: unreachable, invisible to every state-based query, behind
+            // a 200 and a history entry naming "". The comment beside the emitter said an unmatched
+            // gate was "a routing failure rather than guessing"; nothing implemented that until now.
+            if (string.IsNullOrWhiteSpace(choiceNode.DefaultState))
+            {
+                throw new WorkflowException(
+                    $"No branch of decision gate '{choiceNode.Name}' ({choiceNode.Id}) matched, and it "
+                    + "declares no default state, so the transition has nowhere to route. Add a "
+                    + "'defaultState' to the gate, or a branch covering this case.");
+            }
+
+            resolved = choiceNode.DefaultState;
         }
 
         return resolved;

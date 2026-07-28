@@ -1038,9 +1038,18 @@ namespace Foundry.Schema.Compiler
                 var states = wf.States ?? new List<WorkflowStateModel>();
                 var choiceNodes = wf.ChoiceNodes ?? new List<WorkflowChoiceNodeModel>();
 
-                // A transition may target either a state or a choice node.
+                // A transition may target a state, or a choice node by either its id or its name.
+                //
+                // Only the name was accepted here, while the engine resolves a gate by id *or* name.
+                // A schema targeting a gate by its id -- the obvious thing to write, and what the
+                // manifest carries as the node's identity -- was rejected at compile time by a rule
+                // stricter than the one that runs. Two implementations of "what may a transition
+                // target", disagreeing.
                 var targets = new HashSet<string>(
-                    states.Select(s => s.Name).Concat(choiceNodes.Select(c => c.Name)).Where(n => !string.IsNullOrWhiteSpace(n)),
+                    states.Select(s => s.Name)
+                        .Concat(choiceNodes.Select(c => c.Name))
+                        .Concat(choiceNodes.Select(c => c.Id))
+                        .Where(n => !string.IsNullOrWhiteSpace(n)),
                     StringComparer.OrdinalIgnoreCase);
 
                 var stateNames = new HashSet<string>(
@@ -1129,6 +1138,41 @@ namespace Foundry.Schema.Compiler
             for (var c = 0; c < choiceNodes.Count; c++)
             {
                 var branches = choiceNodes[c].Branches ?? new List<WorkflowBranchModel>();
+
+                // A gate every branch of which is conditional can match none of them, and an
+                // unmatched gate with no fallback is refused at runtime. Warned at compile time
+                // because the alternative is discovering it from a transition that fails in
+                // production on the one input nobody modelled.
+                //
+                // Deliberately not in RepairableWarnings: which state a gate falls back to is a
+                // domain decision, and a model asked to repair this would invent one. The
+                // allowlist guard caught it being added there by reflex.
+                var everyBranchIsConditional = branches.Count > 0
+                    && branches.All(branch => !string.IsNullOrWhiteSpace(branch.Condition?.Property));
+
+                if (everyBranchIsConditional && string.IsNullOrWhiteSpace(choiceNodes[c].DefaultState))
+                {
+                    bag.Warning(
+                        DiagnosticCatalog.WorkflowGateWithoutDefault,
+                        $"Decision gate '{choiceNodes[c].Name}' in workflow '{wf.Name}' has only "
+                        + "conditional branches and no 'defaultState', so a transition reaching it "
+                        + "when none of them match is refused.",
+                        $"{path}/choiceNodes/{c}/defaultState",
+                        "Add a 'defaultState' naming the state to fall back to, or a branch with no "
+                        + "condition to act as the catch-all.");
+                }
+
+                if (!string.IsNullOrWhiteSpace(choiceNodes[c].DefaultState)
+                    && !targets.Contains(choiceNodes[c].DefaultState!))
+                {
+                    bag.Error(
+                        DiagnosticCatalog.WorkflowUnknownChoiceNode,
+                        $"Decision gate '{choiceNodes[c].Name}' declares default state "
+                        + $"'{choiceNodes[c].DefaultState}', which is not declared in workflow '{wf.Name}'.",
+                        $"{path}/choiceNodes/{c}/defaultState",
+                        $"Name one of: {string.Join(", ", targets)}.");
+                }
+
                 for (var b = 0; b < branches.Count; b++)
                 {
                     var target = branches[b].TargetState;

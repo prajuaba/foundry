@@ -205,9 +205,11 @@ namespace Foundry.Schema.Compiler
                     ["Id"] = node.Id,
                     ["Name"] = node.Name ?? node.Id,
 
-                    // No default state in the IR: the engine treats an unmatched gate as a routing
-                    // failure rather than guessing, which is the safer of the two.
-                    ["DefaultState"] = string.Empty,
+                    // Carried from the IR rather than hardcoded empty. It was hardcoded, and the
+                    // engine assigned it regardless, so an unmatched gate put the record into the
+                    // empty state and saved it. Absent here still means "refuse", which is what the
+                    // comment this replaces claimed was happening.
+                    ["DefaultState"] = node.DefaultState ?? string.Empty,
                     ["Branches"] = branches
                 });
             }

@@ -427,7 +427,8 @@ cat > "$WORK_DIR/tenant-schema.json" <<'SCHEMA'
       "Properties": [
         { "Name": "Id", "Type": "ObjectId", "IsKey": true },
         { "Name": "TenantId", "Type": "string", "isTenantKey": true },
-        { "Name": "Reference", "Type": "string", "Attributes": ["Required"] }
+        { "Name": "Reference", "Type": "string", "Attributes": ["Required"] },
+        { "Name": "Amount", "Type": "decimal" }
       ],
       "ApiEnabledMethods": ["GET", "POST", "GET_BY_ID", "PUT", "DELETE"],
       "ApiRoles": { "DELETE": ["Admin"] }
@@ -463,7 +464,21 @@ cat > "$WORK_DIR/tenant-schema.json" <<'SCHEMA'
       ],
       "Transitions": [
         { "Id": "submit", "Name": "Submit", "FromState": "Draft", "ToState": "Submitted", "Trigger": "SubmitInvoice" },
-        { "Id": "approve", "Name": "Approve", "FromState": "Submitted", "ToState": "Approved", "Trigger": "ApproveInvoice", "RequiredRoles": ["Approver"] }
+        { "Id": "approve", "Name": "Approve", "FromState": "Submitted", "ToState": "Approved", "Trigger": "ApproveInvoice", "RequiredRoles": ["Approver"] },
+        { "Id": "route", "Name": "Route", "FromState": "Draft", "ToState": "amount_gate", "Trigger": "RouteInvoice" }
+      ],
+      "ChoiceNodes": [
+        {
+          "Id": "amount_gate",
+          "Name": "Amount Gate",
+          "defaultState": "Submitted",
+          "Branches": [
+            {
+              "TargetState": "Approved",
+              "Condition": { "Property": "Amount", "Operator": "greaterthan", "Value": "500" }
+            }
+          ]
+        }
       ]
     }
   ]
@@ -920,6 +935,59 @@ code=$(status -X POST "$BASE/api/invoices/transitions/submitinvoice" \
 [[ "$code" != "200" ]] \
   || fail "globex drove a transition on an acme invoice -- workflow writes are not tenant-scoped"
 pass "a cross-tenant transition was refused with $code"
+
+# ── Decision gates ──────────────────────────────────────────────────────────
+#
+# Choice nodes were emitted by the compiler, carried by the manifest, resolved by the behaviour --
+# and never driven. Run, the resolution worked and the *unmatched* case did not: an unmatched gate
+# with no declared default assigned the empty string as the record's state and saved it, leaving a
+# document no transition matches, behind a 200 and a history entry naming "".
+#
+# The gate here routes to Approved above 500 and falls back to Submitted otherwise.
+log "A decision gate routes on the branch whose condition holds"
+authenticate_as "$ACME_ADMIN"
+expect_status 201 "POST a high-value invoice" \
+  -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' \
+  -d '{"reference":"GATE-HIGH","amount":900}'
+GATE_HIGH=$(json_field "$WORK_DIR/body.json" Id id)
+
+expect_status 200 "POST /api/invoices/transitions/routeinvoice for the high-value invoice" \
+  -X POST "$BASE/api/invoices/transitions/routeinvoice" \
+  -H 'Content-Type: application/json' -d "{\"entityId\":\"$GATE_HIGH\"}"
+
+expect_status 200 "GET the high-value invoice" "$BASE/api/invoices/$GATE_HIGH"
+GATE_STATE=$(json_field "$WORK_DIR/body.json" CurrentState currentState)
+[[ "$GATE_STATE" == "Approved" ]] \
+  || fail "the gate routed a 900 invoice to '$GATE_STATE', expected 'Approved'"
+pass "the gate routed on its condition to Approved"
+
+log "A gate falls back to its declared default when no branch holds"
+expect_status 201 "POST a low-value invoice" \
+  -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' \
+  -d '{"reference":"GATE-LOW","amount":100}'
+GATE_LOW=$(json_field "$WORK_DIR/body.json" Id id)
+
+expect_status 200 "POST routeinvoice for the low-value invoice" \
+  -X POST "$BASE/api/invoices/transitions/routeinvoice" \
+  -H 'Content-Type: application/json' -d "{\"entityId\":\"$GATE_LOW\"}"
+
+expect_status 200 "GET the low-value invoice" "$BASE/api/invoices/$GATE_LOW"
+GATE_STATE=$(json_field "$WORK_DIR/body.json" CurrentState currentState)
+[[ "$GATE_STATE" == "Submitted" ]] \
+  || fail "the gate routed a 100 invoice to '$GATE_STATE', expected the default 'Submitted'"
+pass "the gate fell back to its declared default"
+
+# The record must never land in the gate's own id, or in nothing at all.
+log "A gate never leaves the record in a state no transition matches"
+for gated in "$GATE_HIGH" "$GATE_LOW"; do
+  expect_status 200 "GET $gated after routing" "$BASE/api/invoices/$gated"
+  GATE_STATE=$(json_field "$WORK_DIR/body.json" CurrentState currentState)
+  [[ -n "$GATE_STATE" ]] \
+    || fail "the record was left with no state at all -- the empty-state defect"
+  [[ "$GATE_STATE" != "amount_gate" ]] \
+    || fail "the record was left holding the gate's id as though it were a state"
+done
+pass "both records hold real states"
 
 # ── Workflow history ────────────────────────────────────────────────────────
 #

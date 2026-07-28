@@ -49,6 +49,20 @@ namespace Foundry.Schema.Compiler
     {
         public string Id { get; init; } = string.Empty;
         public string Name { get; init; } = string.Empty;
+
+        /// <summary>
+        /// State to route to when no branch condition holds. Optional.
+        /// </summary>
+        /// <remarks>
+        /// The IR had no way to say this, so the manifest emitted an empty default for every gate and
+        /// the engine assigned it: an unmatched gate put the record into the empty state and saved it,
+        /// leaving a document no transition matches. An unmatched gate with no default is now a
+        /// routing failure, which is what the emitter's own comment always claimed — so this is the
+        /// vocabulary needed to declare the other, deliberate answer.
+        /// </remarks>
+        [JsonPropertyName("defaultState")]
+        public string? DefaultState { get; init; }
+
         public List<WorkflowBranchModel> Branches { get; init; } = new();
     }
 

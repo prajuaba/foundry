@@ -50,6 +50,7 @@ Ranges: `FDY1xxx` document structure, `FDY2xxx` cross-reference integrity,
 | `FDY3016` | Marking a property 'isSharedWithKey' without 'ownerScoped': true has no effect; a grant widens an owner filter, and there is none to widen. |
 | `FDY3017` | The grant set must be a property named 'SharedWith' of type 'List<string>', for the same reason the owner key must be named 'OwnerId': the data layer filters on the stored field by name. |
 | `FDY3018` | A role listed in both 'ownerExemptRoles' and 'ownerReadExemptRoles' is fully exempt; the read-only listing has no effect and reads as a restriction that is not applied. |
+| `FDY3019` | A decision gate whose branches are all conditional declares no 'defaultState', so a transition reaching it when no branch matches is refused at runtime. |
 | `FDY4001` | The name cannot be emitted as C#. Use letters, digits and underscores, starting with a letter or underscore. |
 | `FDY4002` | The name is a reserved C# keyword. Choose a different name. |
 | `FDY4003` | The namespace must be dot-separated valid C# identifiers, e.g. 'Acme.Billing'. |

@@ -132,6 +132,179 @@ public class WorkflowTransitionBehaviorTests
         return Task.FromResult(Unit.Value);
     }
 
+    // ---- decision gates ----
+    //
+    // Emitted by the compiler, carried by the manifest, resolved here -- and never driven. The
+    // transition names the gate as its target state and the gate routes to a real one.
+
+    private static WorkflowConfig GatedWorkflow(string? defaultState) => OrderWorkflow(
+        transitions:
+        [
+            // The transition targets the gate rather than a state.
+            new WorkflowTransitionConfig { Id = "submit", FromState = "Draft", ToState = "amount_gate" }
+        ],
+        choiceNodes:
+        [
+            new WorkflowChoiceNodeConfig
+            {
+                Id = "amount_gate",
+                Name = "Amount Gate",
+                DefaultState = defaultState ?? string.Empty,
+                Branches =
+                [
+                    new WorkflowChoiceBranchConfig
+                    {
+                        ToState = "NeedsApproval",
+                        Conditions =
+                        [
+                            new WorkflowConditionConfig
+                            {
+                                Property = "TotalAmount", Operator = "greaterthan", Value = "500"
+                            }
+                        ]
+                    },
+                    new WorkflowChoiceBranchConfig
+                    {
+                        ToState = "AutoApproved",
+                        Conditions =
+                        [
+                            new WorkflowConditionConfig
+                            {
+                                Property = "TotalAmount", Operator = "lessthanorequal", Value = "500"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]);
+
+    [Fact]
+    public async Task AGateRoutesToTheBranchWhoseConditionHolds()
+    {
+        var entity = new StatefulEntity { TotalAmount = 900m };
+        var store = new FakeStore(entity);
+        var behavior = Behavior<TransitionCommand>(new FakeDefinitions(GatedWorkflow("Rejected")), store);
+
+        await behavior.Handle(
+            new TransitionCommand { ToState = "amount_gate", TotalAmount = 900m }, () => Next(), default);
+
+        Assert.Equal("NeedsApproval", entity.CurrentState);
+    }
+
+    [Fact]
+    public async Task AGateRoutesToTheOtherBranchWhenTheFirstDoesNotHold()
+    {
+        var entity = new StatefulEntity { TotalAmount = 100m };
+        var store = new FakeStore(entity);
+        var behavior = Behavior<TransitionCommand>(new FakeDefinitions(GatedWorkflow("Rejected")), store);
+
+        await behavior.Handle(
+            new TransitionCommand { ToState = "amount_gate", TotalAmount = 100m }, () => Next(), default);
+
+        Assert.Equal("AutoApproved", entity.CurrentState);
+    }
+
+    [Fact]
+    public async Task TheResolvedStateIsWhatTheHistoryRecords()
+    {
+        // Not the gate id. A history saying the record moved to "amount_gate" would name something
+        // that is not a state, in the one place someone looks to find out what happened.
+        var entity = new StatefulEntity { TotalAmount = 900m };
+        var store = new FakeStore(entity);
+        var behavior = Behavior<TransitionCommand>(new FakeDefinitions(GatedWorkflow("Rejected")), store);
+
+        await behavior.Handle(
+            new TransitionCommand { ToState = "amount_gate", TotalAmount = 900m }, () => Next(), default);
+
+        Assert.Equal("NeedsApproval", store.Logs.Single().ToState);
+    }
+
+    [Fact]
+    public async Task AnUnmatchedGateFallsBackToItsDeclaredDefault()
+    {
+        var entity = new StatefulEntity { TotalAmount = 900m };
+        var store = new FakeStore(entity);
+
+        var workflow = OrderWorkflow(
+            transitions: [new WorkflowTransitionConfig { Id = "submit", FromState = "Draft", ToState = "amount_gate" }],
+            choiceNodes:
+            [
+                new WorkflowChoiceNodeConfig
+                {
+                    Id = "amount_gate",
+                    Name = "Amount Gate",
+                    DefaultState = "ManualReview",
+                    Branches =
+                    [
+                        new WorkflowChoiceBranchConfig
+                        {
+                            ToState = "AutoApproved",
+                            Conditions =
+                            [
+                                new WorkflowConditionConfig
+                                {
+                                    Property = "TotalAmount", Operator = "lessthan", Value = "10"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]);
+
+        var behavior = Behavior<TransitionCommand>(new FakeDefinitions(workflow), store);
+
+        await behavior.Handle(
+            new TransitionCommand { ToState = "amount_gate", TotalAmount = 900m }, () => Next(), default);
+
+        Assert.Equal("ManualReview", entity.CurrentState);
+    }
+
+    [Fact]
+    public async Task AnUnmatchedGateWithNoDefaultIsRefused()
+    {
+        // What this used to do instead: assign the empty string as the entity's state and save it.
+        // The comment beside the manifest emitter said an unmatched gate was "a routing failure
+        // rather than guessing", and nothing implemented that -- the record landed in a state no
+        // transition matches, unreachable and invisible, behind a 200 and a history entry naming "".
+        var entity = new StatefulEntity { TotalAmount = 900m };
+        var store = new FakeStore(entity);
+
+        var workflow = OrderWorkflow(
+            transitions: [new WorkflowTransitionConfig { Id = "submit", FromState = "Draft", ToState = "amount_gate" }],
+            choiceNodes:
+            [
+                new WorkflowChoiceNodeConfig
+                {
+                    Id = "amount_gate",
+                    Name = "Amount Gate",
+                    DefaultState = string.Empty,
+                    Branches =
+                    [
+                        new WorkflowChoiceBranchConfig
+                        {
+                            ToState = "AutoApproved",
+                            Conditions =
+                            [
+                                new WorkflowConditionConfig
+                                {
+                                    Property = "TotalAmount", Operator = "lessthan", Value = "10"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]);
+
+        var behavior = Behavior<TransitionCommand>(new FakeDefinitions(workflow), store);
+
+        var error = await Assert.ThrowsAsync<WorkflowException>(() => behavior.Handle(
+            new TransitionCommand { ToState = "amount_gate", TotalAmount = 900m }, () => Next(), default));
+
+        Assert.Contains("amount_gate", error.Message);
+        Assert.Equal("Draft", entity.CurrentState);
+        Assert.Empty(store.Saved);
+    }
+
     // ---- pass-through ----
 
     [Fact]
