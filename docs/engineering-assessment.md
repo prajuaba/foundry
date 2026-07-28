@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-872, on a repository whose CI had never passed once.
+877, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 872 C# tests across 13 suites |
+| `Build and test` | 877 C# tests across 13 suites |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -555,6 +555,49 @@ single-word entity agreed by luck and every multi-word one named a topic with no
 manifest declares. The smoke test now goes further and checks the exported specification against the
 **running server** — a claim two components cannot satisfy by agreeing on the same mistake.
 
+### The catch-site audit
+
+Carried out as a census rather than a hunt, because "audit the ~54 catch sites" had been on the list
+for three cycles and the figure was inherited. **There are 85**, not 54. Classified by what each one
+actually does:
+
+| | |
+| --- | --- |
+| Rethrow or translate | 8 |
+| Log and continue | 35 |
+| Return a fallback | 40 |
+| Genuinely silent and wrong | **1** |
+
+The headline is the last row, and it is not the result the item implied. The swallowing had already
+been fixed — not as an audit, but one site at a time as each feature was made to actually run. The
+`Debug.WriteLine`-then-`continue` that silently widened a filtered result set, the activity log
+written before the handler with `Success` hardcoded true, the connector that turned an unparseable
+SOAP envelope into "no results", the outbox topic that failed validation and retried forever: each
+was found by executing the path, not by reading the catch block.
+
+**That is the transferable finding.** A census of `catch` blocks is a weak instrument — most of the
+40 fallbacks are correct and documented, and reading them cannot tell you which of the 35 logged ones
+matters. Running the feature tells you.
+
+The one that survived: **`IdempotencyBehavior` stepped over a distributed-cache failure.** The
+in-memory cache is per instance, so behind more than one replica the distributed cache is the only
+thing that can observe a duplicate — and a warning-and-continue turned "at most once" into "at least
+once" while every request still returned 200. For the operation idempotency exists to protect, that
+is a double charge. It now fails closed *before* the command runs and stays permissive after it,
+which is the whole design: a 409 is retryable and a duplicate payment is not, but once the command
+has succeeded, failing the response is what would cause the retry that runs it twice.
+
+Two bare suppressions were left in place with their reasoning written down rather than changed — a
+browser that will not launch, and an abort inside `Dispose` that must not replace an in-flight
+exception. An unexplained `catch {}` and a `/* Suppress */` are indistinguishable from an oversight,
+which is the whole reason this item existed.
+
+Worth knowing, and deliberately not changed: `RetryPolicyHelper` retries MongoDB operations three
+times with no logging at all, so a flapping database is invisible until it fails outright; and
+`AesEncryptionProvider.Decrypt` returns the input verbatim when it is not valid base64, which is what
+lets encryption be enabled on an existing collection and also means a corrupted value round-trips
+silently.
+
 ### Sensitive properties are actually masked
 
 The last of the never-run features, and the same shape as the other ten: `MaskSensitiveFields` was
@@ -741,7 +784,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **872 in total**, from 258 at the start:
+Every module has tests. **877 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |

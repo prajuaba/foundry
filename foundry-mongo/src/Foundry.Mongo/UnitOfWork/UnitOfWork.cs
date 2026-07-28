@@ -41,7 +41,11 @@ public sealed class UnitOfWork : IUnitOfWork
         if (_disposed) return;
         if (!_committed && _session.IsInTransaction)
         {
-            try { _session.AbortTransaction(); } catch { /* Suppress */ }
+            // Dispose must not throw: it runs inside a `using`, often while another exception is
+            // already in flight, and throwing here would replace the real failure with this one.
+            // The server ends the transaction itself when the session closes, so an abort that
+            // fails costs nothing beyond the wait for that.
+            try { _session.AbortTransaction(); } catch (Exception) { }
         }
         _session.Dispose();
         _disposed = true;

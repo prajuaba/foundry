@@ -83,7 +83,21 @@ public class IdempotencyBehavior<TRequest, TResponse> : IPipelineBehavior<TReque
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to read idempotency key status from L2 distributed cache.");
+                // Fails closed, because carrying on here does not degrade the feature -- it silently
+                // removes it. L1 is per instance, so behind more than one replica the distributed
+                // cache is the only thing that sees a duplicate, and a warning-and-continue meant a
+                // cache outage turned "at most once" into "at least once" while every request
+                // returned 200. For the operation this exists to protect, that is a double charge.
+                //
+                // The caller asked for the guarantee by sending the header, so refusing is the
+                // answer they can act on: a 409 is retryable, a duplicate payment is not.
+                _logger.LogError(ex,
+                    "Idempotency key status could not be read from the distributed cache. Refusing "
+                    + "the request rather than processing it without the guarantee it asked for.");
+
+                throw new IdempotencyException(idempotencyKey,
+                    "The idempotency store is unavailable, so this request cannot be checked for "
+                    + "duplication. Retry it with the same key.");
             }
         }
 
@@ -115,7 +129,18 @@ public class IdempotencyBehavior<TRequest, TResponse> : IPipelineBehavior<TReque
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to write in-flight status to L2 distributed cache.");
+                // Same reasoning, and the same moment: nothing has executed yet. An unrecorded
+                // in-flight marker means a concurrent duplicate on another replica sees no lock and
+                // runs the command alongside this one.
+                _logger.LogError(ex,
+                    "The in-flight idempotency marker could not be written to the distributed cache. "
+                    + "Refusing the request rather than processing it unprotected.");
+
+                _cache.Remove(cacheKey);
+
+                throw new IdempotencyException(idempotencyKey,
+                    "The idempotency store is unavailable, so this request cannot be locked against "
+                    + "duplication. Retry it with the same key.");
             }
         }
 
@@ -137,7 +162,13 @@ public class IdempotencyBehavior<TRequest, TResponse> : IPipelineBehavior<TReque
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to write completed status to L2 distributed cache.");
+                    // Not fatal, deliberately, and the asymmetry is the point: the command has
+                    // already succeeded. Failing the response would make the caller retry, and the
+                    // retry is exactly what would run it a second time. Logged at error because a
+                    // later duplicate will now get through, which someone needs to know.
+                    _logger.LogError(ex,
+                        "The completed idempotency marker could not be written to the distributed "
+                        + "cache. A later retry of key {Key} may execute again.", idempotencyKey);
                 }
             }
 

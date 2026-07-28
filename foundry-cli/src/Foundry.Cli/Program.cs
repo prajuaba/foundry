@@ -1131,7 +1131,15 @@ app.Run();
                 UseShellExecute = true
             });
         }
-        catch {}
+        catch (Exception ex)
+        {
+            // Opening a browser is a convenience, and there are ordinary reasons it fails: a
+            // headless machine, a container, no registered handler. The server is already listening,
+            // so this must not stop it -- but it is said out loud, because the URL below is then the
+            // only way in.
+            Console.WriteLine($"  (could not open a browser automatically: {ex.Message})");
+            Console.WriteLine($"  Open http://localhost:{port}/ manually.");
+        }
 
         await app.RunAsync();
         return 0;
