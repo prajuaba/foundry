@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Foundry.Core.Entities;
@@ -86,6 +87,41 @@ public sealed class MongoWorkflowStateStore : IWorkflowStateStore
 
         return repository.InsertAsync(log, null, ct);
     }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<WorkflowActivityLog>> ReadActivityLogAsync(
+        string entityTypeName, string entityId, CancellationToken ct = default)
+    {
+        // Resolved through the registry rather than taken as given: it validates the type name and
+        // gives the stored EntityType, so a caller cannot read one entity's history by naming another
+        // entity's type alongside its id.
+        var entityType = _registry.Resolve(entityTypeName);
+
+        var repository = _serviceProvider.GetService<IRepository<WorkflowActivityLog>>()
+            ?? throw new WorkflowException(
+                "IRepository<WorkflowActivityLog> is not registered, so workflow history cannot be "
+                + "read. Register it (AddFoundryMongo does).");
+
+        var entries = await repository.FindManyAsync(
+            log => log.EntityId == entityId && log.EntityType == entityType.Name,
+            sortBy: nameof(WorkflowActivityLog.TriggeredAt),
+            sortOrder: Foundry.Core.Paging.SortOrder.Ascending,
+            limit: HistoryLimit,
+            session: null,
+            ct: ct);
+
+        return entries;
+    }
+
+    /// <summary>
+    /// The most transitions one entity's history will return.
+    /// </summary>
+    /// <remarks>
+    /// A bound rather than paging: a single record accumulating more than this many transitions is a
+    /// workflow modelling problem, and an unbounded read of an append-only collection is how one
+    /// pathological record takes out the endpoint for everyone.
+    /// </remarks>
+    private const int HistoryLimit = 500;
 
     private static ObjectId ParseId(string entityId)
     {

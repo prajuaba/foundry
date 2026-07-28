@@ -71,6 +71,11 @@ public class WorkflowTransitionBehaviorTests
             Logs.Add(log);
             return Task.CompletedTask;
         }
+
+        public Task<IReadOnlyList<WorkflowActivityLog>> ReadActivityLogAsync(
+            string entityTypeName, string entityId, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<WorkflowActivityLog>>(
+                Logs.Where(l => l.EntityId == entityId && l.EntityType == entityTypeName).ToList());
     }
 
     private sealed class FakeUser(string operatorId, params string[] roles) : ICurrentUserContext

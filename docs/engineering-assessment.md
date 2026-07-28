@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-828, on a repository whose CI had never passed once.
+836, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 828 C# tests across 13 suites |
+| `Build and test` | 836 C# tests across 13 suites |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -555,6 +555,37 @@ single-word entity agreed by luck and every multi-word one named a topic with no
 manifest declares. The smoke test now goes further and checks the exported specification against the
 **running server** — a claim two components cannot satisfy by agreeing on the same mistake.
 
+### Workflow history can be read
+
+`AppendActivityLogAsync` wrote an entry for every transition — who triggered it, when, from which
+state to which, and the outcome of every automated action — and nothing served it. For a regulated
+buyer the audit trail is the point, so a record that could be written and not read was half a
+feature.
+
+`GET {entity-route}/{id}/history` is now mapped from the manifest for every entity with a workflow,
+alongside `MapDocsEndpoint` rather than through the source generator, because it needs no per-entity
+code — only the list of entities that have one.
+
+Two decisions in it are worth stating, because both were places to get it wrong:
+
+**The entity is loaded first, and the history is served only if that succeeded.**
+`WorkflowActivityLog` is not `IMultiTenant` and carries no owner, so querying it directly by entity
+id would have been a read path beside the generated endpoints with none of their filtering — the
+defect already found twice here, in the archive reader and in the GraphQL collection resolver.
+Loading through the repository applies the tenant and owner filters, so a caller who cannot see the
+record cannot see what happened to it. The smoke test drives two real transitions as one tenant and
+then confirms the other tenant gets a 404.
+
+**Access answers to the roles the entity already declares for `GET_BY_ID`.** Reading a record's
+history is a read of that record, and inventing a second declaration would give an entity two answers
+to "who may see this" — which is precisely how the two transports came to disagree in the GraphQL
+case.
+
+The response is a projection rather than the stored record, which keeps the log's own storage id and
+audit columns out of an API contract. It also drops each action's `ResponseBody`: an action can
+target any URL the workflow names, so relaying what came back would hand an arbitrary third party's
+output to a caller authorized to read this entity and nothing else.
+
 ### A declared Kafka topic now reaches the publisher
 
 Found while checking the AsyncAPI export against the runtime rather than against the other exporter,
@@ -621,7 +652,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **828 in total**, from 258 at the start:
+Every module has tests. **836 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
@@ -747,10 +778,6 @@ an entity is exempted for reads, updates and deletes alike. Read-only oversight 
 an auditor — cannot be expressed; combining `ownerExemptRoles` with `apiRoles` on DELETE is the closest
 approximation.
 
-**Workflow history has no read path.** `AppendActivityLogAsync` writes an entry per transition and
-nothing serves it. For a regulated buyer the audit trail is the point, so a record that can be written
-and not read is half a feature.
-
 **No token issuance, and no refresh or revocation story.** The framework validates tokens; it does not
 mint them. That is the right split — an identity provider's job is not a code generator's — but a team
 adopting this still has to stand one up, and the scaffolded project says so only by leaving the
@@ -857,8 +884,11 @@ ask a more expensive one.
    writers — the properties an outbox exists for. Archival's transactional path is selected by a
    server capability check and covered only by inspection; a replica set in CI would close it. Nothing
    drives a workflow choice node.
-2. **Close the two gaps a buyer would find**, from section 5: resource-level authorization beyond
-   ownership, and a read path for workflow history.
+2. **Resource-level authorization beyond ownership**, the last of the gaps a buyer would find that is
+   still open. `ownerScoped` answers "this row belongs to one caller" and nothing past it: sharing,
+   delegation, team or hierarchy scoping and field-level restrictions have nowhere to be expressed,
+   and exempt roles are per entity rather than per operation, so read-only oversight — the ordinary
+   shape for an auditor — cannot be stated at all.
 3. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than
    precede it.

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -50,4 +51,22 @@ public interface IWorkflowStateStore
 
     /// <summary>Appends a transition record to the workflow activity history.</summary>
     Task AppendActivityLogAsync(WorkflowActivityLog log, CancellationToken ct = default);
+
+    /// <summary>
+    /// Reads one entity's transition history, oldest first.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The counterpart <c>AppendActivityLogAsync</c> had none. An entry was written for every
+    /// transition — who, when, from which state, and every action that ran — and nothing could read
+    /// it back. For a buyer who needs an audit trail that is half a feature: a record that can be
+    /// written and not read is indistinguishable from one that was never written.
+    /// </para>
+    /// <para>
+    /// Oldest first because a history is read as a sequence. Callers wanting the latest transition
+    /// take the last entry rather than reversing an order chosen for them.
+    /// </para>
+    /// </remarks>
+    Task<IReadOnlyList<WorkflowActivityLog>> ReadActivityLogAsync(
+        string entityTypeName, string entityId, CancellationToken ct = default);
 }

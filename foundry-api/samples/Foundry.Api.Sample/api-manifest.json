@@ -52,5 +52,41 @@
         "Admin"
       ]
     }
+  ],
+  "Workflows": [
+    {
+      "Id": "order-approval",
+      "Name": "Order Approval",
+      "Entity": "Order",
+      "Version": "1.0",
+      "IsActive": true,
+      "States": [
+        {
+          "Name": "Draft",
+          "IsInitial": true
+        },
+        {
+          "Name": "Submitted"
+        },
+        {
+          "Name": "Approved",
+          "IsFinal": true
+        }
+      ],
+      "Transitions": [
+        {
+          "Id": "submit",
+          "FromState": "Draft",
+          "ToState": "Submitted",
+          "Trigger": "SubmitOrder"
+        },
+        {
+          "Id": "approve",
+          "FromState": "Submitted",
+          "ToState": "Approved",
+          "Trigger": "ApproveOrder"
+        }
+      ]
+    }
   ]
 }

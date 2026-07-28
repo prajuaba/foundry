@@ -14,6 +14,7 @@ using Foundry.Api.Endpoints;
 using Foundry.Api.GraphQL;
 using Foundry.Api.Security;
 using Foundry.Api.Docs;
+using Foundry.Api.Workflow;
 using Foundry.Api.MediatR.Behaviors;
 
 namespace Foundry.Api.Template;
@@ -136,6 +137,10 @@ public class Program
 
         // Map dynamic interactive docs spec
         app.MapDocsEndpoint(manifest);
+
+        // GET {entity}/{id}/history for every entity with a workflow. The transition log was
+        // written on every transition and nothing served it.
+        app.MapWorkflowHistory(manifest);
 
         // Map Hot Chocolate GraphQL schema.
         //

@@ -13,6 +13,7 @@ using Foundry.Api.Manifest;
 using Foundry.Api.Endpoints;
 using Foundry.Api.Security;
 using Foundry.Api.Docs;
+using Foundry.Api.Workflow;
 using Foundry.Api.MediatR.Behaviors;
 using Foundry.Api.Sample.Migrations;
 
@@ -176,6 +177,10 @@ app.MapGeneratedEndpoints(manifest);
 
 // Map dynamic docs spec endpoint
 app.MapDocsEndpoint(manifest);
+
+// GET {entity}/{id}/history for every entity with a workflow. The transition log was written on
+// every transition and nothing served it.
+app.MapWorkflowHistory(manifest);
 
 // Map Hot Chocolate GraphQL endpoint.
 //

@@ -85,8 +85,8 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **828 C# tests passing**: 228 compiler, 87 rules, 85 integration, 75 file-IO, 70 MongoDB,
-67 API, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 21 CLI. Run it this way
+Expect **836 C# tests passing**: 228 compiler, 87 rules, 85 integration, 75 API, 75 file-IO,
+70 MongoDB, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
 
@@ -159,6 +159,12 @@ A workflow declared in a schema becomes a route per transition, `POST
 /api/orders/transitions/{trigger}` with `{"entityId": "..."}`. The engine refuses a transition whose
 source state does not match with a **409** naming the state the record is actually in, and a
 transition's `requiredRoles` are enforced on its endpoint as well as inside the pipeline.
+
+Every transition is recorded, and `GET /api/orders/{id}/history` reads that back: each entry names
+the transition, the states it moved between, who triggered it, when, and the outcome of every
+automated action. The endpoint loads the record before serving its history, so it is governed by the
+same tenant and owner filters as reading the record itself — and by the roles the entity declares for
+`GET_BY_ID`, since reading a record's history is a read of that record.
 
 `OwnerId` is assigned from the caller's `sub` claim and overwritten if a request body sets it.
 Lists, reads by id, updates and deletes are all narrowed to the caller's own rows; roles in

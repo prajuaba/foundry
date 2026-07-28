@@ -865,6 +865,7 @@ using FluentValidation;
 using Foundry.Mongo.DependencyInjection;
 using Foundry.Api.Manifest;
 using Foundry.Api.Endpoints;
+using Foundry.Api.Workflow;
 using Foundry.Api.MediatR.Behaviors;
 using Foundry.Core.Serialization;
 using Foundry.Rules;
@@ -966,6 +967,9 @@ app.UseMiddleware<Foundry.Api.Middleware.TenantContextMiddleware>();
 
 // Generated REST endpoints for every entity in the manifest.
 app.MapGeneratedEndpoints(manifest);
+
+// GET {{entity}}/{{id}}/history for every entity with a workflow.
+app.MapWorkflowHistory(manifest);
 
 // Real-time channels.
 app.MapFoundryRealTime();

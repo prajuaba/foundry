@@ -739,6 +739,48 @@ code=$(status -X POST "$BASE/api/invoices/transitions/submitinvoice" \
   || fail "globex drove a transition on an acme invoice -- workflow writes are not tenant-scoped"
 pass "a cross-tenant transition was refused with $code"
 
+# ── Workflow history ────────────────────────────────────────────────────────
+#
+# AppendActivityLogAsync wrote an entry for every transition -- who, when, from which state to which
+# -- and nothing served it. For a regulated buyer the audit trail is the point, so a record that can
+# be written and not read is half a feature. The two transitions above are what this reads back, so
+# it proves the write and the read agree rather than proving either alone.
+log "A record's transition history can be read back"
+authenticate_as "$ACME_ADMIN"
+expect_status 200 "GET /api/invoices/$WF_ID/history" "$BASE/api/invoices/$WF_ID/history"
+
+HISTORY=$(python3 - "$WORK_DIR/body.json" <<'PYTHON'
+import json, sys
+
+entries = json.load(open(sys.argv[1]))
+print(len(entries))
+for entry in entries:
+    print("{}:{}->{}:{}".format(
+        entry["transitionId"], entry["fromState"], entry["toState"], entry["triggeredBy"]))
+PYTHON
+)
+
+[[ "$(printf '%s\n' "$HISTORY" | head -1)" == "2" ]] \
+  || fail "expected two transitions in the history, got: $HISTORY"
+printf '%s\n' "$HISTORY" | grep -q 'Draft->Submitted' \
+  || fail "the history does not record the first transition: $HISTORY"
+printf '%s\n' "$HISTORY" | grep -q 'Submitted->Approved' \
+  || fail "the history does not record the second transition: $HISTORY"
+printf '%s\n' "$HISTORY" | grep -q 'acme-approver' \
+  || fail "the history does not record who triggered the approval: $HISTORY"
+pass "the history records both transitions, in order, with who triggered them"
+
+# History is a read of the record, so it answers to the same isolation. WorkflowActivityLog is not
+# itself tenant-scoped, so the endpoint loads the entity first and serves nothing if that fails --
+# without which this would be a read path beside the generated endpoints with none of their filters.
+log "Another tenant cannot read this record's history"
+authenticate_as "$GLOBEX_ADMIN"
+expect_status 404 "GET another tenant's history" "$BASE/api/invoices/$WF_ID/history"
+
+log "An anonymous caller cannot read history"
+authenticate_as_nobody
+expect_status 401 "GET history with no token" "$BASE/api/invoices/$WF_ID/history"
+
 # ── Real-time channels ──────────────────────────────────────────────────────
 #
 # The real-time channels carry AuditLogEntry notifications, and an AuditLogEntry carries
@@ -830,4 +872,5 @@ printf '\n\033[32mAll runtime checks passed.\033[0m\n'
 printf 'A scaffolded app boots, refuses anonymous and forged tokens, enforces the roles its schema\n'
 printf 'declares, validates, filters, updates under optimistic concurrency, soft-deletes, survives a\n'
 printf 'restart, and keeps tenants apart on reads and writes using the tenant in the caller token.\n'
-printf 'Its exported specifications describe routes that server actually answers.\n'
+printf 'Its exported specifications describe routes that server actually answers, and a workflow\n'
+printf 'record'"'"'s transition history reads back what the transitions wrote.\n'
