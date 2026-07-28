@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-877, on a repository whose CI had never passed once.
+886, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 877 C# tests across 13 suites |
+| `Build and test` | 886 C# tests across 13 suites |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -555,6 +555,41 @@ single-word entity agreed by luck and every multi-word one named a topic with no
 manifest declares. The smoke test now goes further and checks the exported specification against the
 **running server** — a claim two components cannot satisfy by agreeing on the same mistake.
 
+### The outbox under failure, where it did not work
+
+Recorded as "proven for one message, not under failure" for two cycles. Run under failure, it turned
+out not to be unproven but broken.
+
+The worker polls every two seconds, retried on that interval with **no delay between attempts**, and
+selected messages with `RetryCount < 5`:
+
+> A broker outage of ten seconds exhausted every pending message. Five attempts, two seconds apart.
+
+And exhaustion was not an event — it was the absence of one. The fifth failure simply stopped
+matching the query, so the rows sat in the collection unpublished, unmarked and unmentioned, while an
+operator watching the queue drain saw precisely what success looks like. For a component whose entire
+purpose is not losing messages when the broker is down, that is the worst available failure.
+
+Two changes, and they are separable on purpose:
+
+**Exponential backoff.** The same five attempts now span about four minutes rather than ten seconds,
+which is the difference between surviving a broker restart and losing everything queued during one.
+`NextAttemptAt` carries the schedule on the row, so it survives a worker restart too.
+
+**Abandonment is recorded and announced.** `DeadLetteredAt` marks a message the worker has given up
+on, and it is logged at critical the moment it happens. "Published", "still retrying" and "given up
+on" were previously three states with two representations between them.
+
+An abandoned message is deliberately *not* republished if the broker returns: releasing an
+arbitrarily old message without someone deciding to is its own hazard, and clearing `DeadLetteredAt`
+is that decision. Nine tests, six of which fail against the previous worker. They drive the worker's
+own loop with a dispatcher whose availability the test controls, so what is under test is the retry
+semantics rather than Kafka's.
+
+Still not covered: ordering across a partition under genuinely concurrent writers. The sweep is
+single-threaded and publishes oldest-first, which two tests assert, but two workers against one
+collection would contend and nothing yet proves what happens.
+
 ### The catch-site audit
 
 Carried out as a census rather than a hunt, because "audit the ~54 catch sites" had been on the list
@@ -784,7 +819,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **877 in total**, from 258 at the start:
+Every module has tests. **886 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
@@ -977,10 +1012,10 @@ infrastructure supports. The transactional path is selected by a server capabili
 covered only by inspection — the thing this document says is worth little. Running the suite against
 a replica set would close that.
 
-**The outbox is proven for one message, not under load or failure.** The round trip runs; what it does
-not cover is a broker that goes away mid-publish, the retry ceiling of five attempts, or ordering
-across a partition under concurrent writers. Those are the properties an outbox exists for, and they
-need a test that can stop and start the broker.
+**The outbox is not proven under concurrent writers.** The retry ceiling, backoff and abandonment are
+now covered, and the sweep publishes oldest-first. What is untested is two workers against one
+collection: they would contend for the same messages, and nothing yet says what happens. A single
+replica is the common deployment and the one that works.
 
 **Workflow choice nodes cross the manifest boundary but nothing runs one.** They are emitted and the
 behaviour resolves them, but no test and no smoke-test phase drives a decision gate — so this is the
@@ -1019,11 +1054,10 @@ The base rate also argues against treating the empty list as a finish. What it m
 cheapest question — "has this ever run?" — no longer has an obvious target, so the next cycle has to
 ask a more expensive one.
 
-1. **Run the paths that have executed once but never under stress.** The outbox is proven for a single
-   message, not for a broker that dies mid-publish, the retry ceiling, or ordering under concurrent
-   writers — the properties an outbox exists for. Archival's transactional path is selected by a
-   server capability check and covered only by inspection; a replica set in CI would close it. Nothing
-   drives a workflow choice node.
+1. **Run the remaining paths that have executed once but never under stress.** Archival's
+   transactional path is selected by a server capability check and covered only by inspection; a
+   replica set in CI would close it, and would also let the outbox be tested with two workers
+   contending. Nothing drives a workflow choice node.
 2. **Make masking a policy rather than one switch.** A caller with `view:pii` sees every masked
    property on every entity; a claims handler who may see a policy number and not a card number
    cannot be expressed. That is exactly the shape ownership had before grants, and the same answer

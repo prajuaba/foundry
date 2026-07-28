@@ -35,6 +35,28 @@ public record OutboxMessage : BaseEntity<ObjectId>
     /// <summary>Gets or sets the number of publication attempts made.</summary>
     public int RetryCount { get; set; } = 0;
 
+    /// <summary>
+    /// Earliest time the next publication attempt may be made, or null to attempt immediately.
+    /// </summary>
+    /// <remarks>
+    /// Retries used to happen on the polling interval with no delay between them. With a two-second
+    /// poll and a ceiling of five attempts, **a broker outage of ten seconds exhausted every pending
+    /// message** — which is the one thing an outbox exists to survive. Backing off spreads the same
+    /// five attempts over minutes instead of seconds.
+    /// </remarks>
+    public DateTime? NextAttemptAt { get; set; }
+
+    /// <summary>
+    /// When the message was given up on, or null while it is still being attempted.
+    /// </summary>
+    /// <remarks>
+    /// Exhaustion used to be implicit: the query selected <c>RetryCount &lt; 5</c>, so the fifth
+    /// failure simply stopped matching and the message vanished from the worker's attention with
+    /// nothing logged and nothing to distinguish it from one that had been published. An operator
+    /// watching the queue drain saw exactly what success looks like.
+    /// </remarks>
+    public DateTime? DeadLetteredAt { get; set; }
+
     /// <summary>Gets or sets the trace correlation ID (e.g. system transaction context).</summary>
     public string? CorrelationId { get; set; }
 

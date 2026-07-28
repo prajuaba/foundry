@@ -66,6 +66,17 @@ public sealed class OutboxPublisherWorker : BackgroundService
         _logger.LogInformation("Outbox Publisher Background Worker stopped.");
     }
 
+    /// <summary>Attempts made before a message is abandoned.</summary>
+    private const int MaxAttempts = 5;
+
+    /// <summary>Delay before the next attempt, doubling each time and capped.</summary>
+    /// <remarks>
+    /// 10s, 20s, 40s, 80s, then the cap — about four minutes across the five attempts, against the
+    /// ten seconds it used to be.
+    /// </remarks>
+    private static TimeSpan BackoffFor(int retryCount)
+        => TimeSpan.FromSeconds(Math.Min(300, 5 * Math.Pow(2, retryCount)));
+
     private async Task ProcessOutboxMessagesAsync(CancellationToken ct)
     {
         using var scope = _serviceProvider.CreateScope();
@@ -89,8 +100,14 @@ public sealed class OutboxPublisherWorker : BackgroundService
         // "_id" is the field name regardless of the camelCase convention pack the driver is
         // registered with. Sorting by "CreatedAt" would silently target a field that does not exist
         // under that convention, which is the same class of no-op being fixed here.
+        // Due now, not given up on. "RetryCount < 5" used to carry both meanings at once, which is
+        // why exhaustion was invisible: the fifth failure simply stopped matching the query.
+        var now = DateTime.UtcNow;
+
         var messages = await repository.FindManyAsync(
-            m => m.ProcessedAt == null && m.RetryCount < 5,
+            m => m.ProcessedAt == null
+                 && m.DeadLetteredAt == null
+                 && (m.NextAttemptAt == null || m.NextAttemptAt <= now),
             sortBy: "_id",
             sortOrder: SortOrder.Ascending,
             limit: 100,
@@ -119,6 +136,7 @@ public sealed class OutboxPublisherWorker : BackgroundService
 
                 message.ProcessedAt = DateTime.UtcNow;
                 message.ErrorMessage = null;
+                message.NextAttemptAt = null;
                 await repository.UpdateAsync(message, null, ct);
 
                 _logger.LogInformation("Successfully published outbox message {Id} of type {Type}.", message.Id, message.EventType);
@@ -127,9 +145,35 @@ public sealed class OutboxPublisherWorker : BackgroundService
             {
                 message.RetryCount++;
                 message.ErrorMessage = ex.Message;
+
+                if (message.RetryCount >= MaxAttempts)
+                {
+                    // Said out loud, once, at the moment it happens. This used to be the point where
+                    // the message silently stopped matching the query -- so a broker outage looked
+                    // identical to a queue draining normally, and the messages were still sitting in
+                    // the collection with nothing marking them as abandoned.
+                    message.DeadLetteredAt = DateTime.UtcNow;
+                    await repository.UpdateAsync(message, null, ct);
+
+                    _logger.LogCritical(ex,
+                        "Outbox message {Id} of type {Type} was abandoned after {Count} failed attempts "
+                        + "and will not be retried. It remains in the outbox collection with "
+                        + "DeadLetteredAt set; republishing it requires clearing that field.",
+                        message.Id, message.EventType, message.RetryCount);
+
+                    continue;
+                }
+
+                // Exponential, because the retries used to run on the polling interval: five attempts
+                // two seconds apart meant a ten-second outage exhausted the message. The same five
+                // attempts now span minutes, which is the difference between surviving a broker
+                // restart and losing everything queued during one.
+                message.NextAttemptAt = DateTime.UtcNow + BackoffFor(message.RetryCount);
                 await repository.UpdateAsync(message, null, ct);
 
-                _logger.LogError(ex, "Failed to publish outbox message {Id}. Retry attempt {Count}.", message.Id, message.RetryCount);
+                _logger.LogError(ex,
+                    "Failed to publish outbox message {Id}. Attempt {Count} of {Max}; next attempt at {NextAttemptAt:O}.",
+                    message.Id, message.RetryCount, MaxAttempts, message.NextAttemptAt);
             }
         }
     }
