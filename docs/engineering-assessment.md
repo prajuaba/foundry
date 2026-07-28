@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-896, on a repository whose CI had never passed once.
+906, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 896 C# tests across 13 suites |
+| `Build and test` | 906 C# tests across 13 suites |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -555,6 +555,25 @@ single-word entity agreed by luck and every multi-word one named a topic with no
 manifest declares. The smoke test now goes further and checks the exported specification against the
 **running server** — a claim two components cannot satisfy by agreeing on the same mistake.
 
+### Masking is a policy rather than one switch
+
+`view:pii` unmasked every masked property on every entity, so letting a caller read one field meant
+letting them read all of them. "A claims handler may see a policy number but not a card number" could
+not be said.
+
+A masked property now names the **category** it belongs to, and the scope that unmasks it is
+`view:{category}`. One mechanism, generalised rather than replaced — the category defaults to `pii`,
+so every existing declaration keeps answering to `view:pii` exactly as it did, which a test asserts
+rather than assumes.
+
+The load-bearing assertion is the negative one: **`view:pii` no longer unmasks a property that names
+another category.** Without that, naming a category would be decoration and the switch would still be
+a switch. Reverting the per-property check fails four tests, that one among them.
+
+Masking is decided per property rather than per entity, so a caller holding `view:policy` reads
+policy numbers in full and still sees card numbers masked in the same response. The smoke test proves
+it end to end on one record carrying two categories.
+
 ### Decision gates, driven for the first time
 
 Emitted by the compiler, carried by the manifest, resolved by the behaviour, and never once
@@ -877,7 +896,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **896 in total**, from 258 at the start:
+Every module has tests. **906 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
@@ -993,10 +1012,10 @@ not.
 
 ### Would block a regulated deployment
 
-**The `view:pii` scope is a fixed claim, and masking has one exemption rather than a policy.** A
-caller either sees every masked property on every entity or none of them; there is no way to say that
-a claims handler may see a policy number and not a card number. That is the same shape ownership had
-before grants, and the same answer would probably work — but it is a design step rather than a fix.
+**Masking categories are scopes, and scopes only.** A caller is entitled by `view:{category}` and by
+nothing else — a deployment issuing roles rather than scopes has to mint a scope claim to use masking
+at all. One mechanism was chosen deliberately over accepting both, but it is a constraint worth
+knowing before adopting.
 
 **Group claims are read from `groups` and `group` and are not configurable.** Role and tenant claim
 names are both configurable under `Authentication:Jwt`; this one is not, so a provider emitting
@@ -1109,12 +1128,7 @@ ask a more expensive one.
 path recorded as "run once, never under stress" has been driven under it. What follows is design work
 rather than verification, which is a different kind of list and a more expensive one.
 
-1. **Make masking a policy rather than one switch.** A caller with `view:pii` sees every masked
-   property on every entity; a claims handler who may see a policy number and not a card number
-   cannot be expressed. That is exactly the shape ownership had before grants, and the same answer
-   would probably work — declare which roles or scopes unmask which properties — but it is a design
-   step rather than a fix.
-2. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
+1. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than
    precede it.
 

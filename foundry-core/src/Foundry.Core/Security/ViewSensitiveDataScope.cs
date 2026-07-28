@@ -21,6 +21,18 @@ public static class ViewSensitiveDataScope
     /// <summary>The claim type carrying the scope.</summary>
     public const string ClaimType = "scope";
 
-    /// <summary>The value entitling the caller to unmasked reads.</summary>
-    public const string ClaimValue = "view:pii";
+    /// <summary>The category a property belongs to when it names none.</summary>
+    public const string DefaultCategory = "pii";
+
+    /// <summary>The scope entitling a caller to unmasked reads of the default category.</summary>
+    public const string ClaimValue = "view:" + DefaultCategory;
+
+    /// <summary>The scope entitling a caller to unmasked reads of one category.</summary>
+    /// <remarks>
+    /// One scope per category rather than one switch for everything. A claims handler holding
+    /// <c>view:policy</c> reads policy numbers in full and still sees card numbers masked, which is
+    /// the distinction the single <c>view:pii</c> scope could not make.
+    /// </remarks>
+    public static string For(string? category)
+        => "view:" + (string.IsNullOrWhiteSpace(category) ? DefaultCategory : category!.Trim().ToLowerInvariant());
 }

@@ -45,13 +45,27 @@ public class MaskingTests : IDisposable
         public string FullName { get; set; } = string.Empty;
     }
 
+    /// <summary>Two categories, so entitlement to one can be told apart from entitlement to both.</summary>
+    public record Claim : BaseEntity<ObjectId>, IVersionable
+    {
+        [SensitiveData(Protection = ProtectionType.Mask, MaskingType = MaskingType.Partial,
+            PreserveCount = 4, Category = "policy")]
+        public string PolicyNumber { get; set; } = string.Empty;
+
+        [SensitiveData(Protection = ProtectionType.Mask, MaskingType = MaskingType.Partial,
+            PreserveCount = 4, Category = "financial")]
+        public string CardNumber { get; set; } = string.Empty;
+
+        public string Reference { get; set; } = string.Empty;
+    }
+
     /// <summary>Declares nothing sensitive, so it must be handed back untouched.</summary>
     public record Plain : BaseEntity<ObjectId>, IVersionable
     {
         public string Note { get; set; } = string.Empty;
     }
 
-    private sealed class FixedUser(bool mayViewPii) : ICurrentUserContext
+    private sealed class FixedUser(params string[] scopes) : ICurrentUserContext
     {
         public string OperatorId => "tester";
         public string? OperatorName => "tester";
@@ -60,8 +74,8 @@ public class MaskingTests : IDisposable
         {
             get
             {
-                var claims = new List<Claim> { new("sub", "tester") };
-                if (mayViewPii) claims.Add(new Claim("scope", "view:pii"));
+                var claims = new List<System.Security.Claims.Claim> { new("sub", "tester") };
+                claims.AddRange(scopes.Select(s => new System.Security.Claims.Claim("scope", s)));
                 return new ClaimsPrincipal(new ClaimsIdentity(claims, "Test", "sub", "role"));
             }
         }
@@ -81,10 +95,27 @@ public class MaskingTests : IDisposable
     }
 
     private Repository<Person> PeopleFor(bool mayViewPii)
-        => new(_db, userContext: new FixedUser(mayViewPii));
+        => new(_db, userContext: mayViewPii ? new FixedUser("view:pii") : new FixedUser());
 
     private Repository<Plain> PlainFor(bool mayViewPii)
-        => new(_db, userContext: new FixedUser(mayViewPii));
+        => new(_db, userContext: mayViewPii ? new FixedUser("view:pii") : new FixedUser());
+
+    private Repository<Claim> ClaimsFor(params string[] scopes)
+        => new(_db, userContext: new FixedUser(scopes));
+
+    private async Task<ObjectId> SeedClaimAsync()
+    {
+        var claim = new Claim
+        {
+            Id = ObjectId.GenerateNewId(),
+            PolicyNumber = "POL-000012345678",
+            CardNumber = "4111111111111234",
+            Reference = "CLM-1"
+        };
+
+        await ClaimsFor("view:policy", "view:financial").InsertAsync(claim);
+        return claim.Id;
+    }
 
     private async Task<ObjectId> SeedAsync(string email = "john.doe@example.com", string card = "4111111111111234")
     {
@@ -242,5 +273,95 @@ public class MaskingTests : IDisposable
 
         var reread = await PeopleFor(mayViewPii: true).GetByIdAsync(id);
         Assert.Equal("new.address@example.com", reread!.Email);
+    }
+
+    // ── Masking is a policy, not one switch ─────────────────────────────────
+    //
+    // `view:pii` unmasked every masked property on every entity, so "a claims handler may see a
+    // policy number but not a card number" could not be expressed: letting someone read one field
+    // meant letting them read all of them. A property names the category that unmasks it, and a
+    // property naming none is `pii` -- so view:pii still means exactly what it meant.
+
+    [Fact]
+    public async Task AScopeUnmasksItsOwnCategoryAndNoOther()
+    {
+        // The case the single switch could not express.
+        var id = await SeedClaimAsync();
+
+        var claim = await ClaimsFor("view:policy").GetByIdAsync(id);
+
+        Assert.Equal("POL-000012345678", claim!.PolicyNumber);
+        Assert.DoesNotContain("4111", claim.CardNumber);
+        Assert.EndsWith("1234", claim.CardNumber);
+    }
+
+    [Fact]
+    public async Task TheOtherScopeUnmasksTheOtherCategory()
+    {
+        var id = await SeedClaimAsync();
+
+        var claim = await ClaimsFor("view:financial").GetByIdAsync(id);
+
+        Assert.Equal("4111111111111234", claim!.CardNumber);
+        Assert.DoesNotContain("000012345678", claim.PolicyNumber);
+    }
+
+    [Fact]
+    public async Task HoldingBothScopesUnmasksBoth()
+    {
+        var id = await SeedClaimAsync();
+
+        var claim = await ClaimsFor("view:policy", "view:financial").GetByIdAsync(id);
+
+        Assert.Equal("POL-000012345678", claim!.PolicyNumber);
+        Assert.Equal("4111111111111234", claim.CardNumber);
+    }
+
+    [Fact]
+    public async Task HoldingNeitherMasksBoth()
+    {
+        var id = await SeedClaimAsync();
+
+        var claim = await ClaimsFor().GetByIdAsync(id);
+
+        Assert.DoesNotContain("000012345678", claim!.PolicyNumber);
+        Assert.DoesNotContain("4111", claim.CardNumber);
+    }
+
+    [Fact]
+    public async Task ViewPiiDoesNotUnmaskANamedCategory()
+    {
+        // The direction that matters. If view:pii still unmasked everything, naming a category would
+        // be decoration -- the switch would remain a switch and the finer grant would mean nothing.
+        var id = await SeedClaimAsync();
+
+        var claim = await ClaimsFor("view:pii").GetByIdAsync(id);
+
+        Assert.DoesNotContain("000012345678", claim!.PolicyNumber);
+        Assert.DoesNotContain("4111", claim.CardNumber);
+    }
+
+    [Fact]
+    public async Task APropertyNamingNoCategoryStillAnswersToViewPii()
+    {
+        // Back-compatibility, asserted rather than assumed: every existing declaration names no
+        // category, and view:pii has to keep meaning what it meant for those.
+        var id = await SeedAsync();
+
+        var person = await PeopleFor(mayViewPii: true).GetByIdAsync(id);
+
+        Assert.Equal("john.doe@example.com", person!.Email);
+    }
+
+    [Fact]
+    public async Task PerCategoryMaskingAppliesToListsToo()
+    {
+        await SeedClaimAsync();
+
+        var claims = await ClaimsFor("view:policy").FindManyAsync();
+
+        Assert.Single(claims);
+        Assert.Equal("POL-000012345678", claims[0].PolicyNumber);
+        Assert.DoesNotContain("4111", claims[0].CardNumber);
     }
 }

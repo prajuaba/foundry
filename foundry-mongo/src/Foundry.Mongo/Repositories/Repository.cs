@@ -1517,14 +1517,42 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     public T MaskSensitiveFields(T entity)
     {
         if (entity == null) return null!;
-        if (MayViewSensitiveData) return entity;
+        if (!HasMaskedProperties) return entity;
 
-        return _encryptionService.MaskSensitiveFields(entity);
+        return _encryptionService.MaskSensitiveFields(entity, ShouldMask);
     }
 
-    /// <summary>Whether this caller is entitled to see sensitive values in full.</summary>
-    private bool MayViewSensitiveData
-        => _userContext?.User?.HasClaim(ViewSensitiveDataScope.ClaimType, ViewSensitiveDataScope.ClaimValue) == true;
+    /// <summary>
+    /// Whether this caller must see a masked form of a property in the given category.
+    /// </summary>
+    /// <remarks>
+    /// Masking used to be one switch: <c>view:pii</c> unmasked every masked property on every entity,
+    /// so "a claims handler may see a policy number but not a card number" could not be expressed and
+    /// letting someone read one field meant letting them read all of them. A property's category
+    /// names the scope that unmasks it, and a property naming no category is <c>pii</c> — so
+    /// <c>view:pii</c> still means exactly what it meant.
+    /// </remarks>
+    private bool ShouldMask(Foundry.Core.Entities.SensitiveDataAttribute attribute)
+        => _userContext?.User?.HasClaim(
+               ViewSensitiveDataScope.ClaimType,
+               ViewSensitiveDataScope.For(attribute.Category)) != true;
+
+    /// <summary>Whether this caller may see every masked property on this entity in full.</summary>
+    private bool MayViewEverySensitiveCategory
+        => MaskedCategories.All(category =>
+            _userContext?.User?.HasClaim(
+                ViewSensitiveDataScope.ClaimType, ViewSensitiveDataScope.For(category)) == true);
+
+    /// <summary>
+    /// The distinct categories this entity declares, read once per closed generic type.
+    /// </summary>
+    private static readonly string[] MaskedCategories = typeof(T)
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Select(p => p.GetCustomAttribute<Foundry.Core.Entities.SensitiveDataAttribute>())
+        .Where(a => a is { Protection: Foundry.Core.Entities.ProtectionType.Mask })
+        .Select(a => a!.Category)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
 
     /// <summary>
     /// Masks every property an entity declares as <c>Mask</c>-protected, unless the caller may see them.
@@ -1538,14 +1566,14 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     /// </remarks>
     private T? MaskForCaller(T? entity)
     {
-        if (entity is null || !HasMaskedProperties || MayViewSensitiveData) return entity;
+        if (entity is null || !HasMaskedProperties || MayViewEverySensitiveCategory) return entity;
 
         return MaskSensitiveFields(entity);
     }
 
     private IReadOnlyList<T> MaskForCaller(IReadOnlyList<T> entities)
     {
-        if (entities.Count == 0 || !HasMaskedProperties || MayViewSensitiveData) return entities;
+        if (entities.Count == 0 || !HasMaskedProperties || MayViewEverySensitiveCategory) return entities;
 
         var masked = new List<T>(entities.Count);
         foreach (var entity in entities) masked.Add(MaskSensitiveFields(entity));

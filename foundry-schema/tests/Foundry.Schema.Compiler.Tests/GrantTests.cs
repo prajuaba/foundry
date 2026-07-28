@@ -154,6 +154,59 @@ public class GrantTests
         Assert.DoesNotContain(diagnostics.Items, d => d.Severity == DiagnosticSeverity.Error);
     }
 
+    // ── Masked property categories ──────────────────────────────────────────
+
+    private static SchemaModel MaskedSchema(string? category) => new()
+    {
+        Namespace = "Test.Domain",
+        Entities =
+        [
+            new Entity
+            {
+                Name = "Claim",
+                ApiEnabledMethods = ["GET"],
+                Properties =
+                [
+                    new Property { Name = "Id", Type = "ObjectId", IsKey = true },
+                    new Property
+                    {
+                        Name = "CardNumber", Type = "string",
+                        Attributes = ["Mask"], SensitiveCategory = category
+                    }
+                ]
+            }
+        ]
+    };
+
+    [Fact]
+    public void ADeclaredCategoryIsCarriedOntoTheAttribute()
+    {
+        // Masking was one switch: view:pii unmasked every masked property on every entity, so
+        // letting someone read one field meant letting them read all of them.
+        var code = PocoGenerator.Generate(MaskedSchema("financial"))["Claim"];
+
+        Assert.Contains("Category = \"financial\"", code);
+    }
+
+    [Fact]
+    public void NoCategoryLeavesTheAttributeDefault()
+    {
+        // Back-compatible on purpose: the attribute defaults to "pii", so every existing declaration
+        // keeps answering to view:pii exactly as it did.
+        var code = PocoGenerator.Generate(MaskedSchema(null))["Claim"];
+
+        Assert.Contains("[SensitiveData(Protection = ProtectionType.Mask)]", code);
+        Assert.DoesNotContain("Category", code);
+    }
+
+    [Fact]
+    public void ACategoryContainingAQuoteCannotEscapeTheAttribute()
+    {
+        var code = PocoGenerator.Generate(MaskedSchema("financial\", Evil = \"x"))["Claim"];
+
+        Assert.DoesNotContain("Evil = \"x\")]", code);
+    }
+
     [Fact]
     public void ARoleThatIsBothFullyAndReadOnlyExemptWarns()
     {

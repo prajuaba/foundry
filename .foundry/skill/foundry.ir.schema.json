@@ -168,6 +168,9 @@
         "isEnum": {
           "type": "boolean"
         },
+        "sensitiveCategory": {
+          "type": "string"
+        },
         "attributes": {
           "type": "array",
           "items": {

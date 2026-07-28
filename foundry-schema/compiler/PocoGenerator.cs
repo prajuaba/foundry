@@ -753,12 +753,19 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
                 var wantsMaskEmail = prop.Attributes.Contains("MaskEmail");
                 var wantsMask = prop.Attributes.Contains("Mask");
 
+                // Named categories let one caller be entitled to some masked properties and not
+                // others. Omitted, the attribute's own default applies -- so a declaration that names
+                // no category still answers to view:pii exactly as before.
+                var category = string.IsNullOrWhiteSpace(prop.SensitiveCategory)
+                    ? string.Empty
+                    : $", Category = \"{CodeGen.Lit(prop.SensitiveCategory!)}\"";
+
                 if (wantsEncrypt)
                     attributes.Add("[SensitiveData(Protection = ProtectionType.Encrypt)]");
                 else if (wantsMaskEmail)
-                    attributes.Add("[SensitiveData(Protection = ProtectionType.Mask, MaskingType = MaskingType.Email)]");
+                    attributes.Add($"[SensitiveData(Protection = ProtectionType.Mask, MaskingType = MaskingType.Email{category})]");
                 else if (wantsMask)
-                    attributes.Add("[SensitiveData(Protection = ProtectionType.Mask)]");
+                    attributes.Add($"[SensitiveData(Protection = ProtectionType.Mask{category})]");
 
                 var attributeLines = string.Join("\n    ", attributes);
                 var attributeLine = string.IsNullOrEmpty(attributeLines) ? "" : $"    {attributeLines}\n";

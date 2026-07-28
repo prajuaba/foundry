@@ -147,7 +147,7 @@ internal sealed class EntityEncryptionService<T> where T : class, IEntity<Object
     /// tested in isolation, and wired to no read path at all.
     /// </para>
     /// </remarks>
-    internal T MaskSensitiveFields(T entity)
+    internal T MaskSensitiveFields(T entity, Func<SensitiveDataAttribute, bool>? shouldMask = null)
     {
         ArgumentNullException.ThrowIfNull(entity);
 
@@ -157,6 +157,10 @@ internal sealed class EntityEncryptionService<T> where T : class, IEntity<Object
         foreach (var (prop, attr) in sensitiveProps)
         {
             if (attr.Protection != ProtectionType.Mask) continue;
+
+            // Per property, so one caller can be entitled to some categories and not others. The
+            // decision itself belongs to the repository, which is where the caller is known.
+            if (shouldMask is not null && !shouldMask(attr)) continue;
 
             var val = prop.GetValue(clone);
             if (val != null)

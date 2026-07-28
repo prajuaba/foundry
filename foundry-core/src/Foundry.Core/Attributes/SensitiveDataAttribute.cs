@@ -39,6 +39,24 @@ public sealed class SensitiveDataAttribute : Attribute
     /// <summary>The protection strategy to apply (default is Mask).</summary>
     public ProtectionType Protection { get; set; } = ProtectionType.Mask;
 
+    /// <summary>
+    /// The class of sensitive data this property holds, which decides who may see it unmasked.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A caller sees this property in full when their token carries the scope
+    /// <c>view:{category}</c>. Masking was previously one switch — <c>view:pii</c> unmasked every
+    /// masked property on every entity — so "a claims handler may see a policy number but not a card
+    /// number" could not be expressed at all, and the only way to let someone read one field was to
+    /// let them read all of them.
+    /// </para>
+    /// <para>
+    /// Defaults to <c>pii</c>, which keeps <c>view:pii</c> meaning exactly what it meant before for
+    /// every declaration that does not name a category.
+    /// </para>
+    /// </remarks>
+    public string Category { get; set; } = "pii";
+
     /// <summary>The masking strategy to apply.</summary>
     public MaskingType MaskingType { get; set; } = MaskingType.Full;
 

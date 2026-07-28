@@ -249,6 +249,19 @@ namespace Foundry.Schema.Compiler
         public bool IsSharedWithKey { get; init; }
 
         public bool IsEnum { get; init; }
+
+        /// <summary>
+        /// The class of sensitive data a masked property holds, which decides who may see it in full.
+        /// </summary>
+        /// <remarks>
+        /// A caller sees the property unmasked when their token carries <c>view:{category}</c>.
+        /// Masking was one switch — <c>view:pii</c> unmasked every masked property on every entity —
+        /// so letting someone read one field meant letting them read all of them. Omitted means
+        /// <c>pii</c>, which is what every existing declaration already answered to.
+        /// </remarks>
+        [JsonPropertyName("sensitiveCategory")]
+        public string? SensitiveCategory { get; init; }
+
         public List<string> Attributes { get; init; } = new();
     }
 

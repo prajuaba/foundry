@@ -445,6 +445,7 @@ cat > "$WORK_DIR/tenant-schema.json" <<'SCHEMA'
         { "Name": "OwnerId", "Type": "string", "isOwnerKey": true },
         { "Name": "SharedWith", "Type": "List<string>", "isSharedWithKey": true },
         { "Name": "ContactEmail", "Type": "string", "Attributes": ["MaskEmail"] },
+        { "Name": "AccountNumber", "Type": "string", "Attributes": ["Mask"], "sensitiveCategory": "financial" },
         { "Name": "Body", "Type": "string", "Attributes": ["Required"] }
       ],
       "ApiEnabledMethods": ["GET", "POST", "GET_BY_ID", "PUT", "DELETE"]
@@ -802,25 +803,27 @@ pass "the auditor could read every row and change none"
 # machinery was written, unit-tested in isolation, and called by nothing -- so a property declared
 # [SensitiveData(Protection = Mask)] came back in the clear on every transport. Applied in the
 # repository, so one rule covers REST, GraphQL and the generated SDKs rather than three.
-PII_READER=$(python3 - "$Authentication__Jwt__SigningKey" "$Authentication__Jwt__Issuer" \
-                       "$Authentication__Jwt__Audience" <<'PYTHON'
+# Mints a token for alice carrying the given scopes. Alice again, so the only difference from the
+# reads above is the scope: a different subject would not see the row at all -- row filters run
+# before field filters, and the 404 that produces would look like a masking failure while proving
+# nothing about masking.
+mint_scoped_token() {
+  python3 - "$Authentication__Jwt__SigningKey" "$Authentication__Jwt__Issuer" \
+            "$Authentication__Jwt__Audience" "$1" <<'PYTHON'
 import base64, hashlib, hmac, json, sys, time
 
-key, issuer, audience = sys.argv[1:4]
+key, issuer, audience, scopes = sys.argv[1:5]
 
 def b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 now = int(time.time())
 payload = {
-    # Alice again, so the only difference from the reads above is the scope. A different subject
-    # would not see the row at all -- row filters run before field filters, and the 404 that
-    # produces would look like a masking failure while proving nothing about masking.
     "sub": "alice", "iss": issuer, "aud": audience,
     "iat": now, "nbf": now, "exp": now + 1800,
     "tenant_id": "acme",
-    # The scope that entitles a caller to unmasked reads. Everyone else sees the masked form.
-    "scope": "view:pii",
+    # One scope per category of masked data. Everyone else sees the masked form.
+    "scope": scopes.split(",") if "," in scopes else scopes,
 }
 signing_input = "{}.{}".format(
     b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode()),
@@ -829,13 +832,16 @@ signing_input = "{}.{}".format(
 signature = hmac.new(key.encode(), signing_input.encode(), hashlib.sha256).digest()
 print("{}.{}".format(signing_input, b64(signature)))
 PYTHON
-)
+}
+
+PII_READER=$(mint_scoped_token "view:pii")
+FINANCE_READER=$(mint_scoped_token "view:financial")
 
 log "A masked property is stored in full and returned masked"
 authenticate_as "$ALICE"
 expect_status 201 "POST a note carrying a masked property" \
   -X POST "$BASE/api/notes" -H 'Content-Type: application/json' \
-  -d '{"body":"MASKING-NOTE","contactEmail":"john.doe@example.com"}'
+  -d '{"body":"MASKING-NOTE","contactEmail":"john.doe@example.com","accountNumber":"ACC-9911002233"}'
 MASKED_NOTE=$(json_field "$WORK_DIR/body.json" Id id)
 
 expect_status 200 "GET the note as its owner" "$BASE/api/notes/$MASKED_NOTE"
@@ -860,6 +866,22 @@ expect_status 200 "GET the note as a view:pii holder" "$BASE/api/notes/$MASKED_N
 grep -q 'john.doe@example.com' "$WORK_DIR/body.json" \
   || fail "an entitled caller could not see the value, so it was masked in storage rather than on read"
 pass "the entitled caller sees the value in full, proving it was stored intact"
+
+# Masking used to be one switch: view:pii unmasked every masked property on every entity, so
+# letting someone read one field meant letting them read all of them. A property names the category
+# that unmasks it, and AccountNumber names "financial" while ContactEmail names none (so, pii).
+log "A scope unmasks its own category and no other"
+grep -q 'ACC-9911002233' "$WORK_DIR/body.json" \
+  && fail "view:pii unmasked a property in the 'financial' category -- the switch is still a switch"
+pass "view:pii left the financial property masked"
+
+authenticate_as "$FINANCE_READER"
+expect_status 200 "GET the note as a view:financial holder" "$BASE/api/notes/$MASKED_NOTE"
+grep -q 'ACC-9911002233' "$WORK_DIR/body.json" \
+  || fail "view:financial did not unmask the property that names that category"
+grep -q 'john.doe@example.com' "$WORK_DIR/body.json" \
+  && fail "view:financial unmasked a pii property it was never granted"
+pass "view:financial unmasks only its own category"
 
 # ── Workflow transitions ────────────────────────────────────────────────────
 #
