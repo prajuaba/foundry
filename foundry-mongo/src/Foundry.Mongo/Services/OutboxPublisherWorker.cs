@@ -113,6 +113,7 @@ public sealed class OutboxPublisherWorker : BackgroundService
                     message.Payload,
                     message.CorrelationId,
                     message.TraceParent,
+                    message.Topic,
                     ct
                 );
 

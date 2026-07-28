@@ -139,6 +139,7 @@ public class OutboxTests
             outboxMessage.Payload,
             Arg.Any<string>(),
             Arg.Any<string>(),
+            Arg.Any<string?>(),
             Arg.Any<CancellationToken>()
         );
 

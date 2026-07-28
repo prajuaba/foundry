@@ -39,6 +39,12 @@ public class MongoOutboxQueue : IOutboxQueue
             Id = ObjectId.GenerateNewId(),
             EventType = typeof(TEvent).AssemblyQualifiedName ?? typeof(TEvent).Name,
             Payload = JsonSerializer.Serialize(eventData),
+
+            // Null unless the entity declares [KafkaTopic], in which case the message records where
+            // it belongs. Without this the declaration reached the generated consumer and nothing
+            // else, so a schema naming its own topic produced a consumer subscribed where the
+            // publisher never wrote.
+            Topic = KafkaTopicDeclaration.For(typeof(TEvent)),
             CreatedAt = DateTime.UtcNow,
             CorrelationId = correlationId,
             TraceParent = traceParent

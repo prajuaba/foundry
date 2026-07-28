@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-811, on a repository whose CI had never passed once.
+828, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,8 +129,8 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 811 C# tests across 13 suites |
-| `Outbox round trip` | 5 tests driving a mutation through MongoDB and a **real Kafka broker** |
+| `Build and test` | 828 C# tests across 13 suites |
+| `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
 | `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication, declared roles, row-level ownership, workflow transitions and the real-time channels**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
@@ -555,6 +555,43 @@ single-word entity agreed by luck and every multi-word one named a topic with no
 manifest declares. The smoke test now goes further and checks the exported specification against the
 **running server** — a claim two components cannot satisfy by agreeing on the same mistake.
 
+### A declared Kafka topic now reaches the publisher
+
+Found while checking the AsyncAPI export against the runtime rather than against the other exporter,
+and it turned out to be a defect in the outbox rather than in the export.
+
+A schema may declare `kafkaTopic`, and the compiler used that name for exactly one thing: the topic
+the generated consumer subscribes to. Nothing carried it to the publishing side.
+`KafkaOutboxDispatcher` derived a topic from the event type alone, and `OutboxMessage` had nowhere to
+record one.
+
+> Declaring `"kafkaTopic": "orders.v2"` produced a consumer listening on `orders.v2` and a publisher
+> writing to `order-events`. **The consumer received nothing, and both halves reported success.**
+
+`OutboxMessage` now carries a `Topic`, resolved from a `[KafkaTopic]` attribute the compiler emits
+onto the entity, and recorded when the message is enqueued rather than when it is published — so a
+message sitting in the outbox across a deployment publishes where it was addressed rather than where
+the current build would guess. A declared name gets the same legal-character check as a derived one,
+because an illegal topic is refused at produce time with an error naming neither the topic nor the
+event, and the worker retries that forever while reporting nothing.
+
+The same investigation found the default naming wrong in the compiler independently of any
+declaration. The dispatcher kebab-cases the type name; `PocoGenerator` and `AsyncApiExporter` each
+lower-cased the whole thing. A single-word entity agreed by luck — which is why nothing had ever
+shown, since every schema in this repository uses single-word names — and `PurchaseOrder`'s generated
+consumer subscribed to `purchaseorder-events` while the publisher wrote `purchase-order-events`.
+
+The two copies of that rule are now one on each side of a boundary the compiler cannot cross (it has
+no project references at all), held together by a test in `Foundry.IntegrationTests` — the only
+project referencing both — that calls each implementation and compares them. That is deliberately not
+the shape used for the route rule, where a table of expected values was duplicated on each side and
+drifted five separate times: **a shared table catches a rule that changes and cannot catch a rule
+that is wrong in both copies.** Calling both implementations can.
+
+The round trip is proven against a real broker: the event is published, it arrives on the declared
+topic, and nothing arrives on the name the default would have produced. Reverting the dispatcher's
+handling makes exactly that test fail.
+
 ### The last mirrored implementation is gone
 
 
@@ -584,7 +621,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **811 in total**, from 258 at the start:
+Every module has tests. **828 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
@@ -766,13 +803,6 @@ was registered in the template and the sample and not in the scaffold. Left alon
 adding it would give every generated application a new public endpoint, which is a product decision
 rather than a defect fix.
 
-**A declared `kafkaTopic` never reaches the publisher.** Found while checking the AsyncAPI export
-against the runtime, and left unfixed because it is an outbox contract change rather than an export
-one. `KafkaOutboxDispatcher` derives the topic from the event type alone, and `OutboxMessage` has
-nowhere to carry one — so a schema declaring `kafkaTopic: "orders.v2"` produces a generated consumer
-subscribed to `orders.v2` and a publisher writing to `order-events`. **The generated consumer
-receives nothing, and both halves report success.** Every schema in this repository uses the default,
-which is why it has never shown.
 
 **Archival is verified on a standalone server, which is not how it should be deployed.** The
 copy-verify-delete path is what the tests exercise, because that is what the project's own
@@ -827,9 +857,8 @@ ask a more expensive one.
    writers — the properties an outbox exists for. Archival's transactional path is selected by a
    server capability check and covered only by inspection; a replica set in CI would close it. Nothing
    drives a workflow choice node.
-2. **Close the three gaps a buyer would find**, from section 5: resource-level authorization beyond
-   ownership, a read path for workflow history, and the `kafkaTopic` a declaration promises and the
-   publisher ignores.
+2. **Close the two gaps a buyer would find**, from section 5: resource-level authorization beyond
+   ownership, and a read path for workflow history.
 3. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than
    precede it.

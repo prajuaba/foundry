@@ -114,13 +114,7 @@ public static class AsyncApiExporter
     /// </para>
     /// </remarks>
     internal static string TopicFor(string name, string? declaredTopic)
-        => !string.IsNullOrEmpty(declaredTopic) ? declaredTopic! : CamelToKebab(name) + "-events";
-
-    private static string CamelToKebab(string input)
-        => string.IsNullOrEmpty(input)
-            ? input
-            : System.Text.RegularExpressions.Regex.Replace(input, "([a-z0-9])([A-Z])", "$1-$2")
-                .ToLowerInvariant();
+        => KafkaTopicNaming.TopicFor(name, declaredTopic);
 
     private static JsonObject Ref(string pointer) => new() { ["$ref"] = pointer };
 }

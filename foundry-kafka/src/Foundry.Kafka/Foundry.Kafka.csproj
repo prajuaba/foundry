@@ -19,6 +19,10 @@
        make it reachable. -->
   <ItemGroup>
     <InternalsVisibleTo Include="Foundry.Kafka.Tests" />
+
+    <!-- Foundry.IntegrationTests is the only project referencing both this and the compiler, so it
+         is where the compiler's copy of the topic-naming rule is held to this one. -->
+    <InternalsVisibleTo Include="Foundry.IntegrationTests" />
   </ItemGroup>
 
   <ItemGroup>

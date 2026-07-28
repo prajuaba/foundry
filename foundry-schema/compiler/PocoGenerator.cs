@@ -178,11 +178,11 @@ namespace Foundry.Schema.Compiler
             // --- Work Item 1.1: Kafka Consumers & Registration ---
             var kafkaEntities = (schema.Entities ?? new List<Entity>())
                 .Where(e => e.KafkaOutboxEnabled || !string.IsNullOrEmpty(e.KafkaTopic))
-                .Select(e => new { e.Name, Topic = !string.IsNullOrEmpty(e.KafkaTopic) ? e.KafkaTopic : $"{e.Name.ToLowerInvariant()}-events" })
+                .Select(e => new { e.Name, Topic = KafkaTopicNaming.TopicFor(e.Name, e.KafkaTopic) })
                 .Concat(
                     (schema.Dtos ?? new List<DtoModel>())
                         .Where(d => d.KafkaOutboxEnabled || !string.IsNullOrEmpty(d.KafkaTopic))
-                        .Select(d => new { d.Name, Topic = !string.IsNullOrEmpty(d.KafkaTopic) ? d.KafkaTopic : $"{d.Name.ToLowerInvariant()}-events" })
+                        .Select(d => new { d.Name, Topic = KafkaTopicNaming.TopicFor(d.Name, d.KafkaTopic) })
                 ).ToList();
 
             if (kafkaEntities.Any())
@@ -823,7 +823,15 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
             // never created and queries silently fell back to collection scans.
             var compoundIndexAttribute = BuildCompoundIndexAttributes(entity);
 
-            var needAttributes = entity.Partitioned || !entity.RealTime || (entity.RealTimeRoles != null && entity.RealTimeRoles.Count > 0) || !string.IsNullOrEmpty(compoundIndexAttribute);
+            // A declared kafkaTopic reached the generated consumer and stopped there: the publisher
+            // derived its own name from the event type, so the consumer subscribed to a topic nothing
+            // was ever written to. This attribute is how the declaration reaches the outbox, which
+            // records it on the message and dispatches there.
+            var kafkaTopicAttribute = !string.IsNullOrWhiteSpace(entity.KafkaTopic)
+                ? $"[KafkaTopic(\"{CodeGen.Lit(entity.KafkaTopic!)}\")]\n"
+                : "";
+
+            var needAttributes = entity.Partitioned || !entity.RealTime || (entity.RealTimeRoles != null && entity.RealTimeRoles.Count > 0) || !string.IsNullOrEmpty(compoundIndexAttribute) || !string.IsNullOrEmpty(kafkaTopicAttribute);
             var extraImports = needAttributes
                 ? "\nusing Foundry.Core.Attributes;"
                 : "";
@@ -841,7 +849,7 @@ using Foundry.Core.Entities;{extraImports}
 
 namespace {CodeGen.Ns(@namespace)};
 
-{partitionAttribute}{realTimeAttribute}{ownerExemptAttribute}{compoundIndexAttribute}public partial record {CodeGen.Ident(entity.Name, "Entity name")} : {interfaceList}
+{partitionAttribute}{realTimeAttribute}{ownerExemptAttribute}{compoundIndexAttribute}{kafkaTopicAttribute}public partial record {CodeGen.Ident(entity.Name, "Entity name")} : {interfaceList}
 {{{propertyLines}}}";
         }
 

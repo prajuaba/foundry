@@ -15,6 +15,17 @@ public record OutboxMessage : BaseEntity<ObjectId>
     /// <summary>Gets or sets the serialized JSON payload of the event.</summary>
     public string Payload { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Gets or sets the destination topic, when the entity names one.
+    /// </summary>
+    /// <remarks>
+    /// Null means "use the dispatcher's default naming", which is the case for every schema that does
+    /// not declare <c>kafkaTopic</c>. The field exists because the message previously carried no
+    /// destination at all: the dispatcher derived one from <see cref="EventType"/> and a declared
+    /// topic had nowhere to travel, so it reached the generated consumer and never the publisher.
+    /// </remarks>
+    public string? Topic { get; set; }
+
     /// <summary>Gets or sets the date and time when the outbox message was created.</summary>
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 

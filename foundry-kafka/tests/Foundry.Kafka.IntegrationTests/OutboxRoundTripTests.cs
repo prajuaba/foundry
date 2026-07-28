@@ -48,6 +48,16 @@ public sealed class OutboxRoundTripTests : IDisposable
         public sealed record OrderBody(string Id, string Reference);
     }
 
+    /// <summary>The same, for a subject that names its own topic.</summary>
+    [Foundry.Core.Attributes.KafkaTopic(DeclaredTopic)]
+    public sealed record InvoiceIssued(InvoiceIssued.InvoiceBody Entity)
+    {
+        public sealed record InvoiceBody(string Id, string Reference);
+    }
+
+    /// <summary>Deliberately unlike anything the default naming would produce from the type name.</summary>
+    private const string DeclaredTopic = "billing.invoices.v2";
+
     public OutboxRoundTripTests()
     {
         Foundry.Mongo.Infrastructure.Conventions.MongoDbConventions.Register();
@@ -215,6 +225,53 @@ public sealed class OutboxRoundTripTests : IDisposable
 
             Assert.NotNull(message);
             Assert.Contains(entityId, message!.Message.Value);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task AnEventWhoseSubjectNamesATopicArrivesOnThatTopic()
+    {
+        RequireInfrastructure();
+
+        // The claim that could not be checked without a broker. A schema declaring kafkaTopic
+        // configured the generated consumer and nothing else: the publisher derived its own name
+        // from the event type, so the consumer subscribed to a topic nothing was written to and both
+        // halves reported success. Subscribing to the declared topic and nothing else is what makes
+        // this fail if the declaration is dropped anywhere along the way.
+        using var declared = Subscribe(DeclaredTopic);
+        using var derived = Subscribe("invoice-issued-events");
+
+        var services = BuildHost();
+        var reference = $"INV-{Guid.NewGuid():N}";
+        var entityId = ObjectId.GenerateNewId().ToString();
+
+        using (var scope = services.CreateScope())
+        {
+            var queue = scope.ServiceProvider.GetRequiredService<IOutboxQueue>();
+            await queue.EnqueueAsync(
+                new InvoiceIssued(new InvoiceIssued.InvoiceBody(entityId, reference)), CancellationToken.None);
+        }
+
+        var worker = new OutboxPublisherWorker(services, NullLogger<OutboxPublisherWorker>.Instance);
+        using var cts = new CancellationTokenSource(RoundTripTimeout);
+        await worker.StartAsync(cts.Token);
+
+        try
+        {
+            var message = ConsumeMatching(
+                declared, r => r.Message.Value.Contains(reference), RoundTripTimeout);
+
+            Assert.NotNull(message);
+            Assert.Equal(DeclaredTopic, message!.Topic);
+
+            // And nothing went to the name the default rule would have produced, which is where every
+            // such message used to land.
+            Assert.Null(ConsumeMatching(
+                derived, r => r.Message.Value.Contains(reference), TimeSpan.FromSeconds(3)));
         }
         finally
         {

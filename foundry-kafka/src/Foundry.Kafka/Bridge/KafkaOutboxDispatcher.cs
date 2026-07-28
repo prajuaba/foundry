@@ -25,37 +25,47 @@ public class KafkaOutboxDispatcher : IOutboxDispatcher
     }
 
     /// <inheritdoc />
-    public async Task DispatchAsync(string eventType, string payload, string? correlationId = null, string? traceParent = null, CancellationToken ct = default)
+    public async Task DispatchAsync(string eventType, string payload, string? correlationId = null, string? traceParent = null, string? topic = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(eventType))
         {
             throw new ArgumentException("Event type must be provided.", nameof(eventType));
         }
 
-        // 1. Resolve a clean kebab-case topic name from the event type (e.g. "OrderEvent" -> "order-event-events")
-        var topic = ResolveTopicName(eventType);
+        // 1. The topic the message was addressed to, or one derived from the event type.
+        //
+        // The derived name used to be the only possibility, which is why a schema declaring
+        // "kafkaTopic" configured the generated consumer and nothing else: the publisher had no way
+        // to be told, so it wrote to its own default and the consumer waited on a topic that never
+        // received anything. Both halves reported success.
+        var declared = !string.IsNullOrWhiteSpace(topic);
+        topic = declared ? topic!.Trim() : ResolveTopicName(eventType);
 
         // An event type such as "Foo." leaves an empty final segment, which used to produce the
         // topic "-events" and publish there successfully. A message on a garbage topic is as lost
         // as one never sent, so this fails instead of succeeding quietly.
-        if (topic == TopicSuffix)
+        if (topic == TopicSuffix || topic.Length == 0)
         {
             throw new ArgumentException(
                 $"Event type '{eventType}' does not yield a usable topic name.", nameof(eventType));
         }
 
-        // Checked here rather than left to the broker. An illegal name is refused at produce time
-        // with librdkafka's "Broker: Invalid topic", which names neither the topic nor the event
-        // type that produced it -- and the outbox worker retries that failure indefinitely while
-        // reporting nothing, so the first symptom is a queue that never drains.
+        // Checked here rather than left to the broker, and applied to a declared name as much as a
+        // derived one: an illegal name is refused at produce time with librdkafka's "Broker: Invalid
+        // topic", which names neither the topic nor the event type that produced it -- and the outbox
+        // worker retries that failure indefinitely while reporting nothing, so the first symptom is a
+        // queue that never drains.
         if (!topic.All(IsLegalTopicCharacter))
         {
             var illegal = new string(topic.Where(c => !IsLegalTopicCharacter(c)).Distinct().ToArray());
 
             throw new ArgumentException(
-                $"Event type '{eventType}' yields the topic '{topic}', which Kafka will reject: "
-                + $"topic names may contain only letters, digits, '.', '_' and '-' (found: {illegal}).",
-                nameof(eventType));
+                declared
+                    ? $"The declared topic '{topic}' is one Kafka will reject: topic names may contain "
+                      + $"only letters, digits, '.', '_' and '-' (found: {illegal})."
+                    : $"Event type '{eventType}' yields the topic '{topic}', which Kafka will reject: "
+                      + $"topic names may contain only letters, digits, '.', '_' and '-' (found: {illegal}).",
+                declared ? nameof(topic) : nameof(eventType));
         }
 
         // 2. Partition key.
@@ -83,7 +93,17 @@ public class KafkaOutboxDispatcher : IOutboxDispatcher
 
     private const string TopicSuffix = "-events";
 
-    private static string ResolveTopicName(string eventType)
+    /// <summary>
+    /// The topic an event publishes to when nothing else named one.
+    /// </summary>
+    /// <remarks>
+    /// Internal rather than private so the compiler's copy of this rule can be compared against it
+    /// directly. The compiler cannot reference this assembly, so it carries its own
+    /// <c>KafkaTopicNaming</c>; the two are held together by a test that calls both, because the
+    /// alternative — a table of expected names duplicated on each side — is what let the equivalent
+    /// route rule drift five separate times.
+    /// </remarks>
+    internal static string ResolveTopicName(string eventType)
         => $"{CamelToKebab(ExtractTypeName(eventType))}{TopicSuffix}";
 
     /// <summary>

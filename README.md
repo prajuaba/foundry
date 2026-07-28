@@ -85,7 +85,7 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **811 C# tests passing**: 221 compiler, 87 rules, 75 integration, 75 file-IO, 70 MongoDB,
+Expect **828 C# tests passing**: 228 compiler, 87 rules, 85 integration, 75 file-IO, 70 MongoDB,
 67 API, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
