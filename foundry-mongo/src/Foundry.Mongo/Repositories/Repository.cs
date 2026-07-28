@@ -99,7 +99,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             await AuditReadAsync(entity.Id.ToString(), ct);
         }
 
-        return entity;
+        return MaskForCaller(entity);
     }
 
     // ─── Create operations ────────────────────────────────────────────────
@@ -251,7 +251,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         
         await AuditReadsAsync(items.Select(e => e.Id.ToString()), ct);
 
-        return items;
+        return MaskForCaller(items);
     }
 
     public async Task<long> CountAsync(Expression<Func<T, bool>>? filter = null, IClientSessionHandle? session = null, CancellationToken ct = default)
@@ -302,6 +302,10 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             var hasNextPage = items.Count > request.PageSize;
             var pageItems = hasNextPage ? items.Take(request.PageSize).ToList() : items;
 
+            // The seek cursor is taken from the unmasked row, before masking. A cursor built from a
+            // masked value would be a position no document holds, so the next page would come back
+            // empty or wrong -- and only for callers without the scope, on entities that happen to
+            // page by a masked field, which is about as hard to reproduce as a defect gets.
             CursorSeekInfo? nextCursor = null;
             if (hasNextPage && pageItems.Count > 0)
             {
@@ -309,16 +313,18 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                 nextCursor = CursorSeekInfo.FromValue(lastItem, request.CursorInfo.FieldName, request.CursorInfo.Order);
             }
 
+            var maskedPage = MaskForCaller(pageItems);
+
             if (nextCursor != null)
             {
-                return PagedResult<T>.WithCursor(pageItems, pageItems.Count + 1, request.PageNumber, request.PageSize, nextCursor);
+                return PagedResult<T>.WithCursor(maskedPage, maskedPage.Count + 1, request.PageNumber, request.PageSize, nextCursor);
             }
             else
             {
                 return new PagedResult<T>
                 {
-                    Items = pageItems,
-                    TotalRecords = pageItems.Count,
+                    Items = maskedPage,
+                    TotalRecords = maskedPage.Count,
                     PageNumber = request.PageNumber,
                     PageSize = request.PageSize,
                     NextCursor = null
@@ -361,7 +367,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
             await AuditReadsAsync(items.Select(e => e.Id.ToString()), ct);
 
-            return PagedResult<T>.From(items, totalRecords, request.PageNumber, request.PageSize);
+            return PagedResult<T>.From(MaskForCaller(items), totalRecords, request.PageNumber, request.PageSize);
         }
     }
 
@@ -400,7 +406,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             var items = await cursor.ToListAsync(ct);
             foreach (var item in items) DecryptEntity(item);
             await AuditReadsAsync(items.Select(e => e.Id.ToString()), ct);
-            return items;
+            return MaskForCaller(items);
         }
         else
         {
@@ -428,7 +434,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             var items = await cursor.ToListAsync(ct);
             foreach (var item in items) DecryptEntity(item);
             await AuditReadsAsync(items.Select(e => e.Id.ToString()), ct);
-            return items;
+            return MaskForCaller(items);
         }
     }
 
@@ -605,6 +611,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             throw new KeyNotFoundException($"Entity with ID {entity.Id} not found in collection '{CollectionName}'");
 
         DecryptEntity(existing);
+        RefuseMaskedOverwrite(entity, existing);
 
         var oldValues = new Dictionary<string, object?>();
         var properties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);
@@ -912,6 +919,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             if (existing == null) continue;
 
             DecryptEntity(existing);
+            RefuseMaskedOverwrite(entity, existing);
 
             var oldValues = new Dictionary<string, object?>();
             var properties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);
@@ -1170,7 +1178,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         
         await AuditReadsAsync(items.Select(e => e.Id.ToString()), ct);
 
-        return items;
+        return MaskForCaller(items);
     }
 
     public async Task<PagedResult<T>> SearchPagedAsync(
@@ -1509,11 +1517,91 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     public T MaskSensitiveFields(T entity)
     {
         if (entity == null) return null!;
-        if (_userContext?.User != null && _userContext.User.HasClaim("scope", "view:pii"))
-        {
-            return entity;
-        }
+        if (MayViewSensitiveData) return entity;
+
         return _encryptionService.MaskSensitiveFields(entity);
+    }
+
+    /// <summary>Whether this caller is entitled to see sensitive values in full.</summary>
+    private bool MayViewSensitiveData
+        => _userContext?.User?.HasClaim(ViewSensitiveDataScope.ClaimType, ViewSensitiveDataScope.ClaimValue) == true;
+
+    /// <summary>
+    /// Masks every property an entity declares as <c>Mask</c>-protected, unless the caller may see them.
+    /// </summary>
+    /// <remarks>
+    /// Applied at the repository rather than in each endpoint so that every transport is covered by
+    /// one rule. REST, GraphQL, the generated SDKs and anything else reading through
+    /// <c>IRepository&lt;T&gt;</c> get the same answer; masking per transport is how this codebase has
+    /// repeatedly ended up with two implementations of one rule, and the route prefix went wrong in
+    /// six places that way.
+    /// </remarks>
+    private T? MaskForCaller(T? entity)
+    {
+        if (entity is null || !HasMaskedProperties || MayViewSensitiveData) return entity;
+
+        return MaskSensitiveFields(entity);
+    }
+
+    private IReadOnlyList<T> MaskForCaller(IReadOnlyList<T> entities)
+    {
+        if (entities.Count == 0 || !HasMaskedProperties || MayViewSensitiveData) return entities;
+
+        var masked = new List<T>(entities.Count);
+        foreach (var entity in entities) masked.Add(MaskSensitiveFields(entity));
+
+        return masked;
+    }
+
+    /// <summary>
+    /// Whether this entity type declares anything to mask, read once per closed generic type.
+    /// </summary>
+    private static readonly bool HasMaskedProperties = typeof(T)
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Select(p => p.GetCustomAttribute<Foundry.Core.Entities.SensitiveDataAttribute>())
+        .Any(a => a is { Protection: Foundry.Core.Entities.ProtectionType.Mask });
+
+    /// <summary>
+    /// Refuses a write that would replace a stored value with its own masked form.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Masking on read creates a hazard it would be negligent to leave unguarded. A caller reads an
+    /// entity, changes one field and writes it back — an ordinary pattern in a business rule or a
+    /// handler — and <c>j***e@example.com</c> replaces the real address. The corruption is silent, the
+    /// original is gone, and it arrives through a change made to protect data.
+    /// </para>
+    /// <para>
+    /// Comparing against the stored row rather than tracking the instances handed out, because
+    /// <c>record with</c> produces a new object and defeats identity tracking entirely — which is
+    /// exactly how a caller modifies a record, so the tracking version guarded the case nobody hits.
+    /// This comparison has no false positives either: writing precisely the mask of the value
+    /// currently stored is not something a caller does by accident.
+    /// </para>
+    /// </remarks>
+    private static void RefuseMaskedOverwrite(T incoming, T existing)
+    {
+        if (!HasMaskedProperties) return;
+
+        foreach (var (property, attribute) in EntityEncryptionService<T>.GetSensitiveProperties())
+        {
+            if (attribute.Protection != Foundry.Core.Entities.ProtectionType.Mask) continue;
+            if (property.PropertyType != typeof(string)) continue;
+
+            var stored = property.GetValue(existing) as string;
+            var supplied = property.GetValue(incoming) as string;
+
+            if (string.IsNullOrEmpty(stored) || supplied is null) continue;
+            if (string.Equals(stored, supplied, StringComparison.Ordinal)) continue;
+
+            if (!string.Equals(attribute.MaskValue(stored), supplied, StringComparison.Ordinal)) continue;
+
+            throw new InvalidOperationException(
+                $"{typeof(T).Name}.{property.Name} was written back in its masked form, which would "
+                + "replace the stored value with the mask. Re-read the entity as a caller holding the "
+                + $"'{ViewSensitiveDataScope.ClaimValue}' scope, or build the update from a value the "
+                + "caller supplied rather than from a masked read.");
+        }
     }
 
     public async Task RestoreDeletedAsync(ObjectId id, IClientSessionHandle? session = null, CancellationToken ct = default)

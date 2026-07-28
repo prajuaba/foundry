@@ -893,9 +893,16 @@ builder.Services.AddSingleton(manifest);
 // 1. MongoDB data access layer (tenant filtering, envelope encryption, OCC, auditing)
 builder.Services.AddFoundryMongo(options =>
 {{
-    options.ConnectionString = builder.Configuration.GetConnectionString(""MongoDb"")
+    options.ConnectionString = Environment.GetEnvironmentVariable(""MONGODB_CONNECTION"")
+        ?? builder.Configuration.GetConnectionString(""MongoDb"")
         ?? ""mongodb://localhost:27017"";
-    options.DatabaseName = ""{projectName}Db"";
+
+    // Overridable, as the template and the sample already were. Hardcoding the name meant a
+    // scaffolded application could not be pointed at another database without editing its code --
+    // so two deployments of it, or two test runs, shared one set of collections.
+    options.DatabaseName = Environment.GetEnvironmentVariable(""MONGODB_DATABASE"")
+        ?? builder.Configuration[""MongoDbSettings:DatabaseName""]
+        ?? ""{projectName}Db"";
 }});
 
 // 2. Real-time audit broker (SignalR, WebSockets, SSE)

@@ -85,7 +85,7 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **862 C# tests passing**: 239 compiler, 87 rules, 85 integration, 85 MongoDB, 75 API,
+Expect **872 C# tests passing**: 239 compiler, 95 MongoDB, 87 rules, 85 integration, 75 API,
 75 file-IO, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
@@ -185,6 +185,19 @@ needs and what a full exemption cannot express.
 The tenant key must be named `TenantId`, the owner key `OwnerId`, and the grant set `SharedWith` —
 the data layer filters on those field names, and the compiler rejects any other name rather than
 emitting a filter that matches nothing.
+
+Those decide which **rows** come back. To decide what is left inside them, declare a property
+sensitive:
+
+```json
+{ "name": "Email", "type": "string", "attributes": ["MaskEmail"] }
+```
+
+The value is stored in full and returned masked — `j***e@example.com` — to every caller except one
+whose token carries the `view:pii` scope. Masking is applied in the repository, so REST, GraphQL and
+the generated SDKs all get it from one rule. Writing a masked value back is **refused** rather than
+persisted, because a read-modify-write would otherwise replace the real address with its own mask.
+Use `Encrypt` instead where the value should be encrypted at rest and readable by its own API.
 
 ### 4. CLI Tooling Commands (`foundry`)
 Run the unified `Foundry.Cli` executable:

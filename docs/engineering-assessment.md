@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-862, on a repository whose CI had never passed once.
+872, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 862 C# tests across 13 suites |
+| `Build and test` | 872 C# tests across 13 suites |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -555,6 +555,45 @@ single-word entity agreed by luck and every multi-word one named a topic with no
 manifest declares. The smoke test now goes further and checks the exported specification against the
 **running server** — a claim two components cannot satisfy by agreeing on the same mistake.
 
+### Sensitive properties are actually masked
+
+The last of the never-run features, and the same shape as the other ten: `MaskSensitiveFields` was
+written, unit-tested in isolation, and **called by nothing**. A property declared
+`[SensitiveData(Protection = Mask)]` came back in the clear on every transport, so the declaration
+described a protection nothing performed.
+
+Masking is applied in the repository rather than in each endpoint, so one rule covers REST, GraphQL,
+the generated SDKs and anything else reading through `IRepository<T>`. Masking per transport is how
+the route rule came to be wrong in six separate places.
+
+Three things had to be decided, and one existing behaviour was wrong:
+
+**`Encrypt` no longer masks.** `MaskSensitiveFields` masked every `[SensitiveData]` property
+regardless of its protection, which made the two settings do the same thing on the way out. The
+enum's own documentation says otherwise — `Mask` masks "for presentation/logs", `Encrypt` encrypts at
+rest "and decrypts it on read" — so an encrypted field, declared that way to protect the database
+rather than to hide the value from its own API, came back as a row of asterisks. Nothing noticed
+because nothing called it.
+
+**Writing back a masked read is refused.** This is the hazard masking creates, and it would have been
+negligent to ship without it: a caller reads an entity, changes one field, writes it back, and
+`j***e@example.com` replaces the real address — silently, irreversibly, through a change made to
+protect data. The guard compares the incoming value against the stored one and refuses only when the
+incoming value is precisely the mask of what is stored. That has no false positives, and it survives
+`record with`, which produces a new object and defeats identity tracking entirely. An earlier version
+of this guard *did* track identities, and its own test showed it guarding the case nobody hits.
+
+**The seek cursor is taken before masking.** A cursor built from a masked value names a position no
+document holds, so the next page comes back empty — and only for callers without the scope, on
+entities that page by a masked field.
+
+Two things the smoke test caught that unit tests could not: the default scaffold declares
+`Customer.Email` with `MaskEmail`, so the durability assertion had been reading back a value that is
+now masked; and the scaffolded projects share one database across runs, because the scaffold
+hardcoded its database name while the template and the sample both read `MONGODB_DATABASE`. The
+scaffold now reads it too — a scaffolded application could not otherwise be pointed at a second
+database without editing its code — and each smoke run gets its own.
+
 ### Authorization reaches past a single owner
 
 `ownerScoped` answered "this row belongs to one caller" and nothing further. Sharing, delegation,
@@ -702,7 +741,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **862 in total**, from 258 at the start:
+Every module has tests. **872 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
@@ -818,13 +857,10 @@ not.
 
 ### Would block a regulated deployment
 
-**Field-level restrictions have nowhere to be expressed.** Sharing, delegation, team scoping and
-read-only exemption are now stateable; *which properties* a caller may see is not. The masking
-machinery for it exists — `[SensitiveData(Protection = Mask)]` and `MaskSensitiveFields` — but it is
-opt-in and called by nothing, on the REST path as much as anywhere else, so no generated endpoint
-masks anything today. That is a projection problem rather than a filtering one, which is why it was
-not folded into the grant work: the filter decides which rows come back, and this decides what is
-left in them.
+**The `view:pii` scope is a fixed claim, and masking has one exemption rather than a policy.** A
+caller either sees every masked property on every entity or none of them; there is no way to say that
+a claims handler may see a policy number and not a card number. That is the same shape ownership had
+before grants, and the same answer would probably work — but it is a design step rather than a fix.
 
 **Group claims are read from `groups` and `group` and are not configurable.** Role and tenant claim
 names are both configurable under `Authentication:Jwt`; this one is not, so a provider emitting
@@ -945,11 +981,11 @@ ask a more expensive one.
    writers — the properties an outbox exists for. Archival's transactional path is selected by a
    server capability check and covered only by inspection; a replica set in CI would close it. Nothing
    drives a workflow choice node.
-2. **Field-level restrictions**, the remaining half of resource-level authorization. Rows are now
-   filtered by owner, grant and exemption; properties are not filtered at all. `MaskSensitiveFields`
-   exists and is called by nothing, so an entity declaring `[SensitiveData(Protection = Mask)]`
-   returns the value in the clear on every transport. Smaller than it sounds — the machinery is
-   written — and it is a projection concern rather than a filtering one.
+2. **Make masking a policy rather than one switch.** A caller with `view:pii` sees every masked
+   property on every entity; a claims handler who may see a policy number and not a card number
+   cannot be expressed. That is exactly the shape ownership had before grants, and the same answer
+   would probably work — declare which roles or scopes unmask which properties — but it is a design
+   step rather than a fix.
 3. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than
    precede it.

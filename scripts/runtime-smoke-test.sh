@@ -38,6 +38,12 @@ cleanup() {
     wait "$APP_PID" 2>/dev/null || true
   fi
   rm -rf "$WORK_DIR"
+
+  # Best effort: the run is isolated by database name, so a leftover one is untidy rather than
+  # harmful, and a missing mongosh must not turn a passing run into a failing one.
+  if [[ -n "${MONGODB_DATABASE:-}" ]] && command -v mongosh >/dev/null 2>&1; then
+    mongosh --quiet --eval "db.getSiblingDB('$MONGODB_DATABASE').dropDatabase()" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 
@@ -147,6 +153,12 @@ print(len(payload) if isinstance(payload, list) else -1)
 # tokens below are real HS256 JWTs, minted here and validated by the application: nothing about the
 # authentication path is stubbed, which is the point. The key is supplied through the environment
 # rather than appsettings, which is also the shape a deployment should use.
+# A database per run. The scaffolded projects have fixed names, so without this every run shared one
+# set of collections with every previous run -- and a run that failed part-way left rows behind that
+# the next run counted. That is a harness reporting a defect it created itself, which is worse than
+# no harness.
+export MONGODB_DATABASE="FoundrySmoke_$(date +%s)_$$"
+
 export Authentication__Jwt__SigningKey="foundry-runtime-smoke-test-signing-key-0123456789"
 export Authentication__Jwt__Issuer="foundry-smoke-test"
 export Authentication__Jwt__Audience="foundry-smoke-test"
@@ -358,8 +370,16 @@ pass "application restarted"
 
 log "The record survived the restart"
 expect_status 200 "GET after restart" "http://localhost:$PORT_B/api/customers/$ENTITY_ID"
-grep -q 'smoke@example.com' "$WORK_DIR/body.json" \
+# The default schema declares Email with "MaskEmail", so the value comes back masked to a caller
+# without the view:pii scope. Durability is asserted on a property that is not masked, and the
+# masked one is checked for its domain -- present proves the row was persisted and read back,
+# masked proves the declaration is enforced rather than merely recorded.
+grep -q 'Smoke Test' "$WORK_DIR/body.json" \
   || fail "the record read back after restart does not contain the value that was written"
+grep -q '@example.com' "$WORK_DIR/body.json" \
+  || fail "the record read back after restart lost its email entirely"
+grep -q 'smoke@example.com' "$WORK_DIR/body.json" \
+  && fail "the email came back unmasked, though the schema declares MaskEmail"
 grep -q 'Smoke Test Renamed' "$WORK_DIR/body.json" \
   || fail "the update did not survive the restart"
 pass "the record and its update were served from MongoDB by a different process"
@@ -423,6 +443,7 @@ cat > "$WORK_DIR/tenant-schema.json" <<'SCHEMA'
         { "Name": "TenantId", "Type": "string", "isTenantKey": true },
         { "Name": "OwnerId", "Type": "string", "isOwnerKey": true },
         { "Name": "SharedWith", "Type": "List<string>", "isSharedWithKey": true },
+        { "Name": "ContactEmail", "Type": "string", "Attributes": ["MaskEmail"] },
         { "Name": "Body", "Type": "string", "Attributes": ["Required"] }
       ],
       "ApiEnabledMethods": ["GET", "POST", "GET_BY_ID", "PUT", "DELETE"]
@@ -760,6 +781,71 @@ grep -q 'BOB-NOTE' "$WORK_DIR/body.json" \
   || fail "bob's note no longer holds its own value"
 pass "the auditor could read every row and change none"
 
+# ── Field-level restriction ─────────────────────────────────────────────────
+#
+# Row filters decide which records come back; this decides what is left inside them. The masking
+# machinery was written, unit-tested in isolation, and called by nothing -- so a property declared
+# [SensitiveData(Protection = Mask)] came back in the clear on every transport. Applied in the
+# repository, so one rule covers REST, GraphQL and the generated SDKs rather than three.
+PII_READER=$(python3 - "$Authentication__Jwt__SigningKey" "$Authentication__Jwt__Issuer" \
+                       "$Authentication__Jwt__Audience" <<'PYTHON'
+import base64, hashlib, hmac, json, sys, time
+
+key, issuer, audience = sys.argv[1:4]
+
+def b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+now = int(time.time())
+payload = {
+    # Alice again, so the only difference from the reads above is the scope. A different subject
+    # would not see the row at all -- row filters run before field filters, and the 404 that
+    # produces would look like a masking failure while proving nothing about masking.
+    "sub": "alice", "iss": issuer, "aud": audience,
+    "iat": now, "nbf": now, "exp": now + 1800,
+    "tenant_id": "acme",
+    # The scope that entitles a caller to unmasked reads. Everyone else sees the masked form.
+    "scope": "view:pii",
+}
+signing_input = "{}.{}".format(
+    b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode()),
+    b64(json.dumps(payload, separators=(",", ":")).encode()),
+)
+signature = hmac.new(key.encode(), signing_input.encode(), hashlib.sha256).digest()
+print("{}.{}".format(signing_input, b64(signature)))
+PYTHON
+)
+
+log "A masked property is stored in full and returned masked"
+authenticate_as "$ALICE"
+expect_status 201 "POST a note carrying a masked property" \
+  -X POST "$BASE/api/notes" -H 'Content-Type: application/json' \
+  -d '{"body":"MASKING-NOTE","contactEmail":"john.doe@example.com"}'
+MASKED_NOTE=$(json_field "$WORK_DIR/body.json" Id id)
+
+expect_status 200 "GET the note as its owner" "$BASE/api/notes/$MASKED_NOTE"
+grep -q 'john.doe@example.com' "$WORK_DIR/body.json" \
+  && fail "a masked property came back in the clear -- the declaration protects nothing"
+grep -q '@example.com' "$WORK_DIR/body.json" \
+  || fail "the masked value lost its domain, so the mask is not the one the schema declared"
+pass "the owner sees the masked form, with the domain preserved"
+
+log "A list is masked as well as a read by id"
+# The by-id and list paths have diverged before: the tenant filter was applied by one and not the
+# other for as long as it existed. Masking one and not the other would be worse than masking
+# neither, because the protection would read as present.
+expect_status 200 "GET /api/notes as alice" "$BASE/api/notes"
+grep -q 'john.doe@example.com' "$WORK_DIR/body.json" \
+  && fail "the list path returned an unmasked value the by-id path masked"
+pass "both read paths mask"
+
+log "The same caller holding the view:pii scope sees the stored value"
+authenticate_as "$PII_READER"
+expect_status 200 "GET the note as a view:pii holder" "$BASE/api/notes/$MASKED_NOTE"
+grep -q 'john.doe@example.com' "$WORK_DIR/body.json" \
+  || fail "an entitled caller could not see the value, so it was masked in storage rather than on read"
+pass "the entitled caller sees the value in full, proving it was stored intact"
+
 # ── Workflow transitions ────────────────────────────────────────────────────
 #
 # A workflow declared in a schema used to be compiled, validated, and then go nowhere: the manifest
@@ -968,5 +1054,6 @@ printf '\n\033[32mAll runtime checks passed.\033[0m\n'
 printf 'A scaffolded app boots, refuses anonymous and forged tokens, enforces the roles its schema\n'
 printf 'declares, validates, filters, updates under optimistic concurrency, soft-deletes, survives a\n'
 printf 'restart, and keeps tenants apart on reads and writes using the tenant in the caller token.\n'
-printf 'Its exported specifications describe routes that server actually answers, and a workflow\n'
-printf 'record'"'"'s transition history reads back what the transitions wrote.\n'
+printf 'Its exported specifications describe routes that server actually answers, a workflow\n'
+printf 'record'"'"'s transition history reads back what the transitions wrote, and a property declared\n'
+printf 'sensitive is stored in full and returned masked to everyone without the scope to see it.\n'

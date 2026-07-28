@@ -131,9 +131,22 @@ internal sealed class EntityEncryptionService<T> where T : class, IEntity<Object
     }
 
     /// <summary>
-    /// Returns a shallow clone of the entity with all <see cref="SensitiveDataAttribute"/>-decorated properties masked
-    /// according to their configured <see cref="MaskingType"/>.
+    /// Returns a shallow clone of the entity with its <see cref="ProtectionType.Mask"/> properties
+    /// masked according to their configured <see cref="MaskingType"/>.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="ProtectionType.Encrypt"/> properties are left alone, which is what the two values
+    /// mean: <c>Mask</c> is documented as masking "for presentation/logs", and <c>Encrypt</c> as
+    /// encrypting at rest "and decrypts it on read". Masking both made the two settings do the same
+    /// thing on the way out, so an encrypted field — declared that way to protect the database, not
+    /// to hide the value from its own API — came back as a row of asterisks.
+    /// </para>
+    /// <para>
+    /// It went unnoticed because nothing called this method: the masking machinery was written,
+    /// tested in isolation, and wired to no read path at all.
+    /// </para>
+    /// </remarks>
     internal T MaskSensitiveFields(T entity)
     {
         ArgumentNullException.ThrowIfNull(entity);
@@ -143,6 +156,8 @@ internal sealed class EntityEncryptionService<T> where T : class, IEntity<Object
 
         foreach (var (prop, attr) in sensitiveProps)
         {
+            if (attr.Protection != ProtectionType.Mask) continue;
+
             var val = prop.GetValue(clone);
             if (val != null)
             {
