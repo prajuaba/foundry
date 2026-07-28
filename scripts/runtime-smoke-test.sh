@@ -151,13 +151,13 @@ export Authentication__Jwt__SigningKey="foundry-runtime-smoke-test-signing-key-0
 export Authentication__Jwt__Issuer="foundry-smoke-test"
 export Authentication__Jwt__Audience="foundry-smoke-test"
 
-# Mints a token: subject, comma-separated roles, tenant.
+# Mints a token: subject, comma-separated roles, tenant, comma-separated groups.
 mint_token() {
   python3 - "$Authentication__Jwt__SigningKey" "$Authentication__Jwt__Issuer" \
-            "$Authentication__Jwt__Audience" "$1" "${2:-}" "${3:-}" <<'PYTHON'
+            "$Authentication__Jwt__Audience" "$1" "${2:-}" "${3:-}" "${4:-}" <<'PYTHON'
 import base64, hashlib, hmac, json, sys, time
 
-key, issuer, audience, subject, roles, tenant = sys.argv[1:7]
+key, issuer, audience, subject, roles, tenant, groups = sys.argv[1:8]
 
 def b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
@@ -175,6 +175,8 @@ if roles:
     payload["role"] = roles.split(",")
 if tenant:
     payload["tenant_id"] = tenant
+if groups:
+    payload["groups"] = groups.split(",")
 
 signing_input = "{}.{}".format(
     b64(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode()),
@@ -415,10 +417,12 @@ cat > "$WORK_DIR/tenant-schema.json" <<'SCHEMA'
       "multiTenant": true,
       "ownerScoped": true,
       "ownerExemptRoles": ["Supervisor"],
+      "ownerReadExemptRoles": ["Auditor"],
       "Properties": [
         { "Name": "Id", "Type": "ObjectId", "IsKey": true },
         { "Name": "TenantId", "Type": "string", "isTenantKey": true },
         { "Name": "OwnerId", "Type": "string", "isOwnerKey": true },
+        { "Name": "SharedWith", "Type": "List<string>", "isSharedWithKey": true },
         { "Name": "Body", "Type": "string", "Attributes": ["Required"] }
       ],
       "ApiEnabledMethods": ["GET", "POST", "GET_BY_ID", "PUT", "DELETE"]
@@ -663,6 +667,98 @@ grep -q 'BOB-NOTE' "$WORK_DIR/body.json" \
 pass "the globex supervisor sees none of acme's notes"
 
 expect_status 404 "GET an acme note as a globex Supervisor" "$BASE/api/notes/$ALICE_NOTE"
+
+# ── Grants: sharing, delegation and team scoping ────────────────────────────
+#
+# Ownership answered "this row belongs to one caller" and nothing past it, so sharing, delegation and
+# team scoping had nowhere to be expressed and had to be written by hand in a business rule -- where
+# nothing checked the rule reached every read path. They are one predicate: a row is visible to its
+# owner and to any identity in SharedWith, and the caller's identities are their subject plus the
+# groups their token carries.
+CAROL=$(mint_token carol "" acme)
+FINANCE_MEMBER=$(mint_token dave "" acme finance)
+GLOBEX_FINANCE=$(mint_token globex-dave "" globex finance)
+
+log "A row shared with a caller becomes visible to them"
+authenticate_as "$ALICE"
+expect_status 201 "POST a note shared with carol" \
+  -X POST "$BASE/api/notes" -H 'Content-Type: application/json' \
+  -d '{"body":"SHARED-WITH-CAROL","sharedWith":["carol"]}'
+SHARED_NOTE=$(json_field "$WORK_DIR/body.json" Id id)
+
+authenticate_as "$CAROL"
+expect_status 200 "GET the shared note as carol" "$BASE/api/notes/$SHARED_NOTE"
+expect_status 200 "GET /api/notes as carol" "$BASE/api/notes"
+grep -q 'SHARED-WITH-CAROL' "$WORK_DIR/body.json" \
+  || fail "carol's list is missing the note shared with her -- the list and by-id filters disagree"
+grep -q 'ALICE-NOTE' "$WORK_DIR/body.json" \
+  && fail "carol sees a note that was never shared with her"
+pass "carol sees the shared note and nothing else of alice's"
+
+# The half that matters. A grant that silently conferred write access would turn "let my colleague
+# see this" into "let my colleague rewrite this".
+log "A grant does not confer write access"
+curl -s -o /dev/null ${AUTH[@]+"${AUTH[@]}"} -X PUT "$BASE/api/notes/$SHARED_NOTE" \
+  -H 'Content-Type: application/json' \
+  -d "{\"id\":\"$SHARED_NOTE\",\"body\":\"REWRITTEN-BY-CAROL\",\"version\":1}" || true
+curl -s -o /dev/null ${AUTH[@]+"${AUTH[@]}"} -X DELETE "$BASE/api/notes/$SHARED_NOTE" || true
+
+authenticate_as "$ALICE"
+expect_status 200 "GET the shared note as its owner" "$BASE/api/notes/$SHARED_NOTE"
+grep -q 'REWRITTEN-BY-CAROL' "$WORK_DIR/body.json" \
+  && fail "a grantee rewrote a row shared with them -- a grant conferred write access"
+grep -q 'SHARED-WITH-CAROL' "$WORK_DIR/body.json" \
+  || fail "the shared note no longer holds its own value"
+pass "the shared note survived a grantee's update and delete"
+
+log "A row shared with a team is visible to its members"
+expect_status 201 "POST a note shared with the finance group" \
+  -X POST "$BASE/api/notes" -H 'Content-Type: application/json' \
+  -d '{"body":"SHARED-WITH-FINANCE","sharedWith":["finance"]}'
+
+authenticate_as "$FINANCE_MEMBER"
+expect_status 200 "GET /api/notes as a finance group member" "$BASE/api/notes"
+grep -q 'SHARED-WITH-FINANCE' "$WORK_DIR/body.json" \
+  || fail "a group grant did not reach a member of that group"
+grep -q 'SHARED-WITH-CAROL' "$WORK_DIR/body.json" \
+  && fail "a group member sees a note shared only with an individual"
+pass "the finance group sees the note granted to it and no other"
+
+# A grant widens the owner filter and never the tenant filter, exactly as an exemption does.
+log "A grant does not cross a tenant"
+authenticate_as "$GLOBEX_FINANCE"
+expect_status 200 "GET /api/notes as globex finance" "$BASE/api/notes"
+grep -q 'SHARED-WITH-FINANCE' "$WORK_DIR/body.json" \
+  && fail "a grant reached the same group in another tenant -- it was applied above the tenant filter"
+pass "the same group in another tenant sees nothing"
+
+# ── Read-only exemption ─────────────────────────────────────────────────────
+#
+# ownerExemptRoles is per entity, not per operation, so a role exempted for reads was exempted for
+# updates and deletes too. Read-only oversight -- an auditor, a compliance reviewer -- could not be
+# expressed at all.
+ACME_AUDITOR=$(mint_token acme-auditor Auditor acme)
+
+log "A read-only exempt role sees every row in its tenant"
+authenticate_as "$ACME_AUDITOR"
+expect_status 200 "GET /api/notes as an acme Auditor" "$BASE/api/notes"
+grep -q 'ALICE-NOTE' "$WORK_DIR/body.json" || fail "the auditor cannot see alice's note"
+grep -q 'BOB-NOTE' "$WORK_DIR/body.json" || fail "the auditor cannot see bob's note"
+pass "the auditor sees rows belonging to every caller"
+
+log "A read-only exempt role cannot change any of them"
+curl -s -o /dev/null ${AUTH[@]+"${AUTH[@]}"} -X PUT "$BASE/api/notes/$BOB_NOTE" \
+  -H 'Content-Type: application/json' \
+  -d "{\"id\":\"$BOB_NOTE\",\"body\":\"AUDITED\",\"version\":1}" || true
+curl -s -o /dev/null ${AUTH[@]+"${AUTH[@]}"} -X DELETE "$BASE/api/notes/$BOB_NOTE" || true
+
+authenticate_as "$BOB"
+expect_status 200 "GET bob's note after the auditor's writes" "$BASE/api/notes/$BOB_NOTE"
+grep -q 'AUDITED' "$WORK_DIR/body.json" \
+  && fail "a read-only exempt role rewrote another caller's row"
+grep -q 'BOB-NOTE' "$WORK_DIR/body.json" \
+  || fail "bob's note no longer holds its own value"
+pass "the auditor could read every row and change none"
 
 # ── Workflow transitions ────────────────────────────────────────────────────
 #

@@ -634,7 +634,13 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
             var isOwnerScoped = entity.OwnerScoped
                 || entity.Properties.Any(p => p.IsOwnerKey || p.Attributes.Contains("OwnerKey"));
 
-            if (isOwnerScoped)
+            // Grants widen ownership rather than replacing it, so ISharedResource extends
+            // IOwnedResource and only one of the two is listed.
+            var isShareable = entity.Properties.Any(p => p.IsSharedWithKey || p.Attributes.Contains("SharedWithKey"));
+
+            if (isShareable && isOwnerScoped)
+                interfaces.Add("ISharedResource");
+            else if (isOwnerScoped)
                 interfaces.Add("IOwnedResource");
 
             var interfaceList = string.Join(", ", interfaces);
@@ -677,7 +683,14 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
                 // instead of trusting the request body.
                 var isOwnerKey = prop.IsOwnerKey || prop.Attributes.Contains("OwnerKey");
 
-                var initKeyword = (isTenantKey && isMultiTenant) || (isOwnerKey && isOwnerScoped)
+                // The grant set needs `set` because ISharedResource declares one -- the same CS8854
+                // that made every multi-tenant entity fail to build. Unlike the owner key it is also
+                // genuinely caller-settable: granting access to a row you own is an ordinary write.
+                var isGrantKey = prop.IsSharedWithKey || prop.Attributes.Contains("SharedWithKey");
+
+                var initKeyword = (isTenantKey && isMultiTenant)
+                    || (isOwnerKey && isOwnerScoped)
+                    || (isGrantKey && isShareable && isOwnerScoped)
                     ? "get; set"
                     : "get; init";
 
@@ -690,6 +703,11 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
                 if (isOwnerKey)
                 {
                     attributes.Add("[OwnerKey]");
+                }
+
+                if (isGrantKey)
+                {
+                    attributes.Add("[SharedWithKey]");
                 }
 
                 foreach (var attr in prop.Attributes)
@@ -754,6 +772,10 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
                     defaultValue = " = 0;";
                 else if (prop.IsEnum)
                     defaultValue = $" = default({type});";
+                else if (isGrantKey)
+                    // Never null. The read filter enumerates it, and a null grant set on a row would
+                    // throw inside the query rather than simply matching nothing.
+                    defaultValue = " = new();";
 
                 properties.Add($"{attributeLine}    public {requiredKeyword}{type} {CodeGen.Ident(prop.Name, "Property name")} {{ {initKeyword}; }}{defaultValue}");
             }
@@ -818,6 +840,18 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
                     ownerExemptAttribute = $"[OwnerExemptRoles({exemptList})]\n";
             }
 
+            // Roles that see the whole tenant and can change only their own rows. Separate from the
+            // list above because that one is per entity, not per operation: read-only oversight -- an
+            // auditor, a compliance reviewer -- could not be stated at all.
+            if (isOwnerScoped && entity.OwnerReadExemptRoles.Count > 0)
+            {
+                var readExemptList = CodeGen.LitList(
+                    entity.OwnerReadExemptRoles.Where(r => !string.IsNullOrWhiteSpace(r)));
+
+                if (!string.IsNullOrEmpty(readExemptList))
+                    ownerExemptAttribute += $"[OwnerReadExemptRoles({readExemptList})]\n";
+            }
+
             // Entity-level indexes. Previously parsed, validated and then dropped on the floor:
             // nothing in the emitter referenced entity.Indexes, so a declared composite index was
             // never created and queries silently fell back to collection scans.
@@ -840,6 +874,11 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
             if (isMultiTenant)
                 extraImports += "\nusing Foundry.Core.Tenant;";
             extraImports += "\nusing Foundry.Core.Security;";
+
+            // The grant set is a List<string>, which needs the namespace its type lives in. Emitted
+            // only when there is one, so an entity without grants keeps the using list it had.
+            if (isShareable)
+                extraImports += "\nusing System.Collections.Generic;";
 
             return $@"using System;
 using System.ComponentModel.DataAnnotations;

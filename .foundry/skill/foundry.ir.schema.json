@@ -72,6 +72,12 @@
             "type": "string"
           }
         },
+        "ownerReadExemptRoles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "apiBusinessRules": {
           "type": "object",
           "additionalProperties": {
@@ -154,6 +160,9 @@
           "type": "boolean"
         },
         "isOwnerKey": {
+          "type": "boolean"
+        },
+        "isSharedWithKey": {
           "type": "boolean"
         },
         "isEnum": {

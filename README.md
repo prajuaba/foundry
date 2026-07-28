@@ -85,8 +85,8 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **836 C# tests passing**: 228 compiler, 87 rules, 85 integration, 75 API, 75 file-IO,
-70 MongoDB, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 21 CLI. Run it this way
+Expect **862 C# tests passing**: 239 compiler, 87 rules, 85 integration, 85 MongoDB, 75 API,
+75 file-IO, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.
 
@@ -149,8 +149,10 @@ mark an entity owner-scoped:
   "name": "Note",
   "ownerScoped": true,
   "ownerExemptRoles": ["Supervisor"],
+  "ownerReadExemptRoles": ["Auditor"],
   "properties": [
-    { "name": "OwnerId", "type": "string", "isOwnerKey": true }
+    { "name": "OwnerId", "type": "string", "isOwnerKey": true },
+    { "name": "SharedWith", "type": "List<string>", "isSharedWithKey": true }
   ]
 }
 ```
@@ -168,9 +170,21 @@ same tenant and owner filters as reading the record itself — and by the roles 
 
 `OwnerId` is assigned from the caller's `sub` claim and overwritten if a request body sets it.
 Lists, reads by id, updates and deletes are all narrowed to the caller's own rows; roles in
-`ownerExemptRoles` see everything **within their tenant**, never across one. The tenant key must
-be named `TenantId` and the owner key `OwnerId` — the data layer filters on those field names, and
-the compiler rejects any other name rather than emitting a filter that matches nothing.
+`ownerExemptRoles` see everything **within their tenant**, never across one.
+
+`SharedWith` widens that to identities other than the owner. A row is visible to its owner and to
+anyone named in the set, where the caller's identities are their `sub` plus the values of their
+`groups` claim — so naming a subject shares with a person, and naming a group shares with a team.
+**A grant is a read grant**: updates and deletes stay with the owner and with fully exempt roles.
+Grants never cross a tenant, exactly as exemptions never do.
+
+`ownerReadExemptRoles` is the read-only counterpart of `ownerExemptRoles`: the holder sees every row
+in the tenant and can still change only their own, which is what an auditor or compliance reviewer
+needs and what a full exemption cannot express.
+
+The tenant key must be named `TenantId`, the owner key `OwnerId`, and the grant set `SharedWith` —
+the data layer filters on those field names, and the compiler rejects any other name rather than
+emitting a filter that matches nothing.
 
 ### 4. CLI Tooling Commands (`foundry`)
 Run the unified `Foundry.Cli` executable:

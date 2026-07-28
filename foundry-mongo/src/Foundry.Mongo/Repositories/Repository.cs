@@ -1699,8 +1699,24 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             typeof(T), typeof(Foundry.Core.Security.OwnerExemptRolesAttribute)))?.Roles
         ?? Array.Empty<string>();
 
+    /// <summary>
+    /// Roles exempt from the owner filter on reads but not on writes.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="OwnerExemptRoles"/> because that one is per entity rather than per
+    /// operation, so read-only oversight — an auditor, a compliance reviewer — could not be expressed
+    /// at all. A role here sees the whole tenant and can still modify only its own rows.
+    /// </remarks>
+    private static readonly string[] OwnerReadExemptRoles =
+        ((Foundry.Core.Security.OwnerReadExemptRolesAttribute?)Attribute.GetCustomAttribute(
+            typeof(T), typeof(Foundry.Core.Security.OwnerReadExemptRolesAttribute)))?.Roles
+        ?? Array.Empty<string>();
+
     private static readonly bool IsOwnerScoped =
         typeof(Foundry.Core.Security.IOwnedResource).IsAssignableFrom(typeof(T));
+
+    private static readonly bool IsShareable =
+        typeof(Foundry.Core.Security.ISharedResource).IsAssignableFrom(typeof(T));
 
     /// <summary>
     /// The caller's own identifier, or <c>null</c> when there is no authenticated caller.
@@ -1733,14 +1749,21 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     /// Exemption lifts the owner filter only. The tenant filter is applied independently and is never
     /// affected, so an exempt role is wider access within one tenant and never across tenants.
     /// </remarks>
-    private bool IsOwnerExempt()
+    private bool IsOwnerExempt() => HoldsAnyRole(OwnerExemptRoles);
+
+    /// <summary>
+    /// Whether the caller may read past the owner filter without being able to write past it.
+    /// </summary>
+    private bool IsOwnerReadExempt() => HoldsAnyRole(OwnerReadExemptRoles);
+
+    private bool HoldsAnyRole(string[] roles)
     {
-        if (OwnerExemptRoles.Length == 0) return false;
+        if (roles.Length == 0) return false;
 
         var principal = _userContext?.User;
         if (principal?.Identity?.IsAuthenticated != true) return false;
 
-        foreach (var role in OwnerExemptRoles)
+        foreach (var role in roles)
         {
             if (principal.IsInRole(role)) return true;
 
@@ -1759,20 +1782,67 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     }
 
     /// <summary>
-    /// Whether reads and id-addressed writes should be narrowed to the caller's own rows.
+    /// The identities a grant on a row can name to reach this caller: their subject and their groups.
     /// </summary>
-    private bool TryGetOwnerScope(out string ownerId)
+    /// <remarks>
+    /// Sharing, delegation and team scoping are the same predicate seen from three angles, differing
+    /// only in what the grant names. Collapsing them here means the filter has one shape and the data
+    /// layer never has to know which of the three a deployment meant.
+    /// </remarks>
+    private List<string> CallerIdentities()
+    {
+        var identities = new List<string>();
+
+        var current = CurrentOwnerId;
+        if (current is not null) identities.Add(current);
+
+        var principal = _userContext?.User;
+        if (principal is null) return identities;
+
+        foreach (var claim in principal.Claims)
+        {
+            if (Array.IndexOf(Foundry.Core.Security.GroupClaims.Types, claim.Type) < 0) continue;
+            if (string.IsNullOrWhiteSpace(claim.Value)) continue;
+            if (identities.Contains(claim.Value)) continue;
+
+            identities.Add(claim.Value);
+        }
+
+        return identities;
+    }
+
+    /// <summary>
+    /// Whether an operation should be narrowed to the caller's own rows, and to whom.
+    /// </summary>
+    /// <param name="forWrite">
+    /// Writes ignore read-only exemptions and grants. A grant is a read grant — see
+    /// <see cref="Foundry.Core.Security.ISharedResource"/> — so a row shared with a caller is one they
+    /// can see and not one they can change.
+    /// </param>
+    /// <param name="ownerId">The caller's own id, which a row must carry to be theirs.</param>
+    /// <param name="grantedTo">
+    /// Identities a grant may name to reach this caller, empty for a write or a non-shareable entity.
+    /// </param>
+    private bool TryGetOwnerScope(bool forWrite, out string ownerId, out List<string> grantedTo)
     {
         ownerId = string.Empty;
+        grantedTo = [];
 
         if (!IsOwnerScoped) return false;
         if (_userContext is null) return false;   // no caller concept at all: background jobs, migrations
         if (IsOwnerExempt()) return false;
+        if (!forWrite && IsOwnerReadExempt()) return false;
 
         var current = CurrentOwnerId;
         if (current is null) return false;
 
         ownerId = current;
+
+        if (!forWrite && IsShareable)
+        {
+            grantedTo = CallerIdentities();
+        }
+
         return true;
     }
 
@@ -1809,12 +1879,20 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     /// Restricts a write targeted by id to rows the caller owns.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The same reasoning as the tenant scope: an id is handed out in every list response, so a write
     /// addressed by id must be narrowed or knowing an id is enough to modify somebody else's row.
+    /// </para>
+    /// <para>
+    /// <c>forWrite</c>, which is what makes a grant a read grant and a read-only exemption read-only.
+    /// A row shared with the caller stays visible to them and unmodifiable by them, and an auditor
+    /// sees the whole tenant while still writing only their own rows. Both of those hold because this
+    /// call ignores what the read filter takes into account.
+    /// </para>
     /// </remarks>
     private FilterDefinition<T> ScopeToOwner(FilterDefinition<T> filter)
     {
-        if (!TryGetOwnerScope(out var ownerId)) return filter;
+        if (!TryGetOwnerScope(forWrite: true, out var ownerId, out _)) return filter;
 
         return Builders<T>.Filter.And(filter, Builders<T>.Filter.Eq("OwnerId", ownerId));
     }
@@ -1867,9 +1945,15 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         }
 
         // Ownership narrows within the tenant; it never replaces the tenant filter above.
-        if (TryGetOwnerScope(out var ownerId))
+        if (TryGetOwnerScope(forWrite: false, out var ownerId, out var grantedTo))
         {
-            filter = Builders<T>.Filter.And(filter, Builders<T>.Filter.Eq("OwnerId", ownerId));
+            var mine = Builders<T>.Filter.Eq("OwnerId", ownerId);
+
+            // A row is the caller's, or granted to one of the identities they present. AnyIn is the
+            // array-aware form: SharedWith is a list, and the row matches if any entry is one of them.
+            filter = Builders<T>.Filter.And(filter, grantedTo.Count > 0
+                ? Builders<T>.Filter.Or(mine, Builders<T>.Filter.AnyIn("SharedWith", grantedTo))
+                : mine);
         }
 
         return filter;
@@ -1911,11 +1995,27 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         // generated list endpoint. Omitting the owner predicate here would leave ownership enforced
         // on reads of a single row and absent from reads of all of them, which is the more damaging
         // half to miss. It is the same trap the tenant filter fell into.
-        if (TryGetOwnerScope(out var ownerId))
+        if (TryGetOwnerScope(forWrite: false, out var ownerId, out var grantedTo))
         {
-            And(Expression.Equal(
+            Expression visible = Expression.Equal(
                 Expression.Property(parameter, nameof(Foundry.Core.Security.IOwnedResource.OwnerId)),
-                Expression.Constant(ownerId, typeof(string))));
+                Expression.Constant(ownerId, typeof(string)));
+
+            // The disjunction must match the FilterDefinition overload's AnyIn exactly, so it is built
+            // as one Contains call per identity rather than as a nested Any(...) lambda: a chain of
+            // static Enumerable.Contains calls is what the MongoDB LINQ provider translates reliably,
+            // and the two overloads disagreeing is the specific failure this pair has already had.
+            foreach (var identity in grantedTo)
+            {
+                visible = Expression.OrElse(visible, Expression.Call(
+                    typeof(Enumerable),
+                    nameof(Enumerable.Contains),
+                    [typeof(string)],
+                    Expression.Property(parameter, nameof(Foundry.Core.Security.ISharedResource.SharedWith)),
+                    Expression.Constant(identity, typeof(string))));
+            }
+
+            And(visible);
         }
 
         if (body is null) return filter ?? (x => true);

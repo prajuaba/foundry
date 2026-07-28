@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-836, on a repository whose CI had never passed once.
+862, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 836 C# tests across 13 suites |
+| `Build and test` | 862 C# tests across 13 suites |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -555,6 +555,56 @@ single-word entity agreed by luck and every multi-word one named a topic with no
 manifest declares. The smoke test now goes further and checks the exported specification against the
 **running server** — a claim two components cannot satisfy by agreeing on the same mistake.
 
+### Authorization reaches past a single owner
+
+`ownerScoped` answered "this row belongs to one caller" and nothing further. Sharing, delegation,
+team and hierarchy scoping all had nowhere to be expressed, so a schema needing any of them wrote the
+rule by hand in a business rule — where nothing checked it had been applied to every read path.
+Separately, exempt roles were per entity rather than per operation, so a role exempted from the owner
+filter was exempted for reads, updates and deletes alike: **read-only oversight, the ordinary shape
+for an auditor, could not be stated at all.**
+
+Those became two additions rather than four, because three of the four are one predicate seen from
+different angles:
+
+> A row is visible to its owner and to any identity in its `SharedWith` set. The caller's identities
+> are their subject plus the groups their token carries.
+
+Granting to a subject id is sharing; granting to a group id is team scoping; granting to a
+role-shaped group is delegation. Nothing in the data layer needs to know which of the three a
+deployment meant, and the filter has one shape rather than three.
+
+Four decisions in it are worth stating, because each is a place where the safe answer and the
+convenient one differ:
+
+**A grant confers read access only.** Updates and deletes stay with the owner and whoever holds a
+full exemption. A grant that silently conferred write access would turn "let my colleague see this"
+into "let my colleague rewrite this", and the smoke test asserts a grantee's `PUT` and `DELETE` both
+leave the row untouched. Stated here so that widening it later is a decision rather than a drift.
+
+**A grant never crosses a tenant.** It widens the owner predicate, which is a separate conjunct from
+the tenant predicate — the same guarantee exemptions have always had. Asserted for both an individual
+and a group grant, because "the same group id in another tenant" is the shape that would fail if a
+grant were ever hoisted above the tenant filter.
+
+**Both filter overloads were changed together.** `ApplyReadFilters` exists as a `FilterDefinition`
+and as an expression tree, and the tenant filter was once missing from the expression one for as long
+as it existed — so every list endpoint returned every tenant's rows. The expression overload builds a
+chain of `Enumerable.Contains` calls rather than a nested `Any(...)` lambda, matching what `AnyIn`
+does on the other side, and a test asserts a grantee's list result equals their by-id result.
+
+**`ownerReadExemptRoles` is a second list rather than a richer `ownerExemptRoles`.** A role in both is
+a warning (FDY3018), because it is fully exempt and the read-only listing then describes a
+restriction that is not applied — a document that reads as though an auditor cannot write, when it
+can.
+
+The grant set is the one collection-typed property the framework understands, so it is exempted from
+the unknown-type check rather than added to the scalar vocabulary: `List<string>` stays legal only
+where the repository filter, the emitted property and the interface all know what to do with it. The
+compiler emits `ISharedResource`, which extends `IOwnedResource` — and getting the accessor wrong
+reproduces CS8854 exactly as multi-tenancy once did, which the generated-code compile check confirms
+by failing when the setter is reverted to `init`.
+
 ### Workflow history can be read
 
 `AppendActivityLogAsync` wrote an entry for every transition — who triggered it, when, from which
@@ -652,7 +702,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **836 in total**, from 258 at the start:
+Every module has tests. **862 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
@@ -768,15 +818,26 @@ not.
 
 ### Would block a regulated deployment
 
-**Ownership is one relationship, not an authorization language.** `ownerScoped` answers "this row
-belongs to one caller", which covers the common case and nothing beyond it. Sharing, delegation, team
-or hierarchy scoping, and field-level restrictions all have nowhere to be expressed. A schema needing
-those writes them by hand in a business rule, where nothing checks the rule was applied to every path.
+**Field-level restrictions have nowhere to be expressed.** Sharing, delegation, team scoping and
+read-only exemption are now stateable; *which properties* a caller may see is not. The masking
+machinery for it exists — `[SensitiveData(Protection = Mask)]` and `MaskSensitiveFields` — but it is
+opt-in and called by nothing, on the REST path as much as anywhere else, so no generated endpoint
+masks anything today. That is a projection problem rather than a filtering one, which is why it was
+not folded into the grant work: the filter decides which rows come back, and this decides what is
+left in them.
 
-**Exempt roles are per entity, not per operation.** A `Supervisor` exempted from the owner filter on
-an entity is exempted for reads, updates and deletes alike. Read-only oversight — the common shape for
-an auditor — cannot be expressed; combining `ownerExemptRoles` with `apiRoles` on DELETE is the closest
-approximation.
+**Group claims are read from `groups` and `group` and are not configurable.** Role and tenant claim
+names are both configurable under `Authentication:Jwt`; this one is not, so a provider emitting
+something else silently matches no grants — which looks exactly like "the user has no access", the
+least diagnosable outcome available. Matching two spellings covers the common providers and is not
+the same as letting a deployment say.
+
+**An unauthenticated principal is not narrowed by ownership or grants on reads.** With no
+authenticated caller the owner filter does not apply, which is deliberate — background jobs,
+migrations and the archival worker read without a caller and must see every row — and safe only
+because every generated endpoint refuses an unauthenticated request before the repository is reached.
+It is defence in depth this layer does not provide, so a host exposing a repository without
+authentication in front of it has no row-level filtering at all.
 
 **No token issuance, and no refresh or revocation story.** The framework validates tokens; it does not
 mint them. That is the right split — an identity provider's job is not a code generator's — but a team
@@ -884,11 +945,11 @@ ask a more expensive one.
    writers — the properties an outbox exists for. Archival's transactional path is selected by a
    server capability check and covered only by inspection; a replica set in CI would close it. Nothing
    drives a workflow choice node.
-2. **Resource-level authorization beyond ownership**, the last of the gaps a buyer would find that is
-   still open. `ownerScoped` answers "this row belongs to one caller" and nothing past it: sharing,
-   delegation, team or hierarchy scoping and field-level restrictions have nowhere to be expressed,
-   and exempt roles are per entity rather than per operation, so read-only oversight — the ordinary
-   shape for an auditor — cannot be stated at all.
+2. **Field-level restrictions**, the remaining half of resource-level authorization. Rows are now
+   filtered by owner, grant and exemption; properties are not filtered at all. `MaskSensitiveFields`
+   exists and is called by nothing, so an entity declaring `[SensitiveData(Protection = Mask)]`
+   returns the value in the clear on every transport. Smaller than it sounds — the machinery is
+   written — and it is a projection concern rather than a filtering one.
 3. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
    rewrite — but it doubles the surface, and it should follow the verification work rather than
    precede it.

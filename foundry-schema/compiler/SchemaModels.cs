@@ -160,6 +160,18 @@ namespace Foundry.Schema.Compiler
         [JsonPropertyName("ownerExemptRoles")]
         public List<string> OwnerExemptRoles { get; init; } = new();
 
+        /// <summary>
+        /// Roles that see every row in the tenant but may not change any of them.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="OwnerExemptRoles"/> is per entity rather than per operation, so a role exempted
+        /// for reads was exempted for updates and deletes too. Read-only oversight — an auditor, a
+        /// compliance reviewer, a support agent who may look but not touch — could not be expressed
+        /// at all.
+        /// </remarks>
+        [JsonPropertyName("ownerReadExemptRoles")]
+        public List<string> OwnerReadExemptRoles { get; init; } = new();
+
         public Dictionary<string, List<string>> ApiBusinessRules { get; init; } = new();
 
         /// <summary>
@@ -208,6 +220,19 @@ namespace Foundry.Schema.Compiler
         /// </summary>
         [JsonPropertyName("isOwnerKey")]
         public bool IsOwnerKey { get; init; }
+
+        /// <summary>
+        /// Marks the property holding the identities a row is granted to. Must be named
+        /// <c>SharedWith</c> and be a <c>List&lt;string&gt;</c>.
+        /// </summary>
+        /// <remarks>
+        /// Sharing, delegation and team scoping are one predicate seen from three angles, differing
+        /// only in what the grant names: a subject id shares with a person, a group id shares with a
+        /// team. The caller's identities are their subject plus the groups their token carries.
+        /// A grant confers read access only.
+        /// </remarks>
+        [JsonPropertyName("isSharedWithKey")]
+        public bool IsSharedWithKey { get; init; }
 
         public bool IsEnum { get; init; }
         public List<string> Attributes { get; init; } = new();

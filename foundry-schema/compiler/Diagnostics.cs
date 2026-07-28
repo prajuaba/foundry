@@ -275,6 +275,15 @@ namespace Foundry.Schema.Compiler
         /// <summary>Exempt roles are listed but the entity is not owner-scoped.</summary>
         public const string OwnerExemptRolesWithoutOwnerScoped = "FDY3015";
 
+        /// <summary>A grant set is declared on an entity that is not owner-scoped.</summary>
+        public const string SharedWithKeyWithoutOwnerScoped = "FDY3016";
+
+        /// <summary>The grant set is not named <c>SharedWith</c>, or is not a list of strings.</summary>
+        public const string SharedWithKeyShape = "FDY3017";
+
+        /// <summary>A role is exempt on reads and on every operation, which says two things at once.</summary>
+        public const string OwnerExemptRoleAlsoReadExempt = "FDY3018";
+
         // ---- FDY4xxx: naming and identifier safety ----
 
         /// <summary>A name is not a valid C# identifier and cannot be emitted as code.</summary>
@@ -314,6 +323,8 @@ namespace Foundry.Schema.Compiler
             TenantKeyWithoutMultiTenant,     // marked a tenant key without enabling multi-tenancy
             OwnerKeyWithoutOwnerScoped,      // marked an owner key without enabling owner scoping
             OwnerExemptRolesWithoutOwnerScoped, // listed exempt roles with nothing to be exempt from
+            SharedWithKeyWithoutOwnerScoped, // declared a grant set with no ownership to widen
+            OwnerExemptRoleAlsoReadExempt,   // a role listed as both fully and read-only exempt
             WorkflowNoFinalState,            // a workflow instances can never leave
             UnknownAttribute                 // the hint lists the supported vocabulary
         };
@@ -356,6 +367,9 @@ namespace Foundry.Schema.Compiler
             [OwnerScopedWithoutOwnerKey] = "An entity with 'ownerScoped': true must mark one property 'isOwnerKey'.",
             [OwnerKeyMustBeNamedOwnerId] = "The owner key property must be named 'OwnerId', for the same reason the tenant key must be named 'TenantId': the data layer filters on the stored field by name.",
             [OwnerExemptRolesWithoutOwnerScoped] = "Setting 'ownerExemptRoles' without 'ownerScoped': true has no effect; there is no owner filter for those roles to be exempt from.",
+            [SharedWithKeyWithoutOwnerScoped] = "Marking a property 'isSharedWithKey' without 'ownerScoped': true has no effect; a grant widens an owner filter, and there is none to widen.",
+            [SharedWithKeyShape] = "The grant set must be a property named 'SharedWith' of type 'List<string>', for the same reason the owner key must be named 'OwnerId': the data layer filters on the stored field by name.",
+            [OwnerExemptRoleAlsoReadExempt] = "A role listed in both 'ownerExemptRoles' and 'ownerReadExemptRoles' is fully exempt; the read-only listing has no effect and reads as a restriction that is not applied.",
             [KafkaTopicWithoutOutbox] = "Setting 'kafkaTopic' without 'enableKafkaOutbox': true has no effect.",
             [FileIoExtensionsWithoutFileIo] = "Setting 'fileIOAllowedExtensions' without 'enableFileIO': true has no effect.",
             [UnknownAttribute] = "The attribute is not in the supported vocabulary and will be ignored.",

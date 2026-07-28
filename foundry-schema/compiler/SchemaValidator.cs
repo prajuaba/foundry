@@ -389,7 +389,14 @@ namespace Foundry.Schema.Compiler
                 return;
             }
 
-            if (!Vocabulary.IsKnownScalar(prop.Type) && !enumNames.Contains(prop.Type))
+            // The grant set is the one collection-typed property the framework understands, and its
+            // shape is checked precisely in ValidateGrantCoherence. Exempting it here rather than
+            // adding List<string> to the scalar vocabulary keeps the type legal only where every
+            // layer downstream -- the repository filter, the emitted property, the interface -- knows
+            // what to do with it.
+            var isGrantKey = prop.IsSharedWithKey || (prop.Attributes ?? new List<string>()).Contains("SharedWithKey");
+
+            if (!isGrantKey && !Vocabulary.IsKnownScalar(prop.Type) && !enumNames.Contains(prop.Type))
             {
                 // An error, not a warning: the emitter passes the type through verbatim, so an
                 // unrecognised name becomes an unresolvable C# type and the generated project does
@@ -535,15 +542,92 @@ namespace Foundry.Schema.Compiler
                     "The owner key holds a claim value, which is always a string.");
             }
 
-            if (!entity.OwnerScoped && entity.OwnerExemptRoles.Count > 0)
+            if (!entity.OwnerScoped && (entity.OwnerExemptRoles.Count > 0 || entity.OwnerReadExemptRoles.Count > 0))
             {
                 bag.Warning(
                     DiagnosticCatalog.OwnerExemptRolesWithoutOwnerScoped,
-                    $"Entity '{entity.Name}' lists 'ownerExemptRoles' but does not set 'ownerScoped', "
+                    $"Entity '{entity.Name}' lists exempt roles but does not set 'ownerScoped', "
                     + "so there is no owner filter for those roles to be exempt from.",
                     $"{path}/ownerScoped",
-                    "Set \"ownerScoped\": true, or remove 'ownerExemptRoles'.");
+                    "Set \"ownerScoped\": true, or remove the exempt role lists.");
             }
+
+            // A role in both lists is fully exempt, and the read-only listing then describes a
+            // restriction that is not applied. Silence here would leave a document that reads as if
+            // an auditor cannot write when it can.
+            foreach (var role in entity.OwnerReadExemptRoles
+                         .Where(r => entity.OwnerExemptRoles.Contains(r, StringComparer.OrdinalIgnoreCase)))
+            {
+                bag.Warning(
+                    DiagnosticCatalog.OwnerExemptRoleAlsoReadExempt,
+                    $"Entity '{entity.Name}' lists role '{role}' in both 'ownerExemptRoles' and "
+                    + "'ownerReadExemptRoles'. It is exempt on writes too, so the read-only listing has "
+                    + "no effect.",
+                    $"{path}/ownerReadExemptRoles",
+                    $"Remove '{role}' from 'ownerExemptRoles' to make it read-only, or from "
+                    + "'ownerReadExemptRoles' to leave it fully exempt.");
+            }
+
+            ValidateGrantCoherence(entity, properties, path, bag);
+        }
+
+        /// <summary>
+        /// Checks the grant set an entity uses for sharing, delegation and team scoping.
+        /// </summary>
+        private static void ValidateGrantCoherence(
+            Entity entity, List<Property> properties, string path, DiagnosticBag bag)
+        {
+            var grantKey = properties.FirstOrDefault(p =>
+                p.IsSharedWithKey || (p.Attributes ?? new List<string>()).Contains("SharedWithKey"));
+
+            if (grantKey is null) return;
+
+            // A grant widens an owner filter. Without ownership every caller already sees every row,
+            // so the document reads as if access were restricted when nothing restricts it -- the same
+            // shape as an owner key on an entity that is not owner-scoped.
+            if (!entity.OwnerScoped)
+            {
+                bag.Warning(
+                    DiagnosticCatalog.SharedWithKeyWithoutOwnerScoped,
+                    $"Entity '{entity.Name}' declares grant set '{grantKey.Name}' but does not set "
+                    + "'ownerScoped'. Every caller already sees every row, so no grant is consulted.",
+                    $"{path}/ownerScoped",
+                    "Set \"ownerScoped\": true, or remove the grant set.");
+            }
+
+            if (!string.Equals(grantKey.Name, "SharedWith", StringComparison.Ordinal))
+            {
+                bag.Error(
+                    DiagnosticCatalog.SharedWithKeyShape,
+                    $"Entity '{entity.Name}' marks '{grantKey.Name}' as the grant set, but it must be "
+                    + "named 'SharedWith'.",
+                    $"{path}/properties",
+                    "Rename the property to 'SharedWith'.");
+            }
+
+            // The filter matches array entries against the caller's identities, which are claim
+            // values. Any other element type would produce a filter that matches no documents -- a
+            // grant that is declared, stored, and silently never consulted.
+            if (!IsStringList(grantKey.Type))
+            {
+                bag.Error(
+                    DiagnosticCatalog.SharedWithKeyShape,
+                    $"Entity '{entity.Name}' declares grant set 'SharedWith' as '{grantKey.Type}'; it "
+                    + "must be a 'List<string>'.",
+                    $"{path}/properties",
+                    "A grant holds claim values, which are always strings.");
+            }
+        }
+
+        private static bool IsStringList(string? type)
+        {
+            if (string.IsNullOrWhiteSpace(type)) return false;
+
+            var normalised = type!.Replace(" ", string.Empty);
+
+            return normalised.Equals("List<string>", StringComparison.OrdinalIgnoreCase)
+                || normalised.Equals("string[]", StringComparison.OrdinalIgnoreCase)
+                || normalised.Equals("IList<string>", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void ValidateEntityFeatureCoherence(Entity entity, List<Property> properties, string path, DiagnosticBag bag)
