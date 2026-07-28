@@ -46,7 +46,10 @@ graph TD
 
 - **.NET 10 SDK** — `dotnet --version` should report `10.0.x`
 - **Node.js 20+** — required to build the Studio bundle, which the CLI embeds
-- **Docker** — the MongoDB and API test suites talk to a real database
+- **Docker** — the MongoDB and API test suites talk to a real database, and it must be a
+  **replica set**: MongoDB offers multi-document transactions only on one, and the archival sweep
+  uses them. `docker compose up -d mongodb` configures `rs0` and initiates it from the health check;
+  a standalone `mongod` on 27017 will fail the transactional archival tests rather than skip them.
 
 ### 1. Clone and Build
 
@@ -85,7 +88,7 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **886 C# tests passing**: 239 compiler, 104 MongoDB, 90 integration, 87 rules, 75 API,
+Expect **891 C# tests passing**: 239 compiler, 109 MongoDB, 90 integration, 87 rules, 75 API,
 75 file-IO, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 21 CLI. Run it this way
 rather than per-project — a solution-wide run exercises project interactions that
 individual runs miss, and it is exactly what CI does.

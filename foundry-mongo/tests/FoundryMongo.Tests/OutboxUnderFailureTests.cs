@@ -283,6 +283,31 @@ public class OutboxUnderFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task TwoWorkersSweepingAtOnceDoNotPublishAMessageTwice()
+    {
+        // Left open when backoff and dead-lettering went in, because a standalone MongoDB could not
+        // support the transaction the repository would need to make the claim meaningfully. On a
+        // replica set the write that marks a message processed is guarded by optimistic concurrency:
+        // the second worker's update finds a version that has moved and loses.
+        //
+        // The publish itself is not transactional -- an at-least-once outbox cannot be -- so this
+        // asserts the property that is actually available: the marking is exclusive, so a duplicate
+        // publish requires an actual race inside the dispatcher rather than being the normal case.
+        _dispatcher.Available = true;
+        var id = await EnqueueAsync("CONTENDED");
+
+        await Task.WhenAll(SweepAsync(), SweepAsync());
+
+        var message = await ReadAsync(id);
+        Assert.NotNull(message.ProcessedAt);
+
+        // Published once, not twice. This asserted the version count first and passed for the wrong
+        // reason -- what matters is how many times the message left the building.
+        Assert.Single(_dispatcher.Published);
+        Assert.Null(message.DeadLetteredAt);
+    }
+
+    [Fact]
     public async Task AFailingMessageDoesNotBlockTheOnesBehindIt()
     {
         // A head-of-line block would be the other way to get this wrong: one poisoned message

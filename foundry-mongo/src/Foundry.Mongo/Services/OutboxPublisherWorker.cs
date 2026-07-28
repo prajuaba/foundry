@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Foundry.Core.Outbox;
 using Foundry.Core.Entities;
 using MongoDB.Bson;
+using MongoDB.Driver;
 using Foundry.Mongo.Repositories;
 using Foundry.Core.Paging;
 
@@ -66,6 +67,43 @@ public sealed class OutboxPublisherWorker : BackgroundService
         _logger.LogInformation("Outbox Publisher Background Worker stopped.");
     }
 
+    /// <summary>
+    /// Takes exclusive responsibility for a message, or returns null if another worker already has.
+    /// </summary>
+    /// <remarks>
+    /// One atomic find-and-update. The filter repeats the due-now conditions rather than trusting the
+    /// earlier query, because between that read and this write another worker may have claimed,
+    /// published or abandoned the row.
+    /// </remarks>
+    private static async Task<OutboxMessage?> ClaimAsync(
+        IMongoCollection<OutboxMessage> collection, ObjectId id, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+
+        var filter = Builders<OutboxMessage>.Filter.And(
+            Builders<OutboxMessage>.Filter.Eq(m => m.Id, id),
+            Builders<OutboxMessage>.Filter.Eq(m => m.ProcessedAt, null),
+            Builders<OutboxMessage>.Filter.Eq(m => m.DeadLetteredAt, null),
+            Builders<OutboxMessage>.Filter.Or(
+                Builders<OutboxMessage>.Filter.Eq(m => m.NextAttemptAt, null),
+                Builders<OutboxMessage>.Filter.Lte(m => m.NextAttemptAt, now)));
+
+        return await collection.FindOneAndUpdateAsync(
+            filter,
+            Builders<OutboxMessage>.Update.Set(m => m.NextAttemptAt, now + LeaseDuration),
+            new FindOneAndUpdateOptions<OutboxMessage> { ReturnDocument = ReturnDocument.Before },
+            ct);
+    }
+
+    /// <summary>
+    /// How long a claim holds a message before another worker may take it.
+    /// </summary>
+    /// <remarks>
+    /// Long enough that a publish in progress is not taken from underneath, short enough that a
+    /// worker killed mid-publish does not strand the message for long.
+    /// </remarks>
+    private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(1);
+
     /// <summary>Attempts made before a message is abandoned.</summary>
     private const int MaxAttempts = 5;
 
@@ -121,8 +159,27 @@ public sealed class OutboxPublisherWorker : BackgroundService
 
         _logger.LogInformation("Found {Count} outbox messages to publish.", messages.Count);
 
-        foreach (var message in messages)
+        var collection = repository.Collection;
+
+        foreach (var candidate in messages)
         {
+            // Claimed before it is published, not after.
+            //
+            // Two workers previously selected the same row, both published it, and then the loser's
+            // optimistic-concurrency failure was handled by writing the row *again* -- so the message
+            // went out twice and ended up marked processed and scheduled for retry at once. An
+            // at-least-once outbox cannot promise a duplicate is impossible, but it must not make one
+            // the ordinary result of running two replicas.
+            //
+            // The claim is a lease on NextAttemptAt: whoever moves it wins, and everyone else stops
+            // matching. If this worker then dies mid-publish the lease expires and the message is
+            // retried, which is the behaviour that was there before and is worth keeping.
+            var message = await ClaimAsync(collection, candidate.Id, ct);
+            if (message is null)
+            {
+                continue;
+            }
+
             try
             {
                 await dispatcher.DispatchAsync(
@@ -134,10 +191,13 @@ public sealed class OutboxPublisherWorker : BackgroundService
                     ct
                 );
 
-                message.ProcessedAt = DateTime.UtcNow;
-                message.ErrorMessage = null;
-                message.NextAttemptAt = null;
-                await repository.UpdateAsync(message, null, ct);
+                await collection.UpdateOneAsync(
+                    Builders<OutboxMessage>.Filter.Eq(m => m.Id, message.Id),
+                    Builders<OutboxMessage>.Update
+                        .Set(m => m.ProcessedAt, DateTime.UtcNow)
+                        .Set(m => m.ErrorMessage, null)
+                        .Set(m => m.NextAttemptAt, null),
+                    cancellationToken: ct);
 
                 _logger.LogInformation("Successfully published outbox message {Id} of type {Type}.", message.Id, message.EventType);
             }
@@ -152,8 +212,13 @@ public sealed class OutboxPublisherWorker : BackgroundService
                     // the message silently stopped matching the query -- so a broker outage looked
                     // identical to a queue draining normally, and the messages were still sitting in
                     // the collection with nothing marking them as abandoned.
-                    message.DeadLetteredAt = DateTime.UtcNow;
-                    await repository.UpdateAsync(message, null, ct);
+                    await collection.UpdateOneAsync(
+                        Builders<OutboxMessage>.Filter.Eq(m => m.Id, message.Id),
+                        Builders<OutboxMessage>.Update
+                            .Set(m => m.RetryCount, message.RetryCount)
+                            .Set(m => m.ErrorMessage, ex.Message)
+                            .Set(m => m.DeadLetteredAt, DateTime.UtcNow),
+                        cancellationToken: ct);
 
                     _logger.LogCritical(ex,
                         "Outbox message {Id} of type {Type} was abandoned after {Count} failed attempts "
@@ -168,8 +233,18 @@ public sealed class OutboxPublisherWorker : BackgroundService
                 // two seconds apart meant a ten-second outage exhausted the message. The same five
                 // attempts now span minutes, which is the difference between surviving a broker
                 // restart and losing everything queued during one.
+                // Field updates rather than a whole-document replace, and no optimistic concurrency:
+                // the bookkeeping for a failed attempt must not be able to overwrite another worker's
+                // successful mark, which is exactly what replacing the document did.
                 message.NextAttemptAt = DateTime.UtcNow + BackoffFor(message.RetryCount);
-                await repository.UpdateAsync(message, null, ct);
+
+                await collection.UpdateOneAsync(
+                    Builders<OutboxMessage>.Filter.Eq(m => m.Id, message.Id),
+                    Builders<OutboxMessage>.Update
+                        .Set(m => m.RetryCount, message.RetryCount)
+                        .Set(m => m.ErrorMessage, ex.Message)
+                        .Set(m => m.NextAttemptAt, message.NextAttemptAt),
+                    cancellationToken: ct);
 
                 _logger.LogError(ex,
                     "Failed to publish outbox message {Id}. Attempt {Count} of {Max}; next attempt at {NextAttemptAt:O}.",

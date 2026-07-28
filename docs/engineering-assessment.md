@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-886, on a repository whose CI had never passed once.
+891, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 886 C# tests across 13 suites |
+| `Build and test` | 891 C# tests across 13 suites |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -555,6 +555,38 @@ single-word entity agreed by luck and every multi-word one named a topic with no
 manifest declares. The smoke test now goes further and checks the exported specification against the
 **running server** — a claim two components cannot satisfy by agreeing on the same mistake.
 
+### CI runs a replica set, and two things that could not execute now do
+
+MongoDB offers multi-document transactions only on a replica set, and every environment this project
+shipped was a standalone: its own `docker-compose.yml`, and the `mongo:7` service container in three
+CI jobs. So the archival sweep's transactional path could not be selected *anywhere* — the worker
+asks the server, gets no, and takes the copy-verify-delete fallback. Every existing assertion about
+archival was exercising the fallback while reading as though it covered both.
+
+Both are now single-node replica sets, initiated from a health check locally and from a composite
+action in CI. One node is enough; the point is the replica set, not the redundancy. It is a composite
+action rather than three copies of the same steps for the reason this repository keeps relearning.
+
+A test asserts the server under test **is** a replica set, on its own, so that reverting the
+infrastructure fails loudly. Without it every transactional test would still pass via the fallback
+and report the wrong thing.
+
+**The contended outbox was the other thing this unblocked, and it was broken.** Two workers sweeping
+at once both selected the same row, both published it, and then the loser's optimistic-concurrency
+failure was handled by writing the document again — so the message went out twice and ended marked
+*processed and scheduled for retry at once*:
+
+```
+published=2 version=3 retry=1
+```
+
+Two changes. A message is now **claimed before it is published**, by an atomic find-and-update that
+takes a one-minute lease on `NextAttemptAt`; whoever moves it wins and everyone else stops matching.
+And the failure bookkeeping writes fields rather than replacing the document, so a failed attempt can
+no longer overwrite another worker's successful mark. An at-least-once outbox cannot promise a
+duplicate is impossible — a worker killed between publishing and marking will re-send — but it must
+not make one the ordinary result of running two replicas.
+
 ### The outbox under failure, where it did not work
 
 Recorded as "proven for one message, not under failure" for two cycles. Run under failure, it turned
@@ -819,7 +851,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **886 in total**, from 258 at the start:
+Every module has tests. **891 in total**, from 258 at the start:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
@@ -1006,16 +1038,15 @@ adding it would give every generated application a new public endpoint, which is
 rather than a defect fix.
 
 
-**Archival is verified on a standalone server, which is not how it should be deployed.** The
-copy-verify-delete path is what the tests exercise, because that is what the project's own
-infrastructure supports. The transactional path is selected by a server capability check and is
-covered only by inspection — the thing this document says is worth little. Running the suite against
-a replica set would close that.
+**Archival's copy-verify-delete fallback is now the less-exercised path.** Both local and CI MongoDB
+are replica sets, so the transactional branch is what the tests take. The fallback still matters — it
+is what a standalone deployment gets — and nothing now runs it. The two swapped places rather than
+the gap closing.
 
-**The outbox is not proven under concurrent writers.** The retry ceiling, backoff and abandonment are
-now covered, and the sweep publishes oldest-first. What is untested is two workers against one
-collection: they would contend for the same messages, and nothing yet says what happens. A single
-replica is the common deployment and the one that works.
+**A duplicate publish is still possible, by design rather than by accident.** A worker killed between
+publishing and marking the message will re-send it when its lease expires. That is what at-least-once
+means and the reason consumers must be idempotent; the claim removes duplication as the *normal*
+result of running two replicas, not as a possibility.
 
 **Workflow choice nodes cross the manifest boundary but nothing runs one.** They are emitted and the
 behaviour resolves them, but no test and no smoke-test phase drives a decision gate — so this is the
@@ -1054,10 +1085,9 @@ The base rate also argues against treating the empty list as a finish. What it m
 cheapest question — "has this ever run?" — no longer has an obvious target, so the next cycle has to
 ask a more expensive one.
 
-1. **Run the remaining paths that have executed once but never under stress.** Archival's
-   transactional path is selected by a server capability check and covered only by inspection; a
-   replica set in CI would close it, and would also let the outbox be tested with two workers
-   contending. Nothing drives a workflow choice node.
+1. **Drive a workflow choice node.** The last thing emitted, resolved by the behaviour, and never
+   executed. The IR also has nowhere to express a gate's default target, so an unmatched gate is a
+   routing failure rather than a fallback — which is worth settling before something depends on it.
 2. **Make masking a policy rather than one switch.** A caller with `view:pii` sees every masked
    property on every entity; a claims handler who may see a policy number and not a card number
    cannot be expressed. That is exactly the shape ownership had before grants, and the same answer

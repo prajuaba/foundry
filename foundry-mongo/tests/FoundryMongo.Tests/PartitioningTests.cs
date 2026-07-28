@@ -225,4 +225,113 @@ public class PartitioningTests : IDisposable
 
         Assert.Equal(0, remaining);
     }
+
+    // ── The transactional path ──────────────────────────────────────────────
+    //
+    // Selected by asking the server whether it supports transactions, and MongoDB supports them only
+    // on a replica set. Every environment this project shipped -- its own docker-compose and the CI
+    // service container -- was a standalone, so this branch could not be taken anywhere: not
+    // locally, not in CI, not in a test. It was covered by reading it, and the copy-verify-delete
+    // fallback is what every existing assertion above actually exercised.
+    //
+    // These require a replica set and say so rather than skipping, for the same reason the Kafka
+    // tests do: a suite that quietly passes without its subject is worse than no suite.
+
+    /// <summary>True when the connected server can run multi-document transactions.</summary>
+    private async Task<bool> IsReplicaSetAsync()
+    {
+        var hello = await _db.RunCommandAsync<BsonDocument>(new BsonDocument("hello", 1));
+        return hello.Contains("setName") || hello.GetValue("msg", "").AsString == "isdbgrid";
+    }
+
+    private async Task RequireReplicaSetAsync()
+    {
+        if (await IsReplicaSetAsync()) return;
+
+        Assert.Fail(
+            "This test covers the transactional archival path, which MongoDB offers only on a "
+            + "replica set. Start one with 'docker compose up -d mongodb'; the compose file "
+            + "configures rs0 and initiates it from its health check.");
+    }
+
+    [Fact]
+    public async Task TheServerUnderTestIsAReplicaSet()
+    {
+        // Asserted on its own so that "the transactional path is untested" cannot quietly become
+        // true again by someone reverting the infrastructure. Every test below it would still pass
+        // against a standalone -- via the fallback -- and report the wrong thing.
+        await RequireReplicaSetAsync();
+    }
+
+    [Fact]
+    public async Task TheSweepArchivesThroughATransaction()
+    {
+        await RequireReplicaSetAsync();
+
+        var oldId = AgedId(3);
+        await SeedRawAsync(Plural, oldId, "acme", "TX-ARCHIVE");
+
+        var services = new ServiceCollection().BuildServiceProvider();
+        var worker = new DataArchivalWorker(services, _db, NullLogger<DataArchivalWorker>.Instance);
+
+        await worker.RunSweepAsync(CancellationToken.None);
+
+        var archived = await _db.GetCollection<BsonDocument>($"{Plural}_{oldId.CreationTime.Year}")
+            .CountDocumentsAsync(Builders<BsonDocument>.Filter.Eq("_id", oldId));
+        var remaining = await _db.GetCollection<BsonDocument>(Plural)
+            .CountDocumentsAsync(Builders<BsonDocument>.Filter.Eq("_id", oldId));
+
+        Assert.Equal(1, archived);
+        Assert.Equal(0, remaining);
+    }
+
+    [Fact]
+    public async Task ARecordIsNeverInBothCollectionsAfterASweep()
+    {
+        // What the transaction is for. The fallback copies, verifies and then deletes, so a failure
+        // between copy and delete leaves the document in both places until a re-run corrects it; the
+        // transactional path has no such window. Asserted as a property of the outcome rather than
+        // by interrupting the sweep, because a test that has to crash the process to prove something
+        // tends to prove something about the crash.
+        await RequireReplicaSetAsync();
+
+        var ids = new[] { AgedId(3), AgedId(4), AgedId(5) };
+        foreach (var id in ids) await SeedRawAsync(Plural, id, "acme", $"MULTI-{id}");
+
+        var services = new ServiceCollection().BuildServiceProvider();
+        var worker = new DataArchivalWorker(services, _db, NullLogger<DataArchivalWorker>.Instance);
+
+        await worker.RunSweepAsync(CancellationToken.None);
+
+        foreach (var id in ids)
+        {
+            var inArchive = await _db.GetCollection<BsonDocument>($"{Plural}_{id.CreationTime.Year}")
+                .CountDocumentsAsync(Builders<BsonDocument>.Filter.Eq("_id", id));
+            var inActive = await _db.GetCollection<BsonDocument>(Plural)
+                .CountDocumentsAsync(Builders<BsonDocument>.Filter.Eq("_id", id));
+
+            Assert.Equal(1, inArchive);
+            Assert.Equal(0, inActive);
+        }
+    }
+
+    [Fact]
+    public async Task AnArchivedRecordIsStillReadableThroughTheRepository()
+    {
+        // The sweep and the routing are two halves of one claim, and each was previously asserted
+        // against a separately seeded fixture. This drives them end to end: seed hot, sweep, read.
+        await RequireReplicaSetAsync();
+
+        var oldId = AgedId(3);
+        await SeedRawAsync(Plural, oldId, "acme", "ROUND-TRIP");
+
+        var services = new ServiceCollection().BuildServiceProvider();
+        await new DataArchivalWorker(services, _db, NullLogger<DataArchivalWorker>.Instance)
+            .RunSweepAsync(CancellationToken.None);
+
+        var read = await RepoFor("acme").GetByIdAsync(oldId);
+
+        Assert.NotNull(read);
+        Assert.Equal("ROUND-TRIP", read!.Reference);
+    }
 }

@@ -17,21 +17,12 @@ jobs:
     name: Build and test
     runs-on: ubuntu-latest
 
-    services:
-      # FoundryMongo.Tests and the API tests talk to a real MongoDB rather than a
-      # mock, so one is provisioned here instead of letting those tests fail.
-      mongodb:
-        image: mongo:7
-        ports:
-          - 27017:27017
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-
     steps:
       - uses: actions/checkout@v5
+
+      # FoundryMongo.Tests and the API tests talk to a real MongoDB rather than a mock, and it is a
+      # replica set so the transactional archival path can be selected at all.
+      - uses: ./.github/actions/mongodb-replica-set
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
@@ -74,16 +65,6 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      mongodb:
-        image: mongo:7
-        ports:
-          - 27017:27017
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-
       # KRaft, no ZooKeeper, pinned. The repository's own docker-compose.yml was configured for
       # ZooKeeper against `cp-kafka:latest`, which is KRaft-only in current versions and exited on
       # startup -- so `docker compose up -d` produced a broker that was never there and nothing
@@ -116,6 +97,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The outbox stores its messages in MongoDB, so this job needs one as much as the others do.
+      - uses: ./.github/actions/mongodb-replica-set
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
@@ -138,19 +122,11 @@ jobs:
     name: Runtime smoke test
     runs-on: ubuntu-latest
 
-    services:
-      mongodb:
-        image: mongo:7
-        ports:
-          - 27017:27017
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-
     steps:
       - uses: actions/checkout@v5
+
+      # A single-node replica set, so the transactional archival path can be selected at all.
+      - uses: ./.github/actions/mongodb-replica-set
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v5

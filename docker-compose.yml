@@ -2,13 +2,38 @@ version: '3.8'
 
 services:
   # ─── MongoDB Database ────────────────────────────────────────────────
+  # A single-node replica set, not a standalone.
+  #
+  # MongoDB only offers multi-document transactions on a replica set, and the repository uses them:
+  # the archival sweep moves a year of documents between collections and must not half-move them.
+  # Against a standalone that path cannot even be selected -- DataArchivalWorker asks the server
+  # whether it supports transactions and falls back to copy-verify-delete -- so for as long as this
+  # was a standalone, the transactional path could not run anywhere: not locally, not in CI, not in
+  # a test. It was covered by reading it, which this repository has learned is worth very little.
+  #
+  # One node is enough for transactions; the point is the replica set, not the redundancy.
   mongodb:
-    image: mongo:latest
+    image: mongo:7
     container_name: foundry-mongodb
+    command: ["--replSet", "rs0", "--bind_ip_all"]
     ports:
       - "27017:27017"
     volumes:
       - mongodb_data:/data/db
+    healthcheck:
+      # Initiates on the first probe and reports healthy once a PRIMARY has been elected. The member
+      # is addressed as localhost:27017 because the driver reads its host from the replica set
+      # configuration, and the tests connect from the host rather than from the network below.
+      test: >-
+        mongosh --quiet --eval "
+          try { rs.status().ok }
+          catch (e) {
+            rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}).ok
+          }"
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
     networks:
       - foundry-network
 

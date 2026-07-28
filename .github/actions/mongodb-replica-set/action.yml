@@ -1,0 +1,79 @@
+name: MongoDB replica set
+description: >-
+  Starts a single-node MongoDB replica set on localhost:27017 and waits for a PRIMARY.
+
+# Why this is not a `services:` block
+# ----------------------------------
+# A replica set has to be initiated after the server is up, and a service container gives no place
+# to run that step: `options:` are passed to `docker create`, not to the process, so there is no
+# hook between "container started" and "job steps begin". Running the container from a step is the
+# only way to start it and then initiate it.
+#
+# Why a replica set at all
+# ------------------------
+# MongoDB offers multi-document transactions only on a replica set, and the archival sweep uses one
+# to move a year of documents between collections without half-moving them. Against a standalone
+# that path cannot be selected -- DataArchivalWorker asks the server and falls back to
+# copy-verify-delete -- so for as long as CI ran a standalone, the transactional path could not
+# execute in any environment that existed. It was covered by inspection, which this repository has
+# repeatedly found to be worth very little.
+#
+# It is a composite action rather than three copies of the same steps because three copies of one
+# rule is how the route prefix came to be wrong in six places.
+
+inputs:
+  image:
+    description: MongoDB image to run.
+    required: false
+    default: mongo:7
+
+runs:
+  using: composite
+  steps:
+    - name: Start MongoDB as a replica set
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        docker run -d --name foundry-mongodb -p 27017:27017 \
+          "${{ inputs.image }}" --replSet rs0 --bind_ip_all
+
+    - name: Initiate the replica set and wait for a PRIMARY
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # The member is addressed as localhost:27017 because the driver takes the host it connects
+        # to from the replica set configuration, and the tests run on the runner rather than inside
+        # the container network. Configuring it as the container name would make every client
+        # discover a host it cannot resolve -- which presents as a connection timeout rather than as
+        # a configuration error.
+        for attempt in $(seq 1 30); do
+          if docker exec foundry-mongodb mongosh --quiet --eval \
+            "rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]})" >/dev/null 2>&1; then
+            break
+          fi
+
+          # Already initiated is a success, not a retry.
+          if docker exec foundry-mongodb mongosh --quiet --eval "rs.status().ok" 2>/dev/null | grep -q 1; then
+            break
+          fi
+
+          sleep 2
+        done
+
+        # Election takes a moment after initiation, and a write issued before it lands fails with
+        # "not primary". Waiting for the flag rather than sleeping a fixed amount keeps this from
+        # being a race that only shows on a slow runner.
+        for attempt in $(seq 1 30); do
+          if docker exec foundry-mongodb mongosh --quiet --eval \
+            "db.hello().isWritablePrimary" 2>/dev/null | grep -q true; then
+            echo "replica set rs0 has a PRIMARY"
+            exit 0
+          fi
+          sleep 2
+        done
+
+        echo "MongoDB did not elect a PRIMARY within 60s" >&2
+        docker logs foundry-mongodb >&2 || true
+        exit 1

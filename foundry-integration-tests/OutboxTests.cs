@@ -108,21 +108,32 @@ public class OutboxTests
 
         var worker = new OutboxPublisherWorker(serviceProvider, NullLogger<OutboxPublisherWorker>.Instance);
 
-        // Capture update call to verify the message is updated to ProcessedAt
-        OutboxMessage? updatedMessage = null;
-        var replaceResult = Substitute.For<ReplaceOneResult>();
-        replaceResult.MatchedCount.Returns(1);
-        replaceResult.ModifiedCount.Returns(1);
-
-        mockCollection.ReplaceOneAsync(
+        // The worker claims a message before publishing it, so this has to answer the claim. Two
+        // workers previously selected the same row and both published it; the claim is a
+        // find-and-update that only one can win.
+        mockCollection.FindOneAndUpdateAsync(
             Arg.Any<FilterDefinition<OutboxMessage>>(),
-            Arg.Any<OutboxMessage>(),
-            Arg.Any<ReplaceOptions>(),
+            Arg.Any<UpdateDefinition<OutboxMessage>>(),
+            Arg.Any<FindOneAndUpdateOptions<OutboxMessage, OutboxMessage>>(),
             Arg.Any<CancellationToken>()
-        ).Returns(x => 
+        ).Returns(Task.FromResult(outboxMessage));
+
+        // Marking is now a field update rather than a whole-document replace, so that a failed
+        // attempt cannot overwrite another worker's successful mark.
+        UpdateDefinition<OutboxMessage>? appliedUpdate = null;
+        var updateResult = Substitute.For<UpdateResult>();
+        updateResult.MatchedCount.Returns(1);
+        updateResult.ModifiedCount.Returns(1);
+
+        mockCollection.UpdateOneAsync(
+            Arg.Any<FilterDefinition<OutboxMessage>>(),
+            Arg.Any<UpdateDefinition<OutboxMessage>>(),
+            Arg.Any<UpdateOptions>(),
+            Arg.Any<CancellationToken>()
+        ).Returns(x =>
         {
-            updatedMessage = x.ArgAt<OutboxMessage>(1);
-            return Task.FromResult(replaceResult);
+            appliedUpdate = x.ArgAt<UpdateDefinition<OutboxMessage>>(1);
+            return Task.FromResult(updateResult);
         });
 
         // Act
@@ -143,9 +154,16 @@ public class OutboxTests
             Arg.Any<CancellationToken>()
         );
 
-        Assert.NotNull(updatedMessage);
-        Assert.NotNull(updatedMessage.ProcessedAt);
-        Assert.Equal(0, updatedMessage.RetryCount);
+        Assert.NotNull(appliedUpdate);
+
+        var rendered = appliedUpdate!.Render(new MongoDB.Driver.RenderArgs<OutboxMessage>(
+            MongoDB.Bson.Serialization.BsonSerializer.SerializerRegistry.GetSerializer<OutboxMessage>(),
+            MongoDB.Bson.Serialization.BsonSerializer.SerializerRegistry));
+
+        // Marked processed, and nothing else touched: no retry bookkeeping on a successful publish.
+        var set = rendered["$set"].AsBsonDocument;
+        Assert.True(set.Contains("processedAt") || set.Contains("ProcessedAt"));
+        Assert.False(set.Contains("retryCount") || set.Contains("RetryCount"));
     }
 
     [Fact]
