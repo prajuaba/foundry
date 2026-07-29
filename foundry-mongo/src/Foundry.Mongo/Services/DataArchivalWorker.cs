@@ -103,9 +103,11 @@ public sealed class DataArchivalWorker : BackgroundService
 
         if (failures.Count > 0)
         {
+            // Flattened, because a per-year failure arrives here already wrapped: an operator should
+            // read the causes, not unwrap two layers of AggregateException to reach them.
             throw new AggregateException(
                 $"{failures.Count} of {partitionedTypes.Count} partitioned entity types could not be archived.",
-                failures);
+                failures).Flatten();
         }
     }
 
@@ -150,9 +152,34 @@ public sealed class DataArchivalWorker : BackgroundService
 
         var useTransaction = await SupportsTransactionsAsync(cancellationToken);
 
+        // Each year is independent -- a separate archive collection, its own documents -- so one that
+        // cannot be archived must not strand the others, and must still be reported. Without this the
+        // first bad year abandoned every year after it, which is the rule the sweep already applies
+        // across entity types and had not applied within one. Selection filters on _id, so years
+        // arrive oldest first: the abandoned ones were the *newer* years, the likeliest to matter.
+        var failures = new List<Exception>();
+
         foreach (var group in oldDocuments.GroupBy(d => d["_id"].AsObjectId.CreationTime.Year))
         {
-            await ArchiveYearAsync(collection, pluralName, group.Key, group.ToList(), useTransaction, cancellationToken);
+            try
+            {
+                await ArchiveYearAsync(collection, pluralName, group.Key, group.ToList(), useTransaction, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to archive {Name} for {Year}.", entityType.Name, group.Key);
+                failures.Add(ex);
+            }
+        }
+
+        if (failures.Count > 0)
+        {
+            throw new AggregateException(
+                $"{failures.Count} archive year(s) of '{pluralName}' could not be archived.", failures);
         }
     }
 

@@ -37,6 +37,34 @@ services:
     networks:
       - foundry-network
 
+  # ─── MongoDB, standalone ─────────────────────────────────────────────
+  # Deliberately *not* a replica set, and it exists only so the tests have one.
+  #
+  # DataArchivalWorker has two ways to move a year of documents -- one transaction, or
+  # copy-verify-delete -- and it picks by asking the server, so exactly one of the two can execute
+  # in any given deployment. Making the service above a replica set fixed the transactional branch
+  # and in the same stroke made the fallback the unreachable one: the two swapped places rather
+  # than the gap closing.
+  #
+  # The fallback is what stands between an interrupted sweep and permanent data loss, and it is the
+  # branch that runs for every developer who points the framework at a plain mongod. So both shapes
+  # are provided, and both are exercised on every run.
+  mongodb-standalone:
+    image: mongo:7
+    container_name: foundry-mongodb-standalone
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongodb_standalone_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 5s
+    networks:
+      - foundry-network
+
   # ─── Mongo Express (Web UI for MongoDB) ──────────────────────────────
   mongo-express:
     image: mongo-express:latest
@@ -112,4 +140,6 @@ networks:
 
 volumes:
   mongodb_data:
+    driver: local
+  mongodb_standalone_data:
     driver: local

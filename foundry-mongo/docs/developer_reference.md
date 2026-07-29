@@ -286,7 +286,16 @@ IReadOnlyList<BsonDocument> report = await invoiceRepo.AggregateAsync(pipeline);
 ```
 
 ### Data Archival Hosted Worker
-An ambient background worker (`DataArchivalWorker`) periodically sweeps active collections, identifies records older than the threshold, and moves them to their year-specific cold partitions using multi-document transactional migrations.
+An ambient background worker (`DataArchivalWorker`) periodically sweeps active collections, identifies records older than the threshold, and moves them to their year-specific cold partitions. `RunSweepAsync` is public, so a sweep can also be triggered on demand — after a bulk import, or by an operator who does not want to wait a day.
+
+**How a year is moved depends on the server.** MongoDB offers multi-document transactions only on a replica set or a sharded cluster, so the worker asks — via `hello` — rather than attempting one and interpreting the failure:
+
+- **Replica set or sharded cluster**: insert into the archive and delete from the active collection in one transaction. A sweep is atomic.
+- **Standalone**: copy, *verify*, then delete. The documents are inserted into the archive unordered, the archive is counted to confirm every one of them arrived, and only then are they deleted. If the count falls short the sweep raises an error and **leaves the active collection untouched** — nothing is lost, and re-running once the cause is fixed completes the move. A warning is logged on every standalone sweep, because a silent fallback is indistinguishable from a transaction.
+
+Run a replica set in production. The fallback is safe, not equivalent: a crash between its copy and its delete leaves a document in both collections until the next sweep corrects it.
+
+Years are independent. One archive year that cannot be written does not stop the others, and neither does one entity type — but the sweep still ends by throwing, so a partial run is never reported as a clean one.
 
 ---
 

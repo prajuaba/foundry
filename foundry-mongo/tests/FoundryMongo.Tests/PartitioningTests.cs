@@ -234,6 +234,10 @@ public class PartitioningTests : IDisposable
     // locally, not in CI, not in a test. It was covered by reading it, and the copy-verify-delete
     // fallback is what every existing assertion above actually exercised.
     //
+    // Fixing that made the fallback the branch nothing could reach, since a replica set never
+    // selects it. ArchivalFallbackTests covers it from the other side, against a standalone mongod
+    // on 27018; between the two suites both branches run on every CI run.
+    //
     // These require a replica set and say so rather than skipping, for the same reason the Kafka
     // tests do: a suite that quietly passes without its subject is worse than no suite.
 

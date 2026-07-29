@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-906, on a repository whose CI had never passed once.
+922, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 906 C# tests across 13 suites |
+| `Build and test` | 916 C# tests across 12 suites, against a replica set **and** a standalone MongoDB |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -659,6 +659,41 @@ no longer overwrite another worker's successful mark. An at-least-once outbox ca
 duplicate is impossible — a worker killed between publishing and marking will re-send — but it must
 not make one the ordinary result of running two replicas.
 
+### The fallback the replica set made unreachable
+
+Moving to a replica set fixed the transactional archival branch and, in the same stroke, made the
+copy-verify-delete fallback the one that could not run: the worker asks the server whether it
+supports transactions, so **exactly one of the two branches can execute against any given server**.
+The two swapped places rather than the gap closing, and that was recorded here as an open item rather
+than left to be rediscovered.
+
+The fallback is not the lesser path. It is what a developer gets when they point the framework at a
+plain `mongod`, and it is what stands between an interrupted sweep and permanent data loss: insert
+into the archive, confirm every document arrived, delete only then.
+
+CI and `docker-compose.yml` now run a **second MongoDB, deliberately standalone**, on 27018. Both
+branches run on every CI run. It is an ordinary service container rather than a composite action
+because a plain `mongod` needs no post-start command — only the replica set does.
+
+Ten tests drive the fallback, and they are structured so that each of the three steps fails on its
+own rather than being covered incidentally by the happy path. Removing the verification step fails
+three; making the inserts ordered fails one; removing the duplicate-key tolerance that lets an
+interrupted sweep be re-run fails three.
+
+**Running it found a defect the transactional path hides.** A year that cannot be archived aborted
+every year after it in the same entity type — the rule the sweep already applied *across* entity
+types ("one entity that cannot be archived must not silently block the rest") had never been applied
+*within* one. Documents are selected by a filter on `_id`, so years arrive oldest first, which means
+the abandoned years were the **newer** ones: the likeliest to matter, and the ones an operator would
+notice last.
+
+The test that catches this passed at first for the wrong reason. It put the failing year second, and
+index order meant the good year had already been archived before anything threw — an assertion that
+holds whether or not the years are independent, which is the same as not testing it. Reversing the
+ages made it fail, and the fix is per-year failure accumulation matching the per-type accumulation
+above it, flattened at the top so an operator reads causes rather than unwrapping two layers of
+`AggregateException`.
+
 ### The outbox under failure, where it did not work
 
 Recorded as "proven for one message, not under failure" for two cycles. Run under failure, it turned
@@ -923,24 +958,26 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **906 in total**, from 258 at the start:
+Every module has tests. **922 C# tests in total**, from 258 at the start, plus 33 TypeScript in
+Studio. Counts below are read off a solution-wide run rather than carried forward — the figures in
+this table had drifted from the suites they describe, which is the same defect the document is about:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
-| `foundry-schema` | 201 | — |
-| `foundry-rules` | 87 | — |
-| `foundry-integration-tests` | 75 | MongoDB |
+| `foundry-schema` | 242 | — |
+| `foundry-mongo` | 126 | MongoDB, **both** a replica set and a standalone |
+| `foundry-rules` | 92 | — |
+| `foundry-integration-tests` | 90 | MongoDB |
+| `foundry-api` | 75 | MongoDB |
 | `foundry-file-io` | 75 | — |
-| `foundry-mongo` | 70 | MongoDB |
-| `foundry-api` | 54 | MongoDB |
 | `foundry-core` | 52 | — |
-| `foundry-kafka` | 39 | — |
 | `foundry-connectors` | 52 | — |
-| `foundry-studio` | 33 | — |
+| `foundry-kafka` | 39 | — |
+| `foundry-studio` | 33 | — (TypeScript) |
 | `foundry-realtime` | 26 | — |
 | `foundry-testing` | 26 | — |
 | `foundry-cli` | 21 | — |
-| `foundry-kafka-integration` | 5 | MongoDB **and** a Kafka broker |
+| `foundry-kafka-integration` | 6 | MongoDB **and** a Kafka broker |
 
 The suites that need infrastructure **fail rather than skip** without it. That is the house rule, and
 it is why the Kafka suite is split out and excluded from the fast job by an explicit category filter
@@ -1108,10 +1145,12 @@ adding it would give every generated application a new public endpoint, which is
 rather than a defect fix.
 
 
-**Archival's copy-verify-delete fallback is now the less-exercised path.** Both local and CI MongoDB
-are replica sets, so the transactional branch is what the tests take. The fallback still matters — it
-is what a standalone deployment gets — and nothing now runs it. The two swapped places rather than
-the gap closing.
+**An archival sweep loads a whole entity type into memory before moving anything.** Both branches
+share this: `Find(filter).ToListAsync()` reads every document past the threshold, and the
+transactional branch then writes a year of them in one transaction — against MongoDB's 16MB oplog
+entry limit and its 60-second default transaction lifetime. Nothing here has been run at a size where
+that bites, so this is a stated limit rather than a measured one. Batching within a year would fix
+both, and would change the branch that currently works, so it is not a change to make on a hunch.
 
 **A duplicate publish is still possible, by design rather than by accident.** A worker killed between
 publishing and marking the message will re-send it when its lease expires. That is what at-least-once

@@ -17,6 +17,27 @@ jobs:
     name: Build and test
     runs-on: ubuntu-latest
 
+    services:
+      # A second MongoDB, deliberately standalone, on 27018.
+      #
+      # The archival sweep picks between one transaction and copy-verify-delete by asking the server,
+      # and MongoDB offers transactions only on a replica set -- so exactly one of those two branches
+      # can execute against any given server. Running only the replica set below fixed the
+      # transactional branch and made the fallback the unreachable one; the two swapped places rather
+      # than the gap closing. Both servers are provided so both branches run on every CI run.
+      #
+      # A plain mongod needs no post-start command, so it can be an ordinary service container --
+      # unlike the replica set, which needs rs.initiate() and therefore a composite action.
+      mongodb-standalone:
+        image: mongo:7
+        ports:
+          - 27018:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+
     steps:
       - uses: actions/checkout@v5
 

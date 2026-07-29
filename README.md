@@ -46,10 +46,14 @@ graph TD
 
 - **.NET 10 SDK** — `dotnet --version` should report `10.0.x`
 - **Node.js 20+** — required to build the Studio bundle, which the CLI embeds
-- **Docker** — the MongoDB and API test suites talk to a real database, and it must be a
-  **replica set**: MongoDB offers multi-document transactions only on one, and the archival sweep
-  uses them. `docker compose up -d mongodb` configures `rs0` and initiates it from the health check;
-  a standalone `mongod` on 27017 will fail the transactional archival tests rather than skip them.
+- **Docker** — the MongoDB and API test suites talk to a real database, and they need **two** of
+  them, which `docker compose up -d` provides:
+  - a **replica set** on `27017`. MongoDB offers multi-document transactions only on one, and the
+    archival sweep uses them; the compose file configures `rs0` and initiates it from the health
+    check. A standalone here fails the transactional archival tests rather than skipping them.
+  - a **standalone** on `27018`. The same sweep falls back to copy-verify-delete when the server
+    cannot do transactions, and that branch — the one protecting against data loss on the plainest
+    deployment — can only run against a server that has no transactions to offer.
 
 ### 1. Clone and Build
 
@@ -88,10 +92,11 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **906 C# tests passing**: 242 compiler, 116 MongoDB, 92 rules, 90 integration, 75 API,
-75 file-IO, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 21 CLI. Run it this way
-rather than per-project — a solution-wide run exercises project interactions that
-individual runs miss, and it is exactly what CI does.
+Expect **922 C# tests passing**: 242 compiler, 126 MongoDB, 92 rules, 90 integration, 75 API,
+75 file-IO, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 21 CLI, and 6 Kafka
+round-trip against a live broker. Run it this way rather than per-project — a solution-wide run
+exercises project interactions that individual runs miss, and it is what CI does, save for the six
+round-trip tests, which CI runs in a separate job that provisions a broker.
 
 Studio is TypeScript and has its own suite (33 tests):
 
@@ -282,7 +287,11 @@ Foundry includes a pre-configured Docker Compose orchestrator stack:
 docker compose up -d
 ```
 
-- **MongoDB** (`localhost:27017`): Core transactional and event outbox database.
+- **MongoDB** (`localhost:27017`): Core transactional and event outbox database. A single-node
+  replica set — one node is enough for transactions; the point is the replica set, not redundancy.
+- **MongoDB, standalone** (`localhost:27018`): Exists for the tests. The archival sweep's
+  copy-verify-delete fallback is selected only by a server that cannot do transactions, so covering
+  it needs a server that cannot.
 - **Mongo Express** (`localhost:8081`): Web UI console to inspect document collections.
 - **Kafka Broker** (`localhost:9092`): Event streaming messaging platform.
 - **Kafka UI** (`localhost:8080`): Visual console to inspect topic logs and partitions.
