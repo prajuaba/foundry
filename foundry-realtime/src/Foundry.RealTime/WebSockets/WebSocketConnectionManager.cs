@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -14,7 +15,18 @@ namespace Foundry.RealTime.WebSockets;
 /// </summary>
 public class WebSocketConnectionManager
 {
-    private readonly ConcurrentDictionary<string, WebSocket> _sockets = new();
+    /// <summary>
+    /// A live socket and the caller it belongs to.
+    /// </summary>
+    /// <remarks>
+    /// The principal is captured when the socket is accepted. Without it there was nothing to check
+    /// an entity's <c>realTimeRoles</c> against, so every socket received every mutation in the
+    /// system — the firehose that was removed from SignalR for leaking the changed values, left in
+    /// place here because the fix was made to that transport rather than to the rule.
+    /// </remarks>
+    public sealed record Connection(WebSocket Socket, ClaimsPrincipal? User);
+
+    private readonly ConcurrentDictionary<string, Connection> _sockets = new();
     private readonly ILogger<WebSocketConnectionManager> _logger;
 
     public WebSocketConnectionManager(ILogger<WebSocketConnectionManager> logger)
@@ -25,10 +37,10 @@ public class WebSocketConnectionManager
     /// <summary>
     /// Registers a newly accepted WebSocket connection.
     /// </summary>
-    public string AddSocket(WebSocket socket)
+    public string AddSocket(WebSocket socket, ClaimsPrincipal? user = null)
     {
         string id = Guid.NewGuid().ToString("N");
-        _sockets.TryAdd(id, socket);
+        _sockets.TryAdd(id, new Connection(socket, user));
         _logger.LogDebug("WebSocket registered: {Id}", id);
         return id;
     }
@@ -36,15 +48,16 @@ public class WebSocketConnectionManager
     /// <summary>
     /// Gets all active connections.
     /// </summary>
-    public ConcurrentDictionary<string, WebSocket> GetAllSockets() => _sockets;
+    public ConcurrentDictionary<string, Connection> GetAllSockets() => _sockets;
 
     /// <summary>
     /// Safely removes and closes a WebSocket connection.
     /// </summary>
     public async Task RemoveSocketAsync(string id, string reason)
     {
-        if (_sockets.TryRemove(id, out var socket))
+        if (_sockets.TryRemove(id, out var connection))
         {
+            var socket = connection.Socket;
             if (socket.State == WebSocketState.Open || socket.State == WebSocketState.CloseReceived)
             {
                 try
@@ -96,18 +109,43 @@ public class WebSocketConnectionManager
     /// on this transport. The SSE channel already isolated per client; this one did not.
     /// </remarks>
     public async Task BroadcastMessageAsync(object message, CancellationToken ct = default)
+        => await BroadcastMessageAsync(message, entityTypeName: null, ct);
+
+    /// <summary>
+    /// Broadcasts to the sockets whose caller may observe <paramref name="entityTypeName"/>.
+    /// </summary>
+    /// <remarks>
+    /// A null entity means the message is not about one — a handshake frame — and goes to everyone.
+    /// Anything carrying entity data must name it, so <see cref="RealTimeAccessPolicy"/> can decide.
+    /// </remarks>
+    public async Task BroadcastMessageAsync(object message, string? entityTypeName, CancellationToken ct = default)
     {
         var tasks = new List<Task>();
-        foreach (var (id, socket) in _sockets)
+        foreach (var (id, connection) in _sockets)
         {
-            if (socket.State == WebSocketState.Open)
-            {
-                tasks.Add(SendWithCleanupAsync(id, socket, message, ct));
-            }
-            else
+            if (connection.Socket.State != WebSocketState.Open)
             {
                 tasks.Add(RemoveSocketAsync(id, "Socket state no longer open"));
+                continue;
             }
+
+            if (entityTypeName is not null
+                && !RealTimeAccessPolicy.MayObserve(connection.User, entityTypeName, out var reason))
+            {
+                if (RealTimeAccessPolicy.IsKnownEntity(entityTypeName))
+                {
+                    _logger.LogDebug(
+                        "Withheld {Entity} mutation from WebSocket {Id}: {Reason}", entityTypeName, id, reason);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "No real-time delivery for {Entity}: {Reason}", entityTypeName, reason);
+                }
+                continue;
+            }
+
+            tasks.Add(SendWithCleanupAsync(id, connection.Socket, message, ct));
         }
         await Task.WhenAll(tasks);
     }

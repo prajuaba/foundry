@@ -124,7 +124,7 @@ public static class RealTimeServiceCollectionExtensions
         endpoints.MapGet("/realtime/sse", async (HttpContext context, SseNotificationService sseService, CancellationToken ct) =>
         {
             var response = context.Response;
-            var client = sseService.RegisterClient(response);
+            var client = sseService.RegisterClient(response, context.User);
 
             // Keep the connection open indefinitely until client aborts
             try
@@ -155,7 +155,7 @@ public static class RealTimeServiceCollectionExtensions
             if (context.WebSockets.IsWebSocketRequest)
             {
                 using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
-                string id = connectionManager.AddSocket(webSocket);
+                string id = connectionManager.AddSocket(webSocket, context.User);
                 var logger = context.RequestServices.GetRequiredService<ILogger<NotificationHub>>();
 
                 try

@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Foundry.Core.Audit;
@@ -27,7 +28,7 @@ public class SseNotificationService : INotificationService
     /// <summary>
     /// Registers a newly established SSE client connection.
     /// </summary>
-    public SseClient RegisterClient(HttpResponse response)
+    public SseClient RegisterClient(HttpResponse response, ClaimsPrincipal? user = null)
     {
         string id = Guid.NewGuid().ToString("N");
         
@@ -36,7 +37,7 @@ public class SseNotificationService : INotificationService
         response.Headers["Cache-Control"] = "no-cache";
         response.Headers["Connection"] = "keep-alive";
         
-        var client = new SseClient(id, response);
+        var client = new SseClient(id, response, user);
         _clients.TryAdd(id, client);
         _logger.LogDebug("SSE client registered: {Id}", id);
         
@@ -54,11 +55,38 @@ public class SseNotificationService : INotificationService
         }
     }
 
+    /// <summary>
+    /// Sends a mutation to the clients whose caller is allowed to see that entity.
+    /// </summary>
+    /// <remarks>
+    /// This used to send to every connected client unconditionally. SignalR had the same shape and
+    /// it was removed there as a leak — an <c>AuditLogEntry</c> carries the changed values — but the
+    /// fix was applied to the transport rather than to the framework, so this one and the WebSocket
+    /// one kept doing it. <see cref="RealTimeAccessPolicy"/> is now the one place that decides.
+    /// </remarks>
     public async Task SendMutationAsync(AuditLogEntry entry, CancellationToken ct = default)
     {
         var tasks = new List<Task>();
         foreach (var (id, client) in _clients)
         {
+            if (!RealTimeAccessPolicy.MayObserve(client.User, entry.EntityType, out var reason))
+            {
+                if (RealTimeAccessPolicy.IsKnownEntity(entry.EntityType))
+                {
+                    _logger.LogDebug(
+                        "Withheld {Entity} mutation from SSE client {Id}: {Reason}",
+                        entry.EntityType, id, reason);
+                }
+                else
+                {
+                    // Not a denial -- a misconfiguration. Nothing will ever be delivered for this
+                    // entity on any transport, and silence is the only symptom.
+                    _logger.LogWarning(
+                        "No real-time delivery for {Entity}: {Reason}", entry.EntityType, reason);
+                }
+                continue;
+            }
+
             tasks.Add(SendToClientWithFallback(id, client, entry, ct));
         }
 

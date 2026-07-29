@@ -19,8 +19,6 @@ public class NotificationHub : Hub
         _logger = logger;
     }
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Type?> _hubTypeCache = new();
-
     /// <summary>
     /// Reduces an entity type name to the short form used in subscription group names.
     /// </summary>
@@ -31,19 +29,7 @@ public class NotificationHub : Hub
     /// match and entity subscriptions silently received nothing.
     /// </remarks>
     public static string ToSubscriptionName(string entityTypeName)
-    {
-        if (string.IsNullOrWhiteSpace(entityTypeName)) return string.Empty;
-
-        var name = entityTypeName.Split(',')[0].Trim();
-        var lastDot = name.LastIndexOf('.');
-        if (lastDot >= 0 && lastDot < name.Length - 1) name = name.Substring(lastDot + 1);
-
-        // Nested types render as Outer+Inner.
-        var plus = name.LastIndexOf('+');
-        if (plus >= 0 && plus < name.Length - 1) name = name.Substring(plus + 1);
-
-        return name;
-    }
+        => RealTimeAccessPolicy.ToSubscriptionName(entityTypeName);
 
     /// <summary>
     /// Builds the group name for a single record's subscription.
@@ -57,59 +43,23 @@ public class NotificationHub : Hub
     public static string RecordGroupName(string entityName, string recordId)
         => $"record:{ToSubscriptionName(entityName)}:{recordId.Trim()}";
 
+    /// <summary>
+    /// Refuses a subscription the caller's roles do not permit.
+    /// </summary>
+    /// <remarks>
+    /// The decision itself is <see cref="RealTimeAccessPolicy"/>, shared with SSE and WebSocket
+    /// delivery. It used to live here alone, which is exactly why the other two transports did not
+    /// apply it: the rule was a property of this class rather than of the framework.
+    /// </remarks>
     private void ValidateSubscriptionRights(string entityName)
     {
-        var type = _hubTypeCache.GetOrAdd(ToSubscriptionName(entityName), name =>
-        {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                Type[] types;
-                try
-                {
-                    types = assembly.GetTypes();
-                }
-                catch (ReflectionTypeLoadException)
-                {
-                    // One unloadable assembly must not make every subscribe attempt fail.
-                    continue;
-                }
+        if (RealTimeAccessPolicy.MayObserve(Context.User, entityName, out var reason)) return;
 
-                var match = types.FirstOrDefault(t =>
-                    t.Name.Equals(name, StringComparison.OrdinalIgnoreCase)
-                    || t.FullName?.Equals(name, StringComparison.OrdinalIgnoreCase) == true);
+        _logger.LogInformation(
+            "Refused a real-time subscription for {ConnectionId} to {Entity}: {Reason}",
+            Context.ConnectionId, entityName, reason);
 
-                if (match != null) return match;
-            }
-
-            return null;
-        });
-
-        if (type == null)
-        {
-            // Fail closed. An unresolvable name previously came back with no attribute and was
-            // therefore treated as authorised, so a caller naming a type this process cannot see was
-            // granted a subscription whose access rules were unknown.
-            throw new HubException($"Unknown entity '{entityName}'; cannot authorise a subscription to it.");
-        }
-
-        var rtAttr = type.GetCustomAttribute<Foundry.Core.Attributes.RealTimeAttribute>();
-
-        if (rtAttr != null && rtAttr.Roles.Length > 0)
-        {
-            bool isAuthorized = false;
-            foreach (var role in rtAttr.Roles)
-            {
-                if (Context.User?.IsInRole(role) == true)
-                {
-                    isAuthorized = true;
-                    break;
-                }
-            }
-            if (!isAuthorized)
-            {
-                throw new HubException($"Unauthorized to subscribe to real-time events for {entityName}.");
-            }
-        }
+        throw new HubException($"Unauthorized to subscribe to real-time events for {entityName}.");
     }
 
     /// <summary>

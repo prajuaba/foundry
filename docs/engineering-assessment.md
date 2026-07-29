@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-932, on a repository whose CI had never passed once.
+946, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 926 C# tests across 12 suites, against a replica set **and** a standalone MongoDB |
+| `Build and test` | 940 C# tests across 12 suites, against a replica set **and** a standalone MongoDB |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -659,6 +659,33 @@ no longer overwrite another worker's successful mark. An at-least-once outbox ca
 duplicate is impossible — a worker killed between publishing and marking will re-send — but it must
 not make one the ordinary result of running two replicas.
 
+### One rule, three transports, one implementation
+
+`realTimeRoles` says who may watch an entity's events. The framework ships three ways to watch, and
+the rule was implemented in one of them.
+
+`NotificationHub` checked the roles when a client subscribed over SignalR, and SignalR delivery had
+already been narrowed to subscription groups precisely because an unconditional `Clients.All` send
+bypassed that check. **SSE and WebSockets were that same send, still there.** Neither had any notion
+of a subscription; neither recorded who was connected; both handed every mutation in the system to
+every connected client. An `AuditLogEntry` carries `PropertyDiffs` — the before and after values —
+so any authenticated caller could read the contents of every write to every entity, whatever the
+schema demanded, by connecting to one of the other two URLs.
+
+The earlier fix had been applied to the transport rather than to the rule, which is the same shape as
+the six wrong route prefixes and the two Kafka topic namers. So the decision is now one thing,
+`RealTimeAccessPolicy`, and all three transports call it: the hub on subscribe, SSE and WebSockets on
+delivery. Both of those now capture the caller's principal when the connection is accepted — there
+was nothing to check a role against before, because nobody had kept the identity.
+
+It fails closed on a type the process cannot resolve, and says so at warning level rather than debug,
+because that case is a misconfiguration whose only other symptom is silence.
+
+Fifteen tests, nine of which fail if the policy is made permissive. The smoke test proves it against
+a running application in both directions: a caller without the role gets nothing, a caller with it
+gets the event — and the denied client's stream is asserted to have opened at all, since otherwise
+"received nothing" would be indistinguishable from a dead connection.
+
 ### The showcase demonstrated a third of the framework, and compiled none of it
 
 The one artefact that claims to demonstrate Foundry was hand-written C# sitting next to a schema
@@ -1030,7 +1057,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **932 C# tests in total**, from 258 at the start, plus 33 TypeScript in
+Every module has tests. **946 C# tests in total**, from 258 at the start, plus 33 TypeScript in
 Studio. Counts below are read off a solution-wide run rather than carried forward — the figures in
 this table had drifted from the suites they describe, which is the same defect the document is about:
 
@@ -1046,7 +1073,7 @@ this table had drifted from the suites they describe, which is the same defect t
 | `foundry-connectors` | 52 | — |
 | `foundry-kafka` | 39 | — |
 | `foundry-studio` | 33 | — (TypeScript) |
-| `foundry-realtime` | 26 | — |
+| `foundry-realtime` | 40 | — |
 | `foundry-testing` | 26 | — |
 | `foundry-cli` | 24 | — |
 | `foundry-kafka-integration` | 6 | MongoDB **and** a Kafka broker |
@@ -1208,12 +1235,7 @@ its whole surface area. Everything previously named here has now been run, and t
 the first time — which is a milestone about the *list*, not about the surface area, and the base rate
 below is the reason to keep looking rather than to stop.
 
-**Real-time role gating is declared per entity and not visibly enforced.** `enableRealTime` and
-`realTimeRoles` do reach the generated entity as `[RealTime(true, roles)]`, and the generated
-`MapGeneratedRealTimeEndpoints` maps the same global channels for every entity rather than anything
-per-entity. Whether the broker consults the attribute has not been established by running it. Named
-here rather than fixed because the honest next step is to drive it, not to reason about it — which is
-how the rest of this section has been emptied.
+**Nothing else known.** The real-time gating that stood here is fixed; see section 3.
 
 
 **An archival sweep loads a whole entity type into memory before moving anything.** Both branches

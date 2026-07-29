@@ -444,6 +444,8 @@ cat > "$WORK_DIR/tenant-schema.json" <<'SCHEMA'
       "Name": "Invoice",
       "multiTenant": true,
       "enableGraphQL": true,
+      "enableRealTime": true,
+      "realTimeRoles": ["Warehouse"],
       "Properties": [
         { "Name": "Id", "Type": "ObjectId", "IsKey": true },
         { "Name": "TenantId", "Type": "string", "isTenantKey": true },
@@ -1098,6 +1100,60 @@ pass "SSE accepted an authenticated client"
 
 expect_status 200 "POST /realtime/hub/negotiate as an authenticated caller" \
   --max-time 10 -X POST "$BASE/realtime/hub/negotiate?negotiateVersion=1"
+
+# Being let onto the channel is not the same as being allowed to see what comes down it.
+#
+# Invoice declares realTimeRoles: ["Warehouse"]. NotificationHub checked that on subscribe, and SSE
+# and WebSockets had no subscriptions and no idea who was connected -- both handed every mutation to
+# every client. So any authenticated caller could read the PropertyDiffs of every write to every
+# entity by using one of the other two URLs, whatever the schema demanded. These two phases read the
+# stream itself rather than the status code, because the status code was never the problem.
+#
+# The stream is captured in the background for a fixed window, a write is made while it is open, and
+# the capture is searched afterwards. --max-time bounds it, so a failure cannot hang the run.
+observe_sse() {
+  local token="$1" outfile="$2"
+  curl -sS -N --max-time 6 "$BASE/realtime/sse" -H "Authorization: Bearer $token" > "$outfile" 2>/dev/null &
+  echo $!
+}
+
+SSE_DENIED="$WORK_DIR/sse-denied.log"
+SSE_ALLOWED="$WORK_DIR/sse-allowed.log"
+
+log "A caller without the entity's real-time role receives none of its mutations"
+DENIED_PID=$(observe_sse "$(mint_token watcher-nosee Sales acme)" "$SSE_DENIED")
+sleep 1
+authenticate_as "$ACME_ADMIN"
+curl -sS --max-time 10 -X POST "$BASE/api/invoices" \
+  -H 'Content-Type: application/json' "${AUTH[@]}" \
+  -d '{"reference":"RT-WITHHELD","amount":11}' > /dev/null
+sleep 2
+wait "$DENIED_PID" 2>/dev/null || true
+
+# The stream has to have been live, or "received nothing" is just a dead connection. The handshake
+# frame is sent on connect and is not an entity event, so it arrives regardless of the role.
+grep -q "event: connected" "$SSE_DENIED" \
+  || fail "the denied client's SSE stream never opened, so receiving nothing proves nothing: $(cat "$SSE_DENIED")"
+
+grep -q "RT-WITHHELD" "$SSE_DENIED" \
+  && fail "an SSE client lacking the Warehouse role received an Invoice mutation: $(cat "$SSE_DENIED")"
+pass "SSE withheld the mutation from a caller on a live stream without the role"
+
+log "A caller holding the role does receive them"
+ALLOWED_PID=$(observe_sse "$(mint_token watcher-cansee Warehouse acme)" "$SSE_ALLOWED")
+sleep 1
+authenticate_as "$ACME_ADMIN"
+curl -sS --max-time 10 -X POST "$BASE/api/invoices" \
+  -H 'Content-Type: application/json' "${AUTH[@]}" \
+  -d '{"reference":"RT-DELIVERED","amount":12}' > /dev/null
+sleep 2
+wait "$ALLOWED_PID" 2>/dev/null || true
+
+# The control: without it the phase above passes just as well against a channel that has stopped
+# delivering anything to anyone.
+grep -q "Invoice" "$SSE_ALLOWED" \
+  || fail "an SSE client holding the Warehouse role received no Invoice mutation: $(cat "$SSE_ALLOWED")"
+pass "SSE delivered the mutation to a caller holding the role"
 
 # A multi-tenant row with no tenant is invisible to every tenant once isolation is on, and
 # visible to all of them until then. The write is refused rather than silently orphaned.

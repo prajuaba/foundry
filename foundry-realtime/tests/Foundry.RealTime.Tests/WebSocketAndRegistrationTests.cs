@@ -57,8 +57,17 @@ public class WebSocketAndRegistrationTests
     private static WebSocketConnectionManager Manager()
         => new(NullLogger<WebSocketConnectionManager>.Instance);
 
+    /// <summary>An entity this process can resolve, declaring no real-time roles.</summary>
+    /// <remarks>
+    /// It used to name "MyApp.Domain.Thing", a type nothing declares. That was harmless while every
+    /// socket received every message regardless; now that delivery is filtered by the entity's
+    /// declared roles, an unresolvable name fails closed — so the fixture has to name something real
+    /// or it tests the refusal path while claiming to test forwarding.
+    /// </remarks>
+    public sealed record ForwardedThing;
+
     private static AuditLogEntry Entry() =>
-        AuditLogEntry.ForInsert("ada", "MyApp.Domain.Thing", "abc", "Things");
+        AuditLogEntry.ForInsert("ada", typeof(ForwardedThing).FullName!, "abc", "Things");
 
     // ---- bookkeeping ----
 
