@@ -54,7 +54,11 @@ public static class GraphQLConfiguration
                         && typeof(IEntity<ObjectId>).IsAssignableFrom(t));
                 }
 
-                if (entityType != null)
+                // An entity reaches GraphQL only by declaring enableGraphQL. Previously every entity
+                // with a GET was exposed, so `enableGraphQL: false` -- and every entity that never
+                // mentioned GraphQL at all -- was served over it anyway, and the one field in the
+                // schema that decides this reached nothing.
+                if (entityType != null && config.GraphQL)
                 {
                     entities.Add((entityType, config));
                 }
@@ -72,8 +76,8 @@ public static class GraphQLConfiguration
         {
             throw new InvalidOperationException(
                 "GraphQL is mapped but the API manifest exposes no readable entity, so the schema would " +
-                "have no Query type and every request would fail. Declare GET or GET_BY_ID on at least " +
-                "one entity, or do not call MapGraphQL.");
+                "have no Query type and every request would fail. Set enableGraphQL on at least one " +
+                "entity that declares GET or GET_BY_ID, or do not call MapGraphQL.");
         }
 
         var builder = services.AddGraphQLServer()

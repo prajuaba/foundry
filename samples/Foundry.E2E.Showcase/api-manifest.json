@@ -1,0 +1,385 @@
+{
+  "Namespace": "Foundry.E2E.Showcase",
+  "Endpoints": [
+    {
+      "Entity": "Customer",
+      "Route": "/api/customers",
+      "Methods": [
+        "GET",
+        "GET_BY_ID",
+        "POST",
+        "PUT",
+        "DELETE"
+      ],
+      "Roles": {
+        "GET": [
+          "Admin",
+          "Sales"
+        ],
+        "GET_BY_ID": [
+          "Admin",
+          "Sales"
+        ],
+        "POST": [
+          "Admin"
+        ],
+        "PUT": [
+          "Admin"
+        ],
+        "DELETE": [
+          "Admin"
+        ]
+      },
+      "BusinessRules": {},
+      "Caching": {
+        "GET": {
+          "Enabled": true,
+          "TtlSeconds": 60
+        },
+        "GET_BY_ID": {
+          "Enabled": true,
+          "TtlSeconds": 120
+        }
+      },
+      "GraphQL": true
+    },
+    {
+      "Entity": "Product",
+      "Route": "/api/products",
+      "Methods": [
+        "GET",
+        "GET_BY_ID",
+        "POST",
+        "PUT"
+      ],
+      "Roles": {
+        "GET": [
+          "Admin",
+          "Sales",
+          "Warehouse"
+        ],
+        "GET_BY_ID": [
+          "Admin",
+          "Sales",
+          "Warehouse"
+        ],
+        "POST": [
+          "Admin"
+        ],
+        "PUT": [
+          "Admin",
+          "Warehouse"
+        ]
+      },
+      "BusinessRules": {},
+      "Caching": {
+        "GET": {
+          "Enabled": true,
+          "TtlSeconds": 30
+        }
+      },
+      "GraphQL": true
+    },
+    {
+      "Entity": "Order",
+      "Route": "/api/orders",
+      "Methods": [
+        "GET",
+        "GET_BY_ID",
+        "POST",
+        "PUT",
+        "DELETE"
+      ],
+      "Roles": {
+        "GET": [
+          "Admin",
+          "Sales"
+        ],
+        "GET_BY_ID": [
+          "Admin",
+          "Sales",
+          "Customer"
+        ],
+        "POST": [
+          "Admin",
+          "Customer"
+        ],
+        "PUT": [
+          "Admin"
+        ],
+        "DELETE": [
+          "Admin"
+        ]
+      },
+      "BusinessRules": {
+        "POST": [
+          "OrderCreditLimitRule"
+        ]
+      },
+      "Caching": {},
+      "GraphQL": true
+    },
+    {
+      "Entity": "CustomerNote",
+      "Route": "/api/customernotes",
+      "Methods": [
+        "GET",
+        "GET_BY_ID",
+        "POST",
+        "PUT",
+        "DELETE"
+      ],
+      "Roles": {
+        "GET": [
+          "Sales",
+          "Supervisor",
+          "Auditor"
+        ],
+        "GET_BY_ID": [
+          "Sales",
+          "Supervisor",
+          "Auditor"
+        ],
+        "POST": [
+          "Sales"
+        ],
+        "PUT": [
+          "Sales",
+          "Supervisor"
+        ],
+        "DELETE": [
+          "Supervisor"
+        ]
+      },
+      "BusinessRules": {},
+      "Caching": {}
+    },
+    {
+      "Entity": "LedgerEntry",
+      "Route": "/api/ledgerentries",
+      "Methods": [
+        "GET",
+        "GET_BY_ID",
+        "POST"
+      ],
+      "Roles": {
+        "GET": [
+          "Admin",
+          "Auditor"
+        ],
+        "GET_BY_ID": [
+          "Admin",
+          "Auditor"
+        ],
+        "POST": [
+          "Admin"
+        ]
+      },
+      "BusinessRules": {},
+      "Caching": {}
+    }
+  ],
+  "CustomEndpoints": [
+    {
+      "Route": "/api/v1/orders/submit",
+      "Method": "POST",
+      "RequestType": "SubmitOrderCommand",
+      "Roles": [],
+      "BusinessRules": []
+    },
+    {
+      "Route": "/api/v1/orders/{id}/cancel",
+      "Method": "PUT",
+      "RequestType": "CancelOrderCommand",
+      "Roles": [],
+      "BusinessRules": []
+    },
+    {
+      "Route": "/api/v1/products/in-stock",
+      "Method": "GET",
+      "RequestType": "InStockProductsQuery",
+      "Roles": [],
+      "BusinessRules": []
+    },
+    {
+      "Route": "/api/orders/transitions/submitorderforfulfilment",
+      "Method": "POST",
+      "RequestType": "Commands.SubmitOrderForFulfilment",
+      "Roles": [
+        "Customer",
+        "Sales",
+        "Admin"
+      ],
+      "BusinessRules": []
+    },
+    {
+      "Route": "/api/orders/transitions/approvereviewedorder",
+      "Method": "POST",
+      "RequestType": "Commands.ApproveReviewedOrder",
+      "Roles": [
+        "Admin"
+      ],
+      "BusinessRules": []
+    },
+    {
+      "Route": "/api/orders/transitions/shiporder",
+      "Method": "POST",
+      "RequestType": "Commands.ShipOrder",
+      "Roles": [
+        "Warehouse",
+        "Admin"
+      ],
+      "BusinessRules": []
+    },
+    {
+      "Route": "/api/orders/transitions/cancelreviewedorder",
+      "Method": "POST",
+      "RequestType": "Commands.CancelReviewedOrder",
+      "Roles": [
+        "Admin"
+      ],
+      "BusinessRules": []
+    }
+  ],
+  "Workflows": [
+    {
+      "Id": "order-fulfilment",
+      "Name": "Order Fulfilment",
+      "Entity": "Order",
+      "Version": "2.0.0",
+      "EffectiveDate": "2026-01-01T00:00:00Z",
+      "ExpirationDate": "2030-01-01T00:00:00Z",
+      "IsActive": true,
+      "States": [
+        {
+          "Name": "Pending",
+          "IsInitial": true,
+          "IsFinal": false,
+          "AllowedRoles": [
+            "Customer",
+            "Sales",
+            "Admin"
+          ]
+        },
+        {
+          "Name": "Review",
+          "IsInitial": false,
+          "IsFinal": false,
+          "AllowedRoles": [
+            "Sales",
+            "Admin"
+          ]
+        },
+        {
+          "Name": "Approved",
+          "IsInitial": false,
+          "IsFinal": false,
+          "AllowedRoles": [
+            "Admin"
+          ]
+        },
+        {
+          "Name": "Shipped",
+          "IsInitial": false,
+          "IsFinal": true,
+          "AllowedRoles": [
+            "Warehouse",
+            "Admin"
+          ]
+        },
+        {
+          "Name": "Cancelled",
+          "IsInitial": false,
+          "IsFinal": true,
+          "AllowedRoles": [
+            "Admin"
+          ]
+        }
+      ],
+      "Transitions": [
+        {
+          "Id": "submit",
+          "Name": "Submit for fulfilment",
+          "FromState": "Pending",
+          "ToState": "value-gate",
+          "Trigger": "SubmitOrderForFulfilment",
+          "RequiredRoles": [
+            "Customer",
+            "Sales",
+            "Admin"
+          ],
+          "Conditions": [
+            {
+              "Property": "TotalAmount",
+              "Operator": "GreaterThan",
+              "Value": "0"
+            }
+          ]
+        },
+        {
+          "Id": "approve-after-review",
+          "Name": "Approve after review",
+          "FromState": "Review",
+          "ToState": "Approved",
+          "Trigger": "ApproveReviewedOrder",
+          "RequiredRoles": [
+            "Admin"
+          ],
+          "Conditions": []
+        },
+        {
+          "Id": "ship",
+          "Name": "Ship the order",
+          "FromState": "Approved",
+          "ToState": "Shipped",
+          "Trigger": "ShipOrder",
+          "RequiredRoles": [
+            "Warehouse",
+            "Admin"
+          ],
+          "Conditions": []
+        },
+        {
+          "Id": "cancel",
+          "Name": "Cancel the order",
+          "FromState": "Review",
+          "ToState": "Cancelled",
+          "Trigger": "CancelReviewedOrder",
+          "RequiredRoles": [
+            "Admin"
+          ],
+          "Conditions": []
+        }
+      ],
+      "ChoiceNodes": [
+        {
+          "Id": "value-gate",
+          "Name": "ValueGate",
+          "DefaultState": "Approved",
+          "Branches": [
+            {
+              "ToState": "Review",
+              "Conditions": [
+                {
+                  "Property": "TotalAmount",
+                  "Operator": "GreaterThan",
+                  "Value": "10000"
+                }
+              ]
+            },
+            {
+              "ToState": "Cancelled",
+              "Conditions": [
+                {
+                  "Property": "PaymentCardNumber",
+                  "Operator": "Equals",
+                  "Value": ""
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,157 +1,140 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
+using System.Text;
 using MediatR;
 using MongoDB.Bson;
 using Microsoft.Extensions.DependencyInjection;
-using Foundry.Mongo.Repositories;
 using Foundry.Core.Paging;
-using Foundry.Core.Search;
-using Foundry.E2E.Showcase.Entities;
-using Foundry.E2E.Showcase.Commands;
+using Foundry.Mongo.Repositories;
+using Foundry.Rules;
 using Foundry.E2E.Showcase.Services;
-using Foundry.E2E.Showcase.Rules;
 
-namespace Foundry.E2E.Showcase.Runner
+namespace Foundry.E2E.Showcase.Runner;
+
+/// <summary>
+/// Drives the showcase domain from inside the process, with <c>--run-e2e</c>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Every type this touches — the entities, the commands, the file services, the workflow
+/// definitions — was written by the schema compiler from <c>e2e-schema.ir.json</c>. That is the
+/// claim being demonstrated: not that these features exist, but that a schema produces them.
+/// </para>
+/// <para>
+/// This runs the layers a HTTP request cannot reach on its own (the rules engine directly, the
+/// repository's paging and soft delete). The REST surface, GraphQL, real-time and the workflow
+/// endpoints are exercised by serving, which is what the application does by default.
+/// </para>
+/// </remarks>
+public class E2EShowcaseRunner
 {
-    public class E2EShowcaseRunner
+    private readonly IServiceProvider _serviceProvider;
+
+    public E2EShowcaseRunner(IServiceProvider serviceProvider) => _serviceProvider = serviceProvider;
+
+    public async Task RunFullScenarioAsync()
     {
-        private readonly IServiceProvider _serviceProvider;
+        Console.WriteLine();
+        Console.WriteLine("FOUNDRY E2E SHOWCASE — every type below was generated from e2e-schema.ir.json");
+        Console.WriteLine(new string('-', 79));
 
-        public E2EShowcaseRunner(IServiceProvider serviceProvider)
+        using var scope = _serviceProvider.CreateScope();
+        var sp = scope.ServiceProvider;
+
+        var customers = sp.GetRequiredService<IRepository<Customer>>();
+        var products = sp.GetRequiredService<IRepository<Product>>();
+        var orders = sp.GetRequiredService<IRepository<Order>>();
+        var notes = sp.GetRequiredService<IRepository<CustomerNote>>();
+        var mediator = sp.GetRequiredService<IMediator>();
+        var productFiles = sp.GetRequiredService<ProductFileService>();
+        var rules = sp.GetRequiredService<IBusinessRuleEngine>();
+
+        // Customer and LedgerEntry are multi-tenant, and the data layer refuses to write a row that
+        // would belong to no tenant. Over HTTP the tenant comes from the caller's token or the
+        // X-Tenant-ID header via TenantContextMiddleware; there is no request here, so it is set
+        // explicitly. The refusal is the framework working, not an obstacle to route around.
+        sp.GetRequiredService<Foundry.Core.Tenant.ITenantContext>().SetTenantId("showcase-tenant");
+
+        // 1. Encryption and masking, both declared per property in the schema.
+        var customer = new Customer
         {
-            _serviceProvider = serviceProvider;
+            Id = ObjectId.GenerateNewId(),
+            Email = "john.doe@enterprise-foundry.io",
+            FullName = "John Doe",
+            PhoneNumber = "+44 7700 900123",
+            CreditLimit = 50_000m,
+            Tier = CustomerTier.Gold
+        };
+        await customers.InsertAsync(customer);
+        Step("Customer stored", $"{customer.FullName} — Email encrypted (AES-256 envelope), "
+            + "PhoneNumber masked under the 'contact' category");
+
+        // 2. FileIO, from `enableFileIO` plus its allowed extensions.
+        var csv = "Sku,Name,Description,UnitPrice,StockQuantity\n"
+                + "PROD-001,Foundry Enterprise Suite,Everything included,1499.99,100\n"
+                + "PROD-002,Foundry Analytics Engine,Reporting and dashboards,899.50,50\n"
+                + "PROD-003,Foundry Cloud Gateway,Ingress and routing,499.00,0\n";
+
+        using var csvStream = new MemoryStream(Encoding.UTF8.GetBytes(csv));
+        var imported = await productFiles.ImportAllAsync(csvStream, "catalog.csv");
+        foreach (var product in imported)
+        {
+            await products.InsertAsync(product with { Id = ObjectId.GenerateNewId() });
         }
+        Step("Catalog imported", $"{imported.Count} products through the generated ProductFileService");
 
-        public async Task RunFullScenarioAsync()
+        // 3. The rules engine, on the request the custom endpoint is typed against.
+        var submit = new SubmitOrderCommand
         {
-            Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine(@"
-╔═══════════════════════════════════════════════════════════════════════════════════╗
-║                      🏛️ FOUNDRY FRAMEWORK E2E SHOWCASE                            ║
-║    Demonstrating Core, Mongo (KMS/OCC), FileIO, Rules, Api & RealTime Layers     ║
-╚═══════════════════════════════════════════════════════════════════════════════════╝
-");
-            Console.ResetColor();
+            CustomerId = customer.Id.ToString(),
+            OrderNumber = $"ORD-{DateTime.UtcNow:yyyyMMddHHmmss}",
+            TotalAmount = 2_399.49m,
+            PaymentCardNumber = "4111111111111111"
+        };
 
-            using var scope = _serviceProvider.CreateScope();
-            var customerRepo = scope.ServiceProvider.GetRequiredService<IRepository<Customer>>();
-            var productRepo = scope.ServiceProvider.GetRequiredService<IRepository<Product>>();
-            var orderRepo = scope.ServiceProvider.GetRequiredService<IRepository<Order>>();
-            var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
-            var fileService = scope.ServiceProvider.GetRequiredService<CatalogFileService>();
-            var rulesService = scope.ServiceProvider.GetRequiredService<OrderBusinessRulesService>();
+        await mediator.Send(submit);
+        Step("Order submitted", $"{submit.OrderNumber} via the generated handler and SubmitOrderRule");
 
-            // -------------------------------------------------------------------------
-            // STEP 1: Foundry.Mongo - KMS Encrypted Customer Creation
-            // -------------------------------------------------------------------------
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("[STEP 1] Testing Foundry.Mongo KMS Envelope Encryption & Repositories...");
-            Console.ResetColor();
+        var results = await rules.EvaluateAsync(submit with { TotalAmount = 0m }, CancellationToken.None);
+        var refusal = results.FirstOrDefault(r => !r.IsPassed);
+        Step("Rule refused a bad order", refusal is null
+            ? "NOTHING — the rule passed an order with a zero total, which it must not"
+            : refusal.ErrorMessage ?? "(no message)");
 
-            var customer = new Customer
+        // 4. Owner-scoped data. There is no authenticated caller in this process, and the data
+        //    layer refuses to write a row that would belong to nobody and be unreachable. That
+        //    refusal is the feature, so the showcase demonstrates it rather than working around it.
+        try
+        {
+            await notes.InsertAsync(new CustomerNote
             {
                 Id = ObjectId.GenerateNewId(),
-                Email = "john.doe@enterprise-foundry.io",
-                FullName = "John Doe",
-                CreditLimit = 50000m,
-                Tier = CustomerTier.Gold
-            };
-
-            await customerRepo.InsertAsync(customer);
-            Console.WriteLine($"  ✓ Created Customer: {customer.FullName} (ID: {customer.Id})");
-            Console.WriteLine($"  ✓ Email Field Encrypted via AES-256 KMS Envelope Encryption!");
-
-            // -------------------------------------------------------------------------
-            // STEP 2: Foundry.FileIO - Product Catalog Import from CSV
-            // -------------------------------------------------------------------------
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("\n[STEP 2] Testing Foundry.FileIO CSV Parsing & Path Sanitation...");
-            Console.ResetColor();
-
-            var sampleCsv = "Sku,Name,UnitPrice,StockQuantity\n" +
-                            "PROD-001,Foundry Enterprise Suite,1499.99,100\n" +
-                            "PROD-002,Foundry Analytics Engine,899.50,50\n" +
-                            "PROD-003,Foundry Cloud Gateway,499.00,200\n";
-
-            var products = await fileService.ImportProductsFromCsvAsync(System.Text.Encoding.UTF8.GetBytes(sampleCsv));
-            foreach (var p in products)
-            {
-                await productRepo.InsertAsync(p);
-                Console.WriteLine($"  ✓ Imported & Saved Product: {p.Sku} - {p.Name} (${p.UnitPrice})");
-            }
-
-            // -------------------------------------------------------------------------
-            // STEP 3: Foundry.Rules & MediatR Pipeline Commands
-            // -------------------------------------------------------------------------
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("\n[STEP 3] Testing Foundry.Rules Dynamic Business Rules & MediatR Command...");
-            Console.ResetColor();
-
-            var command = new SubmitOrderCommand
-            {
-                CustomerId = customer.Id.ToString(),
-                TotalAmount = 2399.49m,
-                OrderNumber = "ORD-2026-001"
-            };
-
-            var orderResult = await mediator.Send(command);
-            Console.WriteLine($"  ✓ Submitted Order via MediatR: {orderResult.OrderNumber}");
-            Console.WriteLine($"  ✓ Order Approved! Status: {orderResult.Status}, Amount: ${orderResult.TotalAmount}");
-
-            // Testing business rule failure (zero total amount)
-            Console.WriteLine("  * Testing Rule Violation (Zero Total Amount)...");
-            try
-            {
-                await rulesService.ValidateOrderCommandAsync(new SubmitOrderCommand
-                {
-                    CustomerId = customer.Id.ToString(),
-                    TotalAmount = 0m,
-                    OrderNumber = "INVALID-001"
-                });
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"  ✓ Business Rules Engine correctly threw: {ex.Message}");
-            }
-
-            // -------------------------------------------------------------------------
-            // STEP 4: Foundry.FileIO - Export Orders Report to CSV
-            // -------------------------------------------------------------------------
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("\n[STEP 4] Testing Foundry.FileIO CsvExporter for Domain Reporting...");
-            Console.ResetColor();
-
-            var allOrders = await orderRepo.FindManyAsync(x => x.CustomerId == customer.Id);
-            var exportFilePath = await fileService.ExportOrdersToCsvAsync(allOrders, "orders_export.csv");
-            Console.WriteLine($"  ✓ Exported {allOrders.Count} orders to: {exportFilePath}");
-            Console.WriteLine($"  ✓ File Content Preview:\n{File.ReadAllText(exportFilePath)}");
-
-            // -------------------------------------------------------------------------
-            // STEP 5: Foundry.Mongo - Pagination & Soft Delete Verification
-            // -------------------------------------------------------------------------
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine("[STEP 5] Testing Foundry.Mongo Offset/Cursor Pagination & Soft Delete...");
-            Console.ResetColor();
-
-            var pagedResult = await orderRepo.GetPagedAsync(
-                new PagedRequest { PageNumber = 1, PageSize = 10 },
-                filter: x => x.Status == OrderStatus.Approved
-            );
-
-            Console.WriteLine($"  ✓ Paginated Query returned {pagedResult.Items.Count} items (Total: {pagedResult.TotalRecords}).");
-
-            // Soft delete test
-            var testOrder = allOrders.First();
-            await orderRepo.UpdateByObjectIdAsync(testOrder.Id, o => o with { IsDeleted = true, DeletedAt = DateTime.UtcNow }, "system");
-            var activeOrders = await orderRepo.FindManyAsync(x => x.Id == testOrder.Id && !x.IsDeleted);
-            Console.WriteLine($"  ✓ Soft-Deleted Order {testOrder.Id}. Active query count: {activeOrders.Count}");
-
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("\n🎉 ALL FOUNDRY FRAMEWORK E2E TESTS PASSED SUCCESSFULLY! 🎉\n");
-            Console.ResetColor();
+                OwnerId = "sales-agent-1",
+                SharedWith = ["sales-agent-2"],
+                Body = "Prefers phone contact after 4pm."
+            });
+            Step("Owner-scoped write", "ACCEPTED — which it must not be without a caller");
         }
+        catch (InvalidOperationException ex)
+        {
+            Step("Owner-scoped write refused", ex.Message.Split('.')[0] + ".");
+        }
+
+        // 5. Paging and soft delete, from `softDelete` on the entity.
+        var page = await orders.GetPagedAsync(new PagedRequest { PageNumber = 1, PageSize = 10 });
+        Step("Paged orders", $"{page.Items.Count} of {page.TotalRecords}");
+
+        var first = page.Items.FirstOrDefault();
+        if (first is not null)
+        {
+            await orders.DeleteAsync(first.Id);
+            var remaining = await orders.FindManyAsync(x => x.Id == first.Id);
+            Step("Soft delete", $"{remaining.Count} row(s) still visible for {first.OrderNumber}");
+        }
+
+        Console.WriteLine(new string('-', 79));
+        Console.WriteLine("Showcase complete. Run without --run-e2e to serve REST, GraphQL and real-time.");
+        Console.WriteLine();
     }
+
+    private static void Step(string what, string detail)
+        => Console.WriteLine($"  {what,-26} {detail}");
 }

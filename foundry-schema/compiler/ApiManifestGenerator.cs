@@ -65,6 +65,10 @@ namespace Foundry.Schema.Compiler
                 AddBusinessRules(endpoint, entity.ApiBusinessRules, methods);
                 AddCaching(endpoint, entity.ApiCaching, methods);
 
+                // Emitted only when opted in, so an existing manifest without the key keeps its
+                // meaning; the runtime treats a missing key as false, which is the declaration.
+                if (entity.GraphQlEnabled) endpoint["GraphQL"] = true;
+
                 endpoints.Add(endpoint);
             }
 

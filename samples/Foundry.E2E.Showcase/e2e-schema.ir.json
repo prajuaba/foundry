@@ -1,6 +1,6 @@
 {
   "namespace": "Foundry.E2E.Showcase",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "enums": [
     {
       "name": "CustomerTier",
@@ -19,6 +19,14 @@
         "Shipped",
         "Cancelled"
       ]
+    },
+    {
+      "name": "ShipmentMethod",
+      "values": [
+        "Standard",
+        "Express",
+        "Freight"
+      ]
     }
   ],
   "entities": [
@@ -26,11 +34,55 @@
       "name": "Customer",
       "softDelete": true,
       "auditable": true,
+      "multiTenant": true,
+      "tenantProperty": "TenantId",
+      "enableGraphQL": true,
+      "apiEnabledMethods": [
+        "GET",
+        "GET_BY_ID",
+        "POST",
+        "PUT",
+        "DELETE"
+      ],
+      "apiRoles": {
+        "GET": [
+          "Admin",
+          "Sales"
+        ],
+        "GET_BY_ID": [
+          "Admin",
+          "Sales"
+        ],
+        "POST": [
+          "Admin"
+        ],
+        "PUT": [
+          "Admin"
+        ],
+        "DELETE": [
+          "Admin"
+        ]
+      },
+      "apiCaching": {
+        "GET": {
+          "enabled": true,
+          "ttlSeconds": 60
+        },
+        "GET_BY_ID": {
+          "enabled": true,
+          "ttlSeconds": 120
+        }
+      },
       "properties": [
         {
           "name": "Id",
           "type": "ObjectId",
           "isKey": true
+        },
+        {
+          "name": "TenantId",
+          "type": "string",
+          "isTenantKey": true
         },
         {
           "name": "Email",
@@ -46,12 +98,25 @@
           "name": "FullName",
           "type": "string",
           "attributes": [
-            "Required"
+            "Required",
+            "MaxLength(120)"
+          ]
+        },
+        {
+          "name": "PhoneNumber",
+          "type": "string",
+          "sensitiveCategory": "contact",
+          "attributes": [
+            "Mask",
+            "Phone"
           ]
         },
         {
           "name": "CreditLimit",
-          "type": "decimal"
+          "type": "decimal",
+          "attributes": [
+            "Range(0, 1000000)"
+          ]
         },
         {
           "name": "Tier",
@@ -61,6 +126,7 @@
       ],
       "indexes": [
         {
+          "name": "ux_customer_email",
           "fields": [
             "Email"
           ],
@@ -71,6 +137,48 @@
     {
       "name": "Product",
       "softDelete": true,
+      "enableGraphQL": true,
+      "enableRealTime": true,
+      "realTimeRoles": [
+        "Admin",
+        "Warehouse"
+      ],
+      "enableFileIO": true,
+      "fileIOAllowedExtensions": [
+        ".csv",
+        ".xlsx"
+      ],
+      "apiEnabledMethods": [
+        "GET",
+        "GET_BY_ID",
+        "POST",
+        "PUT"
+      ],
+      "apiRoles": {
+        "GET": [
+          "Admin",
+          "Sales",
+          "Warehouse"
+        ],
+        "GET_BY_ID": [
+          "Admin",
+          "Sales",
+          "Warehouse"
+        ],
+        "POST": [
+          "Admin"
+        ],
+        "PUT": [
+          "Admin",
+          "Warehouse"
+        ]
+      },
+      "apiCaching": {
+        "GET": {
+          "enabled": true,
+          "ttlSeconds": 30
+        }
+      },
       "properties": [
         {
           "name": "Id",
@@ -91,6 +199,14 @@
           "attributes": [
             "Required",
             "TextIndex"
+          ]
+        },
+        {
+          "name": "Description",
+          "type": "string",
+          "attributes": [
+            "TextIndex",
+            "MaxLength(2000)"
           ]
         },
         {
@@ -115,8 +231,42 @@
       "name": "Order",
       "softDelete": true,
       "auditable": true,
+      "enableGraphQL": true,
       "enableKafkaOutbox": true,
       "kafkaTopic": "order-events",
+      "apiEnabledMethods": [
+        "GET",
+        "GET_BY_ID",
+        "POST",
+        "PUT",
+        "DELETE"
+      ],
+      "apiRoles": {
+        "GET": [
+          "Admin",
+          "Sales"
+        ],
+        "GET_BY_ID": [
+          "Admin",
+          "Sales",
+          "Customer"
+        ],
+        "POST": [
+          "Admin",
+          "Customer"
+        ],
+        "PUT": [
+          "Admin"
+        ],
+        "DELETE": [
+          "Admin"
+        ]
+      },
+      "apiBusinessRules": {
+        "POST": [
+          "OrderCreditLimitRule"
+        ]
+      },
       "properties": [
         {
           "name": "Id",
@@ -143,12 +293,26 @@
           "type": "decimal"
         },
         {
+          "name": "PaymentCardNumber",
+          "type": "string",
+          "sensitiveCategory": "financial",
+          "attributes": [
+            "Mask",
+            "PiiCreditCard"
+          ]
+        },
+        {
           "name": "Status",
           "type": "OrderStatus",
           "isEnum": true,
           "attributes": [
             "Indexed"
           ]
+        },
+        {
+          "name": "Shipment",
+          "type": "ShipmentMethod",
+          "isEnum": true
         },
         {
           "name": "OrderDate",
@@ -160,18 +324,14 @@
       ],
       "indexes": [
         {
+          "name": "ix_order_customer_date",
           "fields": [
             "CustomerId",
             "OrderDate"
           ],
           "unique": false
         }
-      ],
-      "apiBusinessRules": {
-        "POST": [
-          "OrderCreditLimitRule"
-        ]
-      }
+      ]
     },
     {
       "name": "CustomerNote",
@@ -184,6 +344,35 @@
       "ownerReadExemptRoles": [
         "Auditor"
       ],
+      "apiEnabledMethods": [
+        "GET",
+        "GET_BY_ID",
+        "POST",
+        "PUT",
+        "DELETE"
+      ],
+      "apiRoles": {
+        "GET": [
+          "Sales",
+          "Supervisor",
+          "Auditor"
+        ],
+        "GET_BY_ID": [
+          "Sales",
+          "Supervisor",
+          "Auditor"
+        ],
+        "POST": [
+          "Sales"
+        ],
+        "PUT": [
+          "Sales",
+          "Supervisor"
+        ],
+        "DELETE": [
+          "Supervisor"
+        ]
+      },
       "properties": [
         {
           "name": "Id",
@@ -204,7 +393,109 @@
           "name": "Body",
           "type": "string",
           "attributes": [
+            "Required",
+            "MaxLength(4000)"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "LedgerEntry",
+      "baseClass": "IShowcaseArchivable",
+      "auditable": true,
+      "multiTenant": true,
+      "tenantProperty": "TenantId",
+      "partitioned": true,
+      "archiveThresholdYears": 2,
+      "apiEnabledMethods": [
+        "GET",
+        "GET_BY_ID",
+        "POST"
+      ],
+      "apiRoles": {
+        "GET": [
+          "Admin",
+          "Auditor"
+        ],
+        "GET_BY_ID": [
+          "Admin",
+          "Auditor"
+        ],
+        "POST": [
+          "Admin"
+        ]
+      },
+      "properties": [
+        {
+          "name": "Id",
+          "type": "ObjectId",
+          "isKey": true
+        },
+        {
+          "name": "TenantId",
+          "type": "string",
+          "isTenantKey": true
+        },
+        {
+          "name": "Reference",
+          "type": "string",
+          "attributes": [
+            "Required",
+            "Indexed"
+          ]
+        },
+        {
+          "name": "Amount",
+          "type": "decimal"
+        },
+        {
+          "name": "PostedAt",
+          "type": "DateTime",
+          "attributes": [
+            "Indexed"
+          ]
+        }
+      ]
+    }
+  ],
+  "dtos": [
+    {
+      "name": "OrderSummary",
+      "enableKafkaOutbox": true,
+      "kafkaTopic": "order-summaries",
+      "enableFileIO": true,
+      "fileIOAllowedExtensions": [
+        ".csv"
+      ],
+      "properties": [
+        {
+          "name": "OrderNumber",
+          "type": "string",
+          "sourceEntity": "Order",
+          "sourceProperty": "OrderNumber",
+          "isRequired": true,
+          "attributes": [
             "Required"
+          ]
+        },
+        {
+          "name": "TotalAmount",
+          "type": "decimal",
+          "sourceEntity": "Order",
+          "sourceProperty": "TotalAmount"
+        },
+        {
+          "name": "Status",
+          "type": "OrderStatus",
+          "isEnum": true,
+          "sourceEntity": "Order",
+          "sourceProperty": "Status"
+        },
+        {
+          "name": "CustomerEmail",
+          "type": "string",
+          "attributes": [
+            "Email"
           ]
         }
       ]
@@ -224,8 +515,221 @@
       "businessRules": [
         "SubmitOrderRule"
       ]
+    },
+    {
+      "route": "/api/v1/orders/{id}/cancel",
+      "method": "PUT",
+      "operationType": "Update",
+      "targetEntity": "Order",
+      "requestType": "CancelOrderCommand",
+      "roles": [
+        "Admin",
+        "Sales"
+      ],
+      "assignments": [
+        {
+          "entityProperty": "Status",
+          "sourceValue": "NewStatus"
+        }
+      ]
+    },
+    {
+      "route": "/api/v1/products/in-stock",
+      "method": "GET",
+      "operationType": "Query",
+      "targetEntity": "Product",
+      "requestType": "InStockProductsQuery",
+      "roles": [
+        "Admin",
+        "Sales",
+        "Warehouse"
+      ],
+      "filterField": "StockQuantity",
+      "filterOperator": "GreaterThan",
+      "filterSourceValue": "MinimumStock"
     }
   ],
-  "dtos": [],
-  "workflows": []
+  "workflows": [
+    {
+      "id": "order-fulfilment",
+      "name": "Order Fulfilment",
+      "entity": "Order",
+      "version": "2.0.0",
+      "effectiveDate": "2026-01-01T00:00:00Z",
+      "expirationDate": "2030-01-01T00:00:00Z",
+      "isActive": true,
+      "states": [
+        {
+          "name": "Pending",
+          "isInitial": true,
+          "allowedRoles": [
+            "Customer",
+            "Sales",
+            "Admin"
+          ]
+        },
+        {
+          "name": "Review",
+          "allowedRoles": [
+            "Sales",
+            "Admin"
+          ]
+        },
+        {
+          "name": "Approved",
+          "allowedRoles": [
+            "Admin"
+          ]
+        },
+        {
+          "name": "Shipped",
+          "isFinal": true,
+          "allowedRoles": [
+            "Warehouse",
+            "Admin"
+          ]
+        },
+        {
+          "name": "Cancelled",
+          "isFinal": true,
+          "allowedRoles": [
+            "Admin"
+          ]
+        }
+      ],
+      "choiceNodes": [
+        {
+          "id": "value-gate",
+          "name": "ValueGate",
+          "defaultState": "Approved",
+          "branches": [
+            {
+              "id": "high-value",
+              "condition": {
+                "type": "Property",
+                "property": "TotalAmount",
+                "operator": "GreaterThan",
+                "value": "10000"
+              },
+              "targetState": "Review"
+            },
+            {
+              "id": "no-payment-method",
+              "condition": {
+                "type": "Property",
+                "property": "PaymentCardNumber",
+                "operator": "Equals",
+                "value": ""
+              },
+              "targetState": "Cancelled"
+            }
+          ]
+        }
+      ],
+      "transitions": [
+        {
+          "id": "submit",
+          "name": "Submit for fulfilment",
+          "fromState": "Pending",
+          "toState": "value-gate",
+          "trigger": "SubmitOrderForFulfilment",
+          "requiredRoles": [
+            "Customer",
+            "Sales",
+            "Admin"
+          ],
+          "conditions": [
+            {
+              "type": "Property",
+              "property": "TotalAmount",
+              "operator": "GreaterThan",
+              "value": "0"
+            }
+          ]
+        },
+        {
+          "id": "approve-after-review",
+          "name": "Approve after review",
+          "fromState": "Review",
+          "toState": "Approved",
+          "trigger": "ApproveReviewedOrder",
+          "requiredRoles": [
+            "Admin"
+          ],
+          "actions": [
+            {
+              "type": "Webhook",
+              "method": "POST",
+              "url": "https://hooks.internal.example/order-approved",
+              "headers": {
+                "X-Source": "foundry-showcase"
+              },
+              "bodyTemplate": "{\"orderNumber\":\"{{OrderNumber}}\",\"amount\":\"{{TotalAmount}}\"}"
+            }
+          ]
+        },
+        {
+          "id": "ship",
+          "name": "Ship the order",
+          "fromState": "Approved",
+          "toState": "Shipped",
+          "trigger": "ShipOrder",
+          "requiredRoles": [
+            "Warehouse",
+            "Admin"
+          ],
+          "actions": [
+            {
+              "type": "Command",
+              "requestType": "OrderSummary",
+              "payloadTemplate": "{\"orderNumber\":\"{{OrderNumber}}\"}"
+            }
+          ]
+        },
+        {
+          "id": "cancel",
+          "name": "Cancel the order",
+          "fromState": "Review",
+          "toState": "Cancelled",
+          "trigger": "CancelReviewedOrder",
+          "useCustomCommand": true,
+          "requiredRoles": [
+            "Admin"
+          ]
+        }
+      ]
+    }
+  ],
+  "connectors": [
+    {
+      "name": "PaymentGateway",
+      "type": "REST",
+      "baseUrl": "https://payments.example.com",
+      "authType": "Bearer",
+      "token": "${PAYMENT_GATEWAY_TOKEN}",
+      "timeoutSeconds": 15,
+      "maxRetries": 3
+    },
+    {
+      "name": "LegacyInventory",
+      "type": "SOAP",
+      "baseUrl": "https://legacy.example.com/inventory.asmx",
+      "authType": "Basic",
+      "username": "showcase",
+      "password": "${LEGACY_INVENTORY_PASSWORD}",
+      "soapAction": "http://legacy.example.com/CheckStock",
+      "timeoutSeconds": 30,
+      "maxRetries": 2
+    },
+    {
+      "name": "PartnerCatalog",
+      "type": "GraphQL",
+      "baseUrl": "https://partners.example.com/graphql",
+      "authType": "ApiKey",
+      "apiKey": "${PARTNER_CATALOG_KEY}",
+      "apiKeyHeaderName": "X-Partner-Key",
+      "timeoutSeconds": 20,
+      "maxRetries": 1
+    }
+  ]
 }

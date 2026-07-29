@@ -171,6 +171,64 @@ public class CliContractTests : IDisposable
     }
 
     [Fact]
+    public async Task SchemaBuild_WritesTheApiManifest()
+    {
+        // Without this file the application has no REST surface at all: the routes are emitted by an
+        // analyser that reads api-manifest.json, and with none it emits empty registrations and every
+        // entity route answers 404. It used to be written only by `foundry new`, so compiling a
+        // schema into an existing project -- the documented way to do exactly that -- produced
+        // entities, handlers and rules, and an API that did not exist.
+        var schema = WriteSchema("valid.ir.json", ValidSchema);
+        var output = Path.Combine(_workspace, "generated");
+
+        var result = await Cli.RunAsync(_workspace, "schema", "build", "--input", schema, "--output", output);
+
+        Assert.Equal(0, result.ExitCode);
+
+        var manifest = Path.Combine(output, "api-manifest.json");
+        Assert.True(File.Exists(manifest), $"no api-manifest.json in {output}");
+
+        using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(manifest));
+        var endpoints = doc.RootElement.GetProperty("Endpoints");
+        Assert.Equal(1, endpoints.GetArrayLength());
+        Assert.Equal("Customer", endpoints[0].GetProperty("Entity").GetString());
+    }
+
+    [Fact]
+    public async Task SchemaBuild_HonoursAnExplicitManifestPath()
+    {
+        // `foundry new` puts the manifest at the project root while the code goes to Generated/, and
+        // it does so through this flag rather than through a second implementation of its own.
+        var schema = WriteSchema("valid.ir.json", ValidSchema);
+        var output = Path.Combine(_workspace, "generated");
+        var manifest = Path.Combine(_workspace, "root", "api-manifest.json");
+
+        var result = await Cli.RunAsync(_workspace, "schema", "build",
+            "--input", schema, "--output", output, "--manifest", manifest);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.True(File.Exists(manifest));
+        Assert.False(File.Exists(Path.Combine(output, "api-manifest.json")));
+    }
+
+    [Fact]
+    public async Task SchemaBuild_OnASchemaWithErrors_WritesNoManifest()
+    {
+        // The manifest is written after the code, and a failed compile must leave neither. A stale
+        // manifest beside no entities is worse than nothing: it describes routes for types that were
+        // never emitted.
+        var schema = WriteSchema("broken.ir.json", """
+        { "namespace": "Test.Domain", "entities": [ { "name": "Customer", "properties": [] } ] }
+        """);
+        var output = Path.Combine(_workspace, "generated");
+
+        var result = await Cli.RunAsync(_workspace, "schema", "build", "--input", schema, "--output", output);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.False(File.Exists(Path.Combine(output, "api-manifest.json")));
+    }
+
+    [Fact]
     public async Task AnUnknownCommand_ExitsNonZero()
     {
         var result = await Cli.RunAsync(_workspace, "frobnicate");

@@ -92,8 +92,8 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **922 C# tests passing**: 242 compiler, 126 MongoDB, 92 rules, 90 integration, 75 API,
-75 file-IO, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 21 CLI, and 6 Kafka
+Expect **932 C# tests passing**: 247 compiler, 126 MongoDB, 92 rules, 90 integration, 77 API,
+75 file-IO, 52 core, 52 connectors, 39 Kafka, 26 real-time, 26 testing, 24 CLI, and 6 Kafka
 round-trip against a live broker. Run it this way rather than per-project — a solution-wide run
 exercises project interactions that individual runs miss, and it is what CI does, save for the six
 round-trip tests, which CI runs in a separate job that provisions a broker.
@@ -115,6 +115,39 @@ by agreeing on the same mistake. It needs MongoDB on `localhost:27017`:
 ```bash
 ./scripts/runtime-smoke-test.sh
 ```
+
+### The showcase: the whole IR in one application
+
+`samples/Foundry.E2E.Showcase` is a complete Foundry application whose schema uses **every one of
+the 100 fields the IR declares** — entities, enums, DTOs, connectors, workflows with a decision gate,
+multi-tenancy, row ownership and grants, hot/cold partitioning, Kafka outbox, real-time channels,
+file IO, response caching, per-method roles, masking categories and custom endpoints.
+
+Everything under `Generated/` is written by the compiler from `e2e-schema.ir.json`. What is written
+by hand is only what a schema cannot state: the business logic inside the scaffolds, one marker
+interface, one hand-written workflow command, and the host.
+
+`appsettings.Development.json` carries a signing key and the host derives an encryption key, both
+labelled `DEVELOPMENT-ONLY` and both present so `dotnet run` works from a clean clone. Neither is a
+secret and neither is loaded outside the Development environment; a real deployment supplies both
+from a secret store.
+
+```bash
+docker compose up -d
+dotnet run --project samples/Foundry.E2E.Showcase          # serves REST, GraphQL and real-time
+dotnet run --project samples/Foundry.E2E.Showcase -- --run-e2e   # drives the domain in-process
+```
+
+To change it, edit the schema and recompile — never the generated files:
+
+```bash
+dotnet foundry.dll schema build -i samples/Foundry.E2E.Showcase/e2e-schema.ir.json -o samples/Foundry.E2E.Showcase/Generated --manifest samples/Foundry.E2E.Showcase/api-manifest.json
+```
+
+Two gates keep it honest, and both are in the ordinary test run: one fails when the IR grows a
+construct the showcase does not exercise, the other when the committed output stops matching the
+schema it came from. Scaffolds are exempt from the second by design — they hold hand-written logic
+and the compiler never overwrites them.
 
 The transactional outbox is proven separately, against a real broker. These tests **fail rather
 than skip** without one, so they are excluded from the solution-wide run by category and have

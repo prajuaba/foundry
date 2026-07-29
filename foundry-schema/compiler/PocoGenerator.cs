@@ -69,6 +69,10 @@ namespace Foundry.Schema.Compiler
             // Paths whose contents are the developer's, not the compiler's.
             scaffoldPaths = new HashSet<string>(StringComparer.Ordinal);
 
+            // (rule class name, the request type it validates), collected as the stubs are emitted
+            // so the registrations below cannot disagree with them.
+            var ruleRegistrations = new List<(string Rule, string Request)>();
+
             // Generate enums
             if (schema.Enums != null)
             {
@@ -110,12 +114,12 @@ namespace Foundry.Schema.Compiler
                     // The request type the handler and its rules are typed against. Without this
                     // the emitted handler referenced a type nothing declared, so a generated
                     // project failed to build with CS0246 on every custom endpoint.
-                    result[$"Commands/{ep.RequestType}"] = GenerateCustomEndpointRequest(ep, schema.Namespace);
+                    result[$"Commands/{ep.RequestType}"] = GenerateCustomEndpointRequest(ep, schema.Namespace, schema);
 
                     // The custom-endpoint handler body is a starting point the developer
                     // completes, so it is a scaffold rather than compiler output.
                     var handlerPath = $"Handlers/{ep.RequestType}Handler";
-                    result[handlerPath] = GenerateHandler(ep, schema.Namespace);
+                    result[handlerPath] = GenerateHandler(ep, schema.Namespace, schema);
                     scaffoldPaths.Add(handlerPath);
 
                     if (ep.BusinessRules != null)
@@ -126,6 +130,7 @@ namespace Foundry.Schema.Compiler
                             var rulePath = $"Rules/{rule}";
                             result[rulePath] = GenerateCustomEndpointRuleStub(rule, ep.RequestType, schema.Namespace);
                             scaffoldPaths.Add(rulePath);
+                            ruleRegistrations.Add((rule, $"{schema.Namespace}.{ep.RequestType}"));
                         }
                     }
                 }
@@ -148,9 +153,45 @@ namespace Foundry.Schema.Compiler
                             var rulePath = $"Rules/{rule}";
                             result[rulePath] = GenerateEntityRuleStub(rule, method, entity.Name, schema.Namespace);
                             scaffoldPaths.Add(rulePath);
+                            ruleRegistrations.Add((rule, EntityRuleRequestType(method, entity.Name, schema.Namespace)));
                         }
                     }
                 }
+            }
+
+            // Registrations for every rule the schema named.
+            //
+            // The stubs above are classes and nothing bound them to the container, so a rule a
+            // schema declared was compiled into the application and never ran: AddFoundryRules
+            // registers the engine, not the rules, and BusinessRuleBehavior resolves
+            // IBusinessRule<TRequest> from DI. Both apiBusinessRules and a custom endpoint's
+            // businessRules were therefore inert in every generated application -- declared,
+            // emitted, enforced by nothing.
+            if (ruleRegistrations.Count > 0)
+            {
+                var lines = string.Join("\n", ruleRegistrations
+                    .OrderBy(r => r.Rule, StringComparer.Ordinal)
+                    .Select(r => $"        services.AddTransient<IBusinessRule<{r.Request}>, {schema.Namespace}.Rules.{r.Rule}>();"));
+
+                result["Rules/RuleRegistrations"] = $@"using Microsoft.Extensions.DependencyInjection;
+using Foundry.Rules;
+using Foundry.Api.MediatR;
+using {schema.Namespace};
+
+namespace {schema.Namespace}.Rules;
+
+/// <summary>
+/// Binds every business rule this schema declared to the request it validates.
+/// </summary>
+public static class RuleRegistrations
+{{
+    public static IServiceCollection AddGeneratedBusinessRules(this IServiceCollection services)
+    {{
+{lines}
+        return services;
+    }}
+}}
+";
             }
 
             // Generate Workflow Transition Trigger Commands & Handlers
@@ -165,7 +206,20 @@ namespace Foundry.Schema.Compiler
                     foreach (var trans in wf.Transitions)
                     {
                         if (string.IsNullOrEmpty(trans.Trigger)) continue;
-                        
+
+                        // `useCustomCommand` means the application supplies this transition's
+                        // command and handler itself, so the compiler emits neither.
+                        //
+                        // The flag was read by nothing: it was written into the generated workflow
+                        // definition, the engine never consulted it, and the command and handler
+                        // were emitted regardless -- so a schema asking to write its own got the
+                        // generated pair anyway, and the only way to notice was to look. The
+                        // workflow definition still names the trigger, so the engine matches the
+                        // hand-written command by name exactly as it matches a generated one; if
+                        // nobody writes it, the build fails on the missing type, which is the
+                        // loudest and earliest place that can be reported.
+                        if (trans.UseCustomCommand) continue;
+
                         var cmdCode = GenerateTransitionCommand(trans, boundEntity, schema.Namespace);
                         result[$"Commands/{trans.Trigger}"] = cmdCode;
 
@@ -231,46 +285,20 @@ public static class KafkaRegistrations
 ";
             }
 
-            // --- Work Item 1.2: GraphQL Query & Mutation Registrations ---
-            if (schema.Entities != null)
-            {
-                var gqlEntities = schema.Entities.Where(e => e.GraphQlEnabled).ToList();
-                if (gqlEntities.Any())
-                {
-                    var queries = string.Join("\n\n    ", gqlEntities.Select(e => $@"    [UseFiltering] [UseSorting]
-    public IQueryable<{e.Name}> Get{e.Name}s([Service] IRepository<{e.Name}> repo)
-        => repo.AsQueryable();"));
-
-                    var mutations = string.Join("\n\n    ", gqlEntities.Select(e => $@"    public async Task<{e.Name}> Create{e.Name}([Service] IRepository<{e.Name}> repo, {e.Name} input)
-    {{
-        await repo.AddAsync(input);
-        return input;
-    }}"));
-
-                    result["GraphQL/GraphQLRegistration"] = $@"using System.Linq;
-using System.Threading.Tasks;
-using HotChocolate;
-using HotChocolate.Data;
-using HotChocolate.Types;
-using Foundry.Mongo.Repositories;
-using {schema.Namespace};
-
-namespace {schema.Namespace}.GraphQL;
-
-[ExtendObjectType(""Query"")]
-public class GeneratedQueries
-{{
-{queries}
-}}
-
-[ExtendObjectType(""Mutation"")]
-public class GeneratedMutations
-{{
-{mutations}
-}}
-";
-                }
-            }
+            // GraphQL is deliberately not emitted here.
+            //
+            // This used to write a GraphQL/GraphQLRegistration.cs holding [ExtendObjectType] query
+            // and mutation classes -- a second, independent implementation of a surface
+            // Foundry.Api already builds from the same api-manifest.json this compiler writes. It
+            // was never compiled by anything, and it did not compile: it called repo.AsQueryable()
+            // and repo.AddAsync(), neither of which exists on IRepository<T>. So every schema that
+            // set enableGraphQL produced a project that could not build.
+            //
+            // It also enforced no roles, while the manifest-driven surface runs every field through
+            // GraphQLAccessGuard. Repairing it would have left two implementations of one rule --
+            // the mistake this repository has paid for more than any other -- so the rival is gone
+            // and enableGraphQL now travels in the manifest instead, where the code that runs reads
+            // it. See ApiManifestGenerator and GraphQLConfiguration.AddDynamicGraphQL.
 
             // --- Work Item 1.3: FileIO Services (Entities & Composite DTOs) ---
             var fileTargets = (schema.Entities ?? new List<Entity>())
@@ -289,28 +317,36 @@ public class GeneratedMutations
                     ? target.AllowedExtensions.Select(e => e.StartsWith(".") ? e.ToLowerInvariant() : $".{e.ToLowerInvariant()}").ToList()
                     : new List<string> { ".csv", ".xlsx", ".xls" };
 
-                // Build switch arms from allowed extensions
+                // Build switch arms from allowed extensions.
+                //
+                // One quote, not two. These fragments are *interpolated into* the verbatim template
+                // below, and interpolation inserts a value as-is -- it does not re-process verbatim
+                // escapes. Written as `""` they reached the generated file as `""`, so every
+                // extension literal emitted as an empty string followed by a bare `.csv`, and the
+                // file did not parse. Any schema setting enableFileIO produced a project that could
+                // not build.
                 var switchArms = new List<string>();
                 if (allowedExts.Contains(".csv"))
-                    switchArms.Add($"            \"\".csv\"\" => await _csvParser.ParseAsync(fileStream),");
+                    switchArms.Add("            \".csv\" => _csvParser.ParseAsync(fileStream, ct),");
                 if (allowedExts.Contains(".xlsx") || allowedExts.Contains(".xls"))
                 {
                     var excelExts = new List<string>();
-                    if (allowedExts.Contains(".xlsx")) excelExts.Add("\"\".xlsx\"\"");
-                    if (allowedExts.Contains(".xls")) excelExts.Add("\"\".xls\"\"");
-                    switchArms.Add($"            {string.Join(" or ", excelExts)} => await _excelParser.ParseAsync(fileStream),");
+                    if (allowedExts.Contains(".xlsx")) excelExts.Add("\".xlsx\"");
+                    if (allowedExts.Contains(".xls")) excelExts.Add("\".xls\"");
+                    switchArms.Add($"            {string.Join(" or ", excelExts)} => _excelParser.ParseAsync(fileStream, ct),");
                 }
                 if (allowedExts.Contains(".json"))
-                    switchArms.Add($"            \"\".json\"\" => throw new NotSupportedException(\"\"JSON import requires JsonDataParser (see Foundry.FileIO)\"\"),");
+                    switchArms.Add("            \".json\" => throw new NotSupportedException(\"JSON import requires JsonDataParser (see Foundry.FileIO)\"),");
                 if (allowedExts.Contains(".xml"))
-                    switchArms.Add($"            \"\".xml\"\" => throw new NotSupportedException(\"\"XML import requires XmlDataParser (see Foundry.FileIO)\"\"),");
+                    switchArms.Add("            \".xml\" => throw new NotSupportedException(\"XML import requires XmlDataParser (see Foundry.FileIO)\"),");
 
-                var allowedExtsList = string.Join(", ", allowedExts.Select(e => $"\"\"{e}\"\""));
+                var allowedExtsList = string.Join(", ", allowedExts.Select(e => $"\"{e}\""));
                 var switchBody = string.Join("\n", switchArms);
 
                 result[$"Services/{target.Name}FileService"] = $@"using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using Foundry.FileIO;
 using {schema.Namespace};
@@ -332,7 +368,9 @@ public class {target.Name}FileService
     private readonly ExcelDataParser<{target.Name}> _excelParser = new();
     private readonly CsvDataExporter<{target.Name}> _csvExporter = new();
 
-    public async Task<IEnumerable<{target.Name}>> ImportAsync(Stream fileStream, string fileName)
+    /// <summary>Streams rows out of a file, without holding the whole file in memory.</summary>
+    public IAsyncEnumerable<{target.Name}> ImportAsync(
+        Stream fileStream, string fileName, CancellationToken ct = default)
     {{
         var ext = Path.GetExtension(fileName).ToLowerInvariant();
         if (!AllowedExtensions.Contains(ext))
@@ -345,10 +383,21 @@ public class {target.Name}FileService
         }};
     }}
 
-    public async Task ExportToCsvAsync(IEnumerable<{target.Name}> items, Stream outputStream)
+    /// <summary>Reads the whole file into a list, for callers that want it in one piece.</summary>
+    public async Task<IReadOnlyList<{target.Name}>> ImportAllAsync(
+        Stream fileStream, string fileName, CancellationToken ct = default)
     {{
-        await _csvExporter.ExportAsync(items, outputStream);
+        var items = new List<{target.Name}>();
+        await foreach (var item in ImportAsync(fileStream, fileName, ct).WithCancellation(ct))
+        {{
+            items.Add(item);
+        }}
+        return items;
     }}
+
+    public Task ExportToCsvAsync(
+        IAsyncEnumerable<{target.Name}> items, Stream outputStream, CancellationToken ct = default)
+        => _csvExporter.ExportAsync(items, outputStream, ct);
 }}
 ";
             }
@@ -565,8 +614,13 @@ public static partial class IndexVerification
             // --- Work Item 1.5: RealTime Endpoint Mapping ---
             if (schema.Entities != null && schema.Entities.Any(e => e.RealTime))
             {
+                // MapFoundryRealTime lives in Microsoft.Extensions.DependencyInjection, and that
+                // namespace is an implicit using only in a Web SDK project. Relying on it meant the
+                // file compiled inside a scaffolded application and not inside a plain library --
+                // so the same generated code was valid or invalid according to the consumer's SDK.
                 result["RealTime/RealTimeConfiguration"] = $@"using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using Foundry.RealTime;
 
 namespace {schema.Namespace}.RealTime;
@@ -608,11 +662,22 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
             if (keyType.Equals("ObjectId", StringComparison.OrdinalIgnoreCase))
                 keyType = "ObjectId";
 
-            var interfaces = new List<string>();
+            // BaseEntity<TKey> always comes first, and baseClass is listed after it rather than
+            // instead of it.
+            //
+            // Substituting it -- which is what "leave unset to derive from BaseEntity<TKey>" used to
+            // mean literally -- produced an entity with no Id, no CreatedAtUtc, and no
+            // IEntity<ObjectId>. Every generic in the framework is constrained on that interface, so
+            // an entity naming a baseClass took the repository, the endpoint generator, the index
+            // verifier and the workflow engine out with it, all reported as CS0311 on generated code
+            // the developer never wrote. The field could not be used correctly by anyone.
+            //
+            // What it is actually good for is naming an application interface the entity should
+            // carry, so application code can talk about a set of entities the schema does not
+            // otherwise group. That composes; replacing the base class does not.
+            var interfaces = new List<string> { "BaseEntity<" + keyType + ">" };
             if (!string.IsNullOrEmpty(entity.BaseClass))
-                interfaces.Add(entity.BaseClass);
-            else
-                interfaces.Add("BaseEntity<" + keyType + ">");
+                interfaces.Add(entity.BaseClass!);
 
             interfaces.Add("IVersionable");
             if (entity.SoftDelete)
@@ -1054,6 +1119,70 @@ public partial record {CodeGen.Ident(dto.Name, "DTO name")}
         }
 
         /// <summary>
+        /// The request property an Update endpoint reads its row by.
+        /// </summary>
+        private static string IdentifierPropertyFor(CustomEndpoint ep)
+            => string.IsNullOrWhiteSpace(ep.FilterSourceValue) ? "Id" : ep.FilterSourceValue!;
+
+        /// <summary>
+        /// The C# type of <paramref name="propertyName"/> on <paramref name="entityName"/>.
+        /// </summary>
+        /// <remarks>
+        /// Falls back to <c>string</c> when the entity or property cannot be resolved, which is the
+        /// shape everything used unconditionally before. The validator rejects a filter or
+        /// assignment naming a property that does not exist, so the fallback is for schemas that
+        /// declare no target at all rather than for ones that name the wrong thing.
+        /// </remarks>
+        private static string TypeOfEntityProperty(SchemaModel schema, string? entityName, string? propertyName)
+        {
+            if (string.IsNullOrWhiteSpace(entityName) || string.IsNullOrWhiteSpace(propertyName)) return "string";
+
+            var entity = schema.Entities?.FirstOrDefault(
+                e => e.Name.Equals(entityName, StringComparison.OrdinalIgnoreCase));
+
+            var property = entity?.Properties?.FirstOrDefault(
+                p => p.Name.Equals(propertyName, StringComparison.OrdinalIgnoreCase));
+
+            if (property == null) return "string";
+
+            // An enum property's type is the enum's own name, which is emitted in this namespace.
+            return property.IsEnum ? property.Type : MapType(property.Type);
+        }
+
+        /// <summary>
+        /// Renders one comparison for a Query endpoint's declared filter.
+        /// </summary>
+        /// <remarks>
+        /// <c>filterOperator</c> was read by nothing: every Query endpoint emitted
+        /// <c>x.Field.ToString() == request.Value</c>, so a schema declaring <c>GreaterThan</c> got
+        /// an equality test and the endpoint answered with the wrong rows rather than failing. That
+        /// is the quietest way a generator can be wrong, and the reason the operator is now a
+        /// closed set: an unrecognised one stops the compile instead of silently becoming equality.
+        /// </remarks>
+        private static string ComparisonFor(CustomEndpoint ep)
+        {
+            var field = string.IsNullOrWhiteSpace(ep.FilterField) ? "Id" : ep.FilterField!;
+            var value = $"request.{IdentifierPropertyFor(ep)}";
+            var op = (ep.FilterOperator ?? "Equals").Trim();
+
+            return op.ToUpperInvariant() switch
+            {
+                "" or "EQUALS" or "EQ" or "==" => $"x.{field} == {value}",
+                "NOTEQUALS" or "NEQ" or "!=" => $"x.{field} != {value}",
+                "GREATERTHAN" or "GT" or ">" => $"x.{field} > {value}",
+                "GREATERTHANOREQUAL" or "GTE" or ">=" => $"x.{field} >= {value}",
+                "LESSTHAN" or "LT" or "<" => $"x.{field} < {value}",
+                "LESSTHANOREQUAL" or "LTE" or "<=" => $"x.{field} <= {value}",
+                "CONTAINS" => $"x.{field}.Contains({value})",
+                "STARTSWITH" => $"x.{field}.StartsWith({value})",
+                _ => throw new UnsafeSchemaValueException(
+                    DiagnosticCatalog.InvalidIdentifier,
+                    $"filter operator '{op}' is not one of Equals, NotEquals, GreaterThan, "
+                    + "GreaterThanOrEqual, LessThan, LessThanOrEqual, Contains or StartsWith.")
+            };
+        }
+
+        /// <summary>
         /// Computes the MediatR response type for a custom endpoint.
         /// </summary>
         private static string ResponseTypeFor(CustomEndpoint ep)
@@ -1068,7 +1197,7 @@ public partial record {CodeGen.Ident(dto.Name, "DTO name")}
         /// Properties are derived from what the generated handler actually reads — the filter
         /// source value and any assignment sources — so the scaffolded body compiles as written.
         /// </remarks>
-        private static string GenerateCustomEndpointRequest(CustomEndpoint ep, string @namespace)
+        private static string GenerateCustomEndpointRequest(CustomEndpoint ep, string @namespace, SchemaModel schema)
         {
             var properties = new List<string>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -1080,11 +1209,24 @@ public partial record {CodeGen.Ident(dto.Name, "DTO name")}
                                + (type == "string" ? " = string.Empty;" : ""));
             }
 
+            // An Update reads the row before it writes it, and the identifier it reads by has to be
+            // on the request. The handler emitted `request.Id` whether or not anything declared it,
+            // so an Update endpoint that named no filterSourceValue produced a handler referring to
+            // a property the request did not have -- CS1061, on a project the CLI called
+            // ready-to-run. The identifier is now declared wherever the handler will read it.
+            if (ep.OperationType.Equals("Update", StringComparison.OrdinalIgnoreCase))
+                Add(IdentifierPropertyFor(ep), "string");
+
+            // Typed from the property each one is compared or assigned to, rather than string.
+            // `Status = request.NewStatus` does not compile when Status is an enum and the request
+            // field is a string, and `x.StockQuantity.ToString() == request.MinimumStock` compiles
+            // but compares the wrong things -- so the two shapes failed in the two different ways a
+            // generator can fail, loudly and silently.
             if (!string.IsNullOrWhiteSpace(ep.FilterSourceValue))
-                Add(ep.FilterSourceValue, "string");
+                Add(ep.FilterSourceValue, TypeOfEntityProperty(schema, ep.TargetEntity, ep.FilterField));
 
             foreach (var assignment in ep.Assignments ?? new List<AssignmentRule>())
-                Add(assignment.SourceValue, "string");
+                Add(assignment.SourceValue, TypeOfEntityProperty(schema, ep.TargetEntity, assignment.EntityProperty));
 
             var body = properties.Count == 0
                 ? "\n    // Add request properties here, or in a *.Custom.cs partial.\n"
@@ -1103,7 +1245,7 @@ public partial record {CodeGen.Ident(ep.RequestType, "Request type")} : IRequest
 ";
         }
 
-        private static string GenerateHandler(CustomEndpoint ep, string @namespace)
+        private static string GenerateHandler(CustomEndpoint ep, string @namespace, SchemaModel schema)
         {
             var handlerName = ep.RequestType + "Handler";
 
@@ -1122,7 +1264,7 @@ public partial record {CodeGen.Ident(ep.RequestType, "Request type")} : IRequest
             if (ep.OperationType.Equals("Query", StringComparison.OrdinalIgnoreCase))
             {
                 body = $@"        var items = await _repository.FindManyAsync(
-            x => x.{ep.FilterField ?? "Id"}.ToString() == request.{ep.FilterSourceValue ?? "Id"},
+            x => {ComparisonFor(ep)},
             ct: cancellationToken);
 
         // Returning the entities directly. Project them into a DTO here if the API should not
@@ -1148,7 +1290,7 @@ public partial record {CodeGen.Ident(ep.RequestType, "Request type")} : IRequest
         }};"
                     : "        // No assignments declared on this endpoint; set the properties to update here.";
 
-                body = $@"        var entity = await _repository.GetByIdAsync(request.{ep.FilterSourceValue ?? "Id"});
+                body = $@"        var entity = await _repository.GetByIdAsync(request.{IdentifierPropertyFor(ep)});
         if (entity == null)
         {{
             return false;
@@ -1238,9 +1380,15 @@ public class {ruleName} : IBusinessRule<{ns}.{requestType}>
 ";
         }
 
-        private static string GenerateEntityRuleStub(string ruleName, string method, string entityName, string ns)
-        {
-            var requestType = method.ToUpperInvariant() switch
+        /// <summary>
+        /// The MediatR request an entity CRUD rule validates, for one HTTP method.
+        /// </summary>
+        /// <remarks>
+        /// Shared by the stub and by its DI registration, so the two cannot name different types --
+        /// a registration bound to the wrong request compiles and never fires.
+        /// </remarks>
+        private static string EntityRuleRequestType(string method, string entityName, string ns)
+            => method.ToUpperInvariant() switch
             {
                 "POST" => $"InsertCommand<{ns}.{entityName}>",
                 "PUT" => $"UpdateCommand<{ns}.{entityName}>",
@@ -1249,6 +1397,10 @@ public class {ruleName} : IBusinessRule<{ns}.{requestType}>
                 "GET" => $"FindManyQuery<{ns}.{entityName}>",
                 _ => "object"
             };
+
+        private static string GenerateEntityRuleStub(string ruleName, string method, string entityName, string ns)
+        {
+            var requestType = EntityRuleRequestType(method, entityName, ns);
 
             return $@"using System.Threading;
 using System.Threading.Tasks;

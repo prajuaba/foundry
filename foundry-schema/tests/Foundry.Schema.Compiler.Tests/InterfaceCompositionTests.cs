@@ -158,8 +158,14 @@ public class InterfaceCompositionTests
         };
         var code = TestHelpers.GenerateForSingleEntity(entity);
 
-        Assert.Contains("CustomBaseEntity", code);
-        Assert.DoesNotContain("BaseEntity<ObjectId>", code);
+        // Both, and BaseEntity first.
+        //
+        // baseClass used to *replace* BaseEntity<ObjectId>, which left the entity with no Id and no
+        // IEntity<ObjectId> -- and every generic in the framework is constrained on that interface,
+        // so naming a baseClass took the repository, the endpoint generator and the workflow engine
+        // down with it. This assertion was the old behaviour written down, which is why it did not
+        // catch it: nothing ever compiled an entity that used the field.
+        Assert.Contains("BaseEntity<ObjectId>, CustomBaseEntity", code);
     }
 
     [Fact]

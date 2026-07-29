@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-922, on a repository whose CI had never passed once.
+932, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 916 C# tests across 12 suites, against a replica set **and** a standalone MongoDB |
+| `Build and test` | 926 C# tests across 12 suites, against a replica set **and** a standalone MongoDB |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -659,6 +659,78 @@ no longer overwrite another worker's successful mark. An at-least-once outbox ca
 duplicate is impossible — a worker killed between publishing and marking will re-send — but it must
 not make one the ordinary result of running two replicas.
 
+### The showcase demonstrated a third of the framework, and compiled none of it
+
+The one artefact that claims to demonstrate Foundry was hand-written C# sitting next to a schema
+nothing compiled. `foundry validate` checked the schema in CI; no other thing read it. So the two had
+drifted, provably:
+
+| `e2e-schema.ir.json` said | The C# did |
+| --- | --- |
+| four entities | three — `CustomerNote`, carrying ownership and grants, did not exist |
+| `Order` publishes to `order-events` | no Kafka reference anywhere |
+| the submit endpoint requires `Customer` or `Admin` | `app.MapPost(...)` with no authorization |
+| rules `OrderCreditLimitRule`, `SubmitOrderRule` | neither existed |
+
+And it used **34 of the 100 declarable IR fields**. Zero workflows, DTOs or connectors; no
+multi-tenancy, partitioning, real-time, file IO, caching, method gating or masking categories.
+
+The showcase is now generated: everything under `Generated/` comes from the schema, and what is
+hand-written is what a schema cannot state — the logic inside the scaffolds, one marker interface,
+one workflow command, and the host. Its schema now uses **100 of 100**.
+
+**Widening it was the point, and running it was the payoff.** Every construct that had never been
+compiled was broken:
+
+- **`enableGraphQL` produced a project that could not build.** The compiler emitted an
+  `[ExtendObjectType]` query and mutation class calling `repo.AsQueryable()` and `repo.AddAsync()`,
+  neither of which exists on `IRepository<T>`. It was also a *second* GraphQL implementation — the
+  manifest-driven one in `Foundry.Api` already builds the surface, with role guards this one did not
+  have. Deleted rather than repaired.
+- **`enableGraphQL` also decided nothing.** It never reached the manifest, so `AddDynamicGraphQL`
+  exposed every entity declaring a GET, including entities that had opted out. The flag now travels
+  in the manifest, and the entities that did not ask for GraphQL are not served over it.
+- **`enableFileIO` produced a file that did not parse.** Extension literals were emitted as `""`
+  through a verbatim-string escape that interpolation does not re-process, so `".csv"` reached the
+  output as an empty string followed by a bare `.csv`. Behind that, the service awaited an
+  `IAsyncEnumerable` and passed an `IEnumerable` where one was required.
+- **`enableFileIO` plus any `Required` property was a compile error even after that.** A generated
+  entity with `required` members cannot satisfy the `new()` constraint `ExcelDataParser<T>` carried
+  (CS9040), though it has a public parameterless constructor. The constraint was the wrong tool for
+  what it was guarding.
+- **`baseClass` made the entity unusable.** It *replaced* `BaseEntity<TKey>`, so the entity lost its
+  Id and its `IEntity<ObjectId>` — and every generic in the framework is constrained on that. Naming
+  a base class took the repository, the endpoint generator and the workflow engine down with it. It
+  is now listed after `BaseEntity`, not instead of it.
+- **`useCustomCommand` did nothing at all.** It was written into the generated workflow definition,
+  read by no code in the engine, and the command and handler were emitted regardless. A transition
+  asking to supply its own got the generated pair anyway. It now suppresses both.
+- **`filterOperator` was ignored.** Every Query endpoint emitted `x.Field.ToString() == request.Value`
+  whatever the schema declared, so `GreaterThan` silently became equality and the endpoint answered
+  with the wrong rows. Now a closed set, where an unrecognised operator stops the compile.
+- **An Update endpoint's handler referenced a property its request did not have.** It read
+  `request.Id` unconditionally; nothing declared `Id` unless the schema named a `filterSourceValue`.
+  Request fields are also typed from the property they are assigned to now — `Status =
+  request.NewStatus` does not compile when one is an enum and the other a string.
+- **Business rules were never registered.** `AddFoundryRules` registers the engine;
+  `BusinessRuleBehavior` resolves `IBusinessRule<TRequest>` from the container, and nothing put them
+  there. Both `apiBusinessRules` and a custom endpoint's `businessRules` were **declared, emitted as
+  classes, and enforced by nothing** in every generated application. The compiler now emits
+  `AddGeneratedBusinessRules()` and the scaffolder calls it.
+- **`foundry schema build` wrote no `api-manifest.json`.** Only `foundry new` did, from its own second
+  implementation. Compiling a schema into an existing project — the documented way to do exactly
+  that — produced entities, handlers, rules and Kafka consumers, and an application with no API.
+
+The scaffolded application also had no GraphQL endpoint while the README listed GraphQL as
+first-class. That was previously left alone because mapping it unconditionally is a product decision;
+now that `enableGraphQL` means something, it is the *schema's* decision, and `foundry new` maps
+GraphQL exactly when an entity asks for it.
+
+Two gates hold the line. One fails when the IR gains a field the showcase does not exercise, with an
+allowlist that is empty and a second test asserting it stays empty. The other regenerates and
+compares against the committed output, ignoring scaffolds by design and reporting orphans in both
+directions. Both were verified by breaking the showcase and watching them fail.
+
 ### The fallback the replica set made unreachable
 
 Moving to a replica set fixed the transactional archival branch and, in the same stroke, made the
@@ -958,17 +1030,17 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **922 C# tests in total**, from 258 at the start, plus 33 TypeScript in
+Every module has tests. **932 C# tests in total**, from 258 at the start, plus 33 TypeScript in
 Studio. Counts below are read off a solution-wide run rather than carried forward — the figures in
 this table had drifted from the suites they describe, which is the same defect the document is about:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
-| `foundry-schema` | 242 | — |
+| `foundry-schema` | 247 | — |
 | `foundry-mongo` | 126 | MongoDB, **both** a replica set and a standalone |
 | `foundry-rules` | 92 | — |
 | `foundry-integration-tests` | 90 | MongoDB |
-| `foundry-api` | 75 | MongoDB |
+| `foundry-api` | 77 | MongoDB |
 | `foundry-file-io` | 75 | — |
 | `foundry-core` | 52 | — |
 | `foundry-connectors` | 52 | — |
@@ -976,7 +1048,7 @@ this table had drifted from the suites they describe, which is the same defect t
 | `foundry-studio` | 33 | — (TypeScript) |
 | `foundry-realtime` | 26 | — |
 | `foundry-testing` | 26 | — |
-| `foundry-cli` | 21 | — |
+| `foundry-cli` | 24 | — |
 | `foundry-kafka-integration` | 6 | MongoDB **and** a Kafka broker |
 
 The suites that need infrastructure **fail rather than skip** without it. That is the house rule, and
@@ -1136,13 +1208,12 @@ its whole surface area. Everything previously named here has now been run, and t
 the first time — which is a milestone about the *list*, not about the surface area, and the base rate
 below is the reason to keep looking rather than to stop.
 
-**`foundry new` produces an application with no GraphQL endpoint**, while the template and the sample
-both map one and the README lists GraphQL as a first-class protocol. So the smoke test — which drives
-scaffolded applications — cannot reach GraphQL, and its 13 tests run against the sample instead. This
-is the same template-versus-scaffold drift that let generated APIs ship anonymous: `SecurityBehavior`
-was registered in the template and the sample and not in the scaffold. Left alone deliberately —
-adding it would give every generated application a new public endpoint, which is a product decision
-rather than a defect fix.
+**Real-time role gating is declared per entity and not visibly enforced.** `enableRealTime` and
+`realTimeRoles` do reach the generated entity as `[RealTime(true, roles)]`, and the generated
+`MapGeneratedRealTimeEndpoints` maps the same global channels for every entity rather than anything
+per-entity. Whether the broker consults the attribute has not been established by running it. Named
+here rather than fixed because the honest next step is to drive it, not to reason about it — which is
+how the rest of this section has been emptied.
 
 
 **An archival sweep loads a whole entity type into memory before moving anything.** Both branches

@@ -794,7 +794,9 @@ volumes:
         // 6. Automatically compile domain schema into ./Generated
         var generatedDir = Path.Combine(targetDir, "Generated");
         Console.WriteLine("  ➜ Compiling domain schema into C# POCOs and Handlers...");
-        var compileExit = Foundry.Schema.Compiler.Program.Main(new[] { "--input", schemaPath, "--output", generatedDir });
+        var manifestPath = Path.Combine(targetDir, "api-manifest.json");
+        var compileExit = Foundry.Schema.Compiler.Program.Main(
+            new[] { "--input", schemaPath, "--output", generatedDir, "--manifest", manifestPath });
         if (compileExit != 0)
         {
             // The compiler already reported the diagnostics. Stopping here matters: continuing
@@ -805,12 +807,11 @@ volumes:
             return compileExit;
         }
 
-        // 6b. Derive api-manifest.json from the schema.
+        // 6b. api-manifest.json is written by the compiler above, at --manifest.
         //
-        // This is what makes the app serve anything. The REST surface is emitted by the
-        // Foundry.Api.SourceGenerators analyser from this file; with no manifest the analyser
-        // generates empty registrations and the application answers 404 on every entity route.
-        // Previously only Studio produced it, so CLI-scaffolded projects had no API at all.
+        // It used to be derived here, from a second deserialisation of the same schema -- one rule
+        // with two implementations, and the compiler's own `schema build` had neither, so compiling
+        // a schema into an existing project produced an application with no API at all.
         var manifestSchema = System.Text.Json.JsonSerializer.Deserialize<Foundry.Schema.Compiler.SchemaModel>(
             File.ReadAllText(schemaPath),
             new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -818,30 +819,64 @@ volumes:
         if (manifestSchema is null)
         {
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine("[Error] Could not read the schema back to derive api-manifest.json.");
+            Console.WriteLine("[Error] Could not read the schema back to scaffold the project.");
             Console.ResetColor();
             return 1;
         }
-
-        var manifestJson = Foundry.Schema.Compiler.ApiManifestGenerator.Generate(manifestSchema);
-        File.WriteAllText(Path.Combine(targetDir, "api-manifest.json"), manifestJson);
 
         var routeCount = manifestSchema.Entities?.Count(e => e.ApiEnabledMethods.Count > 0) ?? 0;
         Console.WriteLine($"  ✓ Generated api-manifest.json ({routeCount} entity route group(s))");
 
         // 7. Write scaffolded Program.cs after checking generated artifacts
         var hasKafka = Directory.Exists(Path.Combine(generatedDir, "Kafka"));
-        var hasGraphQL = Directory.Exists(Path.Combine(generatedDir, "GraphQL"));
+        // From the schema, not from a directory the compiler no longer writes. GraphQL is served by
+        // Foundry.Api from api-manifest.json; the compiler used to emit a rival implementation into
+        // Generated/GraphQL that did not compile, and this probed for that directory.
+        //
+        // A scaffolded application had no GraphQL endpoint at all while the README listed GraphQL as
+        // a first-class protocol. Mapping it unconditionally would have given every generated
+        // application a new public endpoint, which is not the CLI's decision to make -- so it is the
+        // schema's: `enableGraphQL` on an entity is what asks for it.
+        var hasGraphQL = manifestSchema.Entities?.Any(e => e.GraphQlEnabled) == true;
         var hasServices = Directory.Exists(Path.Combine(generatedDir, "Services"));
 
+        // Only when the schema names one. The compiler emits Rules/RuleRegistrations.cs from the
+        // rules it found, so a schema declaring none has no such namespace and referring to it is a
+        // build error in a project the CLI has just called ready-to-run.
+        var hasRules =
+            (manifestSchema.Entities ?? new List<Foundry.Schema.Compiler.Entity>())
+                .Any(e => e.ApiBusinessRules != null
+                          && e.ApiBusinessRules.Any(r => r.Value?.Any(v => !string.IsNullOrWhiteSpace(v)) == true))
+            || (manifestSchema.CustomEndpoints ?? new List<Foundry.Schema.Compiler.CustomEndpoint>())
+                .Any(ep => ep.BusinessRules?.Any(r => !string.IsNullOrWhiteSpace(r)) == true);
+
         var extraUsings = new List<string>();
+        if (hasRules) extraUsings.Add($"using {projectName}.Domain.Rules;");
         if (hasKafka) extraUsings.Add($"using {projectName}.Domain.Kafka;");
         if (hasServices) extraUsings.Add($"using {projectName}.Domain.Services;");
-        if (hasGraphQL) extraUsings.Add($"using {projectName}.Domain.GraphQL;");
+        // No using for GraphQL: AddDynamicGraphQL is declared in
+        // Microsoft.Extensions.DependencyInjection, which the Web SDK already imports implicitly.
 
         var extraUsingsStr = extraUsings.Count > 0 ? string.Join("\n", extraUsings) + "\n" : "";
 
         var kafkaRegistration = hasKafka ? "\n// Register generated Kafka consumer handlers\nbuilder.Services.AddGeneratedKafkaHandlers();\n" : "";
+
+        // Every business rule the schema named, bound to the request it validates. Without this the
+        // rules are compiled into the application and never run: AddFoundryRules registers the
+        // engine, and BusinessRuleBehavior resolves the rules themselves from the container.
+        var ruleRegistration = hasRules
+            ? "\n// Business rules declared in the schema, bound to the requests they validate.\n"
+              + "builder.Services.AddGeneratedBusinessRules();\n"
+            : "";
+
+        // GraphQL over the same repositories and the same manifest roles the REST surface uses.
+        var graphQlRegistration = hasGraphQL
+            ? "\n// GraphQL, for the entities whose schema set enableGraphQL. Every field is guarded\n"
+              + "// by the manifest's own roles, so the two protocols cannot disagree about access.\n"
+              + "builder.Services.AddDynamicGraphQL(manifest);\n"
+            : "";
+
+        var graphQlMapping = hasGraphQL ? "\napp.MapGraphQL();\n" : "";
 
         // Workflow wiring, emitted only when the schema declares a workflow.
         //
@@ -950,7 +985,7 @@ builder.Services.AddMediatR(cfg =>
 
 // Generated request handlers, one per entity method in the manifest.
 builder.Services.AddGeneratedHandlers();
-{kafkaRegistration}{workflowRegistration}
+{ruleRegistration}{kafkaRegistration}{graphQlRegistration}{workflowRegistration}
 // SecurityBehavior re-checks the manifest's roles inside the pipeline, against the same
 // EndpointConfig metadata the endpoint's own RequireAuthorization uses, so the two cannot disagree.
 // The template registered it and the scaffolder did not -- so `foundry new` produced an application
@@ -992,7 +1027,7 @@ app.MapWorkflowHistory(manifest);
 
 // Real-time channels.
 app.MapFoundryRealTime();
-
+{graphQlMapping}
 app.Run();
 ";
         File.WriteAllText(Path.Combine(targetDir, "Program.cs"), programContent);

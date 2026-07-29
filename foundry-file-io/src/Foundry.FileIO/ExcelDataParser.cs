@@ -13,7 +13,16 @@ namespace Foundry.FileIO;
 /// <summary>
 /// Memory-efficient streaming Excel parser using ExcelDataReader with reflection mapping.
 /// </summary>
-public sealed class ExcelDataParser<TOut> : IDataParser<TOut> where TOut : class, new()
+/// <remarks>
+/// Constrained to <c>class</c> rather than <c>class, new()</c>. A generated entity with any
+/// <c>Required</c> property has <c>required</c> members, and C# refuses to let such a type satisfy
+/// <c>new()</c> (CS9040) even though it has a public parameterless constructor — so every schema
+/// that combined <c>enableFileIO</c> with a required property produced a generated file service that
+/// could not compile. <c>required</c> is a compile-time contract about initialisation, and this
+/// parser sets every mapped property immediately after constructing the row, which is the same
+/// guarantee by a different route.
+/// </remarks>
+public sealed class ExcelDataParser<TOut> : IDataParser<TOut> where TOut : class
 {
     static ExcelDataParser()
     {
@@ -150,7 +159,7 @@ public sealed class ExcelDataParser<TOut> : IDataParser<TOut> where TOut : class
         {
             rowNumber++;
             ct.ThrowIfCancellationRequested();
-            var item = new TOut();
+            var item = Activator.CreateInstance<TOut>();
 
             foreach (var prop in properties)
             {

@@ -443,6 +443,7 @@ cat > "$WORK_DIR/tenant-schema.json" <<'SCHEMA'
     {
       "Name": "Invoice",
       "multiTenant": true,
+      "enableGraphQL": true,
       "Properties": [
         { "Name": "Id", "Type": "ObjectId", "IsKey": true },
         { "Name": "TenantId", "Type": "string", "isTenantKey": true },
@@ -1108,6 +1109,40 @@ log "A multi-tenant write with no tenant is refused"
 authenticate_as "$(mint_token tenantless Admin)"
 expect_status 500 "POST with a token carrying no tenant" \
   -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' -d '{"reference":"NO-TENANT"}'
+
+# ── GraphQL, in a scaffolded application ────────────────────────────────────
+#
+# A scaffolded application had no GraphQL endpoint at all, while the README listed GraphQL as a
+# first-class protocol -- so the GraphQL tests ran against a fixture and the one gate that drives
+# generated applications could not reach it. Mapping it unconditionally would have given every
+# generated application a new public endpoint; making it the schema's decision is what `enableGraphQL`
+# is for, and that field previously decided nothing at all.
+#
+# Invoice sets it. Note does not, and that is asserted too: an entity that did not ask to be exposed
+# must not be, which is the half that would otherwise pass by accident.
+log "A scaffolded application serves GraphQL for the entity that asked for it"
+authenticate_as "$(mint_token gql-user Admin acme)"
+
+GQL_BODY=$(curl -sS --max-time 15 -X POST "$BASE/graphql" \
+  -H 'Content-Type: application/json' \
+  "${AUTH[@]}" \
+  -d '{"query":"{ getInvoices { reference amount } }"}') \
+  || fail "GraphQL endpoint did not respond"
+
+echo "$GQL_BODY" | grep -q '"errors"' \
+  && fail "GraphQL query returned errors: $GQL_BODY"
+
+echo "$GQL_BODY" | grep -q 'getInvoices' \
+  || fail "GraphQL response did not contain getInvoices: $GQL_BODY"
+
+log "An entity that did not set enableGraphQL is not exposed over GraphQL"
+GQL_NOTE=$(curl -sS --max-time 15 -X POST "$BASE/graphql" \
+  -H 'Content-Type: application/json' \
+  "${AUTH[@]}" \
+  -d '{"query":"{ getNotes { body } }"}')
+
+echo "$GQL_NOTE" | grep -q '"errors"' \
+  || fail "Note is exposed over GraphQL although its schema never asked: $GQL_NOTE"
 
 # ── Exported specifications ─────────────────────────────────────────────────
 #

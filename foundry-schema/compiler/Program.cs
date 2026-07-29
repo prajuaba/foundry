@@ -21,6 +21,7 @@ namespace Foundry.Schema.Compiler
         {
             string? inputPath = null;
             string? outputPath = null;
+            string? manifestPath = null;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -42,6 +43,17 @@ namespace Foundry.Schema.Compiler
                     else
                     {
                         Console.WriteLine("Error: --output requires a directory path.");
+                        PrintUsage();
+                        return 1;
+                    }
+                }
+                else if (args[i] == "--manifest" || args[i] == "-m")
+                {
+                    if (i + 1 < args.Length)
+                        manifestPath = args[++i];
+                    else
+                    {
+                        Console.WriteLine("Error: --manifest requires a file path.");
                         PrintUsage();
                         return 1;
                     }
@@ -118,6 +130,21 @@ namespace Foundry.Schema.Compiler
                     Console.WriteLine($"{(file.Kind == EmitKind.Scaffold ? "Scaffolded" : "Generated")}: {filePath}");
                 }
 
+                // api-manifest.json is what makes a compiled domain serve anything: the REST surface
+                // is emitted by the Foundry.Api.SourceGenerators analyser from this file, and with no
+                // manifest the analyser emits empty registrations and every entity route answers 404.
+                //
+                // It used to be written only by `foundry new`, so compiling a schema into an existing
+                // project -- the documented way to do exactly that -- produced entities, handlers,
+                // rules and Kafka consumers, and an application with no API. Two paths that must
+                // agree, one of which silently omitted a piece; the fix is that there is now one.
+                var manifestTarget = manifestPath ?? Path.Combine(outputPath, "api-manifest.json");
+                var manifestDir = Path.GetDirectoryName(manifestTarget);
+                if (!string.IsNullOrEmpty(manifestDir)) Directory.CreateDirectory(manifestDir);
+                File.WriteAllText(manifestTarget, ApiManifestGenerator.Generate(schema!));
+                Console.WriteLine($"Generated: {manifestTarget}");
+                written++;
+
                 var warnings = bag.WarningCount > 0 ? $", {bag.WarningCount} warning(s)" : "";
                 Console.WriteLine($"Success: {written} file(s) written, {preserved} scaffold(s) preserved{warnings}.");
                 return 0;
@@ -143,9 +170,10 @@ namespace Foundry.Schema.Compiler
 
         static void PrintUsage()
         {
-            Console.WriteLine("Usage: Foundry.Schema.Compiler --input <schema.json> --output <directory>");
+            Console.WriteLine("Usage: Foundry.Schema.Compiler --input <schema.json> --output <directory> [--manifest <file>]");
             Console.WriteLine("  --input, -i     : Path to the JSON schema file");
             Console.WriteLine("  --output, -o    : Output directory path");
+            Console.WriteLine("  --manifest, -m  : Where to write api-manifest.json (default: <output>/api-manifest.json)");
         }
     }
 }

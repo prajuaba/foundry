@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <OutputType>Exe</OutputType>
+    <RootNamespace>Foundry.E2E.Showcase</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
@@ -13,7 +14,20 @@
     <ProjectReference Include="..\..\foundry-file-io\src\Foundry.FileIO\Foundry.FileIO.csproj" />
     <ProjectReference Include="..\..\foundry-rules\src\Foundry.Rules\Foundry.Rules.csproj" />
     <ProjectReference Include="..\..\foundry-realtime\src\Foundry.RealTime\Foundry.RealTime.csproj" />
+    <ProjectReference Include="..\..\foundry-kafka\src\Foundry.Kafka\Foundry.Kafka.csproj" />
+    <ProjectReference Include="..\..\foundry-connectors\src\Foundry.Connectors\Foundry.Connectors.csproj" />
     <ProjectReference Include="..\..\foundry-api\src\Foundry.Api\Foundry.Api.csproj" />
+  </ItemGroup>
+
+  <!-- The REST surface is emitted by this analyser from api-manifest.json, which the schema
+       compiler writes to the project root, the same layout `foundry new` produces. Without the
+       analyser reference and the AdditionalFiles entry the app builds, starts, and serves no
+       routes at all. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\foundry-api\src\Foundry.Api.SourceGenerators\Foundry.Api.SourceGenerators.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+    <AdditionalFiles Include="api-manifest.json" />
   </ItemGroup>
 
   <ItemGroup>
@@ -23,6 +37,14 @@
     <PackageReference Include="MongoDB.Bson" />
     <PackageReference Include="MongoDB.Driver" />
     <PackageReference Include="Swashbuckle.AspNetCore" />
+  </ItemGroup>
+
+  <!-- Program.cs reads the manifest at startup as well, to map the endpoints the analyser
+       generated, so it has to be next to the binary. -->
+  <ItemGroup>
+    <None Update="api-manifest.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

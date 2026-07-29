@@ -39,7 +39,8 @@
           "Enabled": true,
           "TtlSeconds": 120
         }
-      }
+      },
+      "GraphQL": true
     }
   ],
   "CustomEndpoints": [

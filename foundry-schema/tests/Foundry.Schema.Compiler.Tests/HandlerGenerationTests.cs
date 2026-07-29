@@ -29,7 +29,10 @@ public class HandlerGenerationTests
         Assert.Contains("public class OrderLookupQueryHandler : IRequestHandler<OrderLookupQuery, System.Collections.Generic.IReadOnlyList<Order>>", code);
         Assert.Contains("private readonly IRepository<Order> _repository;", code);
         Assert.Contains("var items = await _repository.FindManyAsync(", code);
-        Assert.Contains("x => x.CustomerId.ToString() == request.CustomerId", code);
+        // Typed, and not stringly. The handler used to compare `x.Field.ToString()` against a
+        // string request property, which compiles for any pair of types and compares the wrong
+        // things for most of them.
+        Assert.Contains("x => x.CustomerId == request.CustomerId", code);
     }
 
     [Fact]

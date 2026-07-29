@@ -71,10 +71,12 @@ public class GeneratedCodeCompilesTests
                 File.WriteAllText(target, file.Content);
             }
 
-            // A multi-tenant entity, compiled into the same project so it costs no extra build.
+            // A second multi-tenant entity, compiled into the same project so it costs no extra
+            // build.
             //
-            // The showcase declares none, and neither did anything else, so no multi-tenant entity
-            // the compiler emitted had ever been built. None of them compiled: IMultiTenant declares
+            // The showcase declares two of its own now. When this was added it declared none, and
+            // neither did anything else, so no multi-tenant entity the compiler emitted had ever
+            // been built. None of them compiled: IMultiTenant declares
             // `string TenantId { get; set; }` and the emitted tenant key was `init`, which C# will
             // not accept as an implementation of `set` (CS8854). The framework's headline claim had
             // never reached a running application, and a text-level assertion would not have shown
@@ -87,8 +89,9 @@ public class GeneratedCodeCompilesTests
 
             File.WriteAllText(Path.Combine(work, "TenantScopedInvoice.cs"), tenantEntity.Content);
 
-            // A workflow, for the same reason. The showcase declares none, so no schema with a
-            // workflow in it had ever been compiled -- and none of them built: the emitted handler
+            // A second workflow, for the same reason. The showcase carries one of its own now; when
+            // this was added it declared none, so no schema with a workflow in it had ever been
+            // compiled -- and none of them built: the emitted handler
             // named its command without importing the namespace it lives in (CS0246), and the command
             // implemented the void IRequest, which the endpoint generator cannot assign a result
             // from. Both are invisible to a text-level assertion and obvious to a real build.
@@ -114,6 +117,24 @@ public class GeneratedCodeCompilesTests
             File.WriteAllText(
                 Path.Combine(work, "ClientSdk.cs"), CsharpSdkGenerator.Generate(SdkSchema()));
 
+            // Any interface an entity names in `baseClass` belongs to the application, not to the
+            // compiler -- it is the one place a schema points outside itself. A developer declares
+            // it; this harness compiles generated output alone, so it declares them here for the
+            // same reason, and a missing one would otherwise read as a code-generation fault.
+            var externalBases = schema!.Entities
+                .Select(e => e.BaseClass)
+                .Concat(WorkflowSchema().Entities.Select(e => e.BaseClass))
+                .Where(b => !string.IsNullOrWhiteSpace(b))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (externalBases.Count > 0)
+            {
+                File.WriteAllText(
+                    Path.Combine(work, "ExternalBases.cs"),
+                    string.Join("\n", externalBases.Select(b => $"public interface {b} {{ }}")));
+            }
+
             // A library project referencing the same runtime libraries a scaffolded app would.
             var csproj = $"""
 <Project Sdk="Microsoft.NET.Sdk">
@@ -131,6 +152,7 @@ public class GeneratedCodeCompilesTests
     <ProjectReference Include="{Path.Combine(root, "foundry-kafka", "src", "Foundry.Kafka", "Foundry.Kafka.csproj")}" />
     <ProjectReference Include="{Path.Combine(root, "foundry-file-io", "src", "Foundry.FileIO", "Foundry.FileIO.csproj")}" />
     <ProjectReference Include="{Path.Combine(root, "foundry-api", "src", "Foundry.Api", "Foundry.Api.csproj")}" />
+    <ProjectReference Include="{Path.Combine(root, "foundry-realtime", "src", "Foundry.RealTime", "Foundry.RealTime.csproj")}" />
   </ItemGroup>
 </Project>
 """;
