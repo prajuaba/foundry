@@ -254,6 +254,25 @@ log "Building the scaffolded project"
 ( cd "$APP_DIR" && dotnet build -v q --nologo ) || fail "the scaffolded project does not compile"
 pass "scaffolded project compiles"
 
+# What a generated application inherits, which is not what the framework's own projects resolve.
+#
+# Directory.Packages.props pins transitive dependencies off advisory-affected versions, and it
+# applies to the directory tree it sits in -- so a scaffolded project, which is outside that tree,
+# inherited none of it. The framework's dependencies were clean and the applications it generates
+# carried MessagePack 2.5.187 with two high-severity advisories against it. Checked here rather than
+# by pinning one package, so the next transitive advisory is caught by the same assertion.
+log "The scaffolded project has no known-vulnerable dependencies"
+VULN_REPORT="$WORK_DIR/vulnerable.txt"
+( cd "$APP_DIR" && dotnet list package --vulnerable --include-transitive ) > "$VULN_REPORT" 2>&1 \
+  || fail "could not read the scaffolded project's package report"
+
+if grep -qE '^ +> ' "$VULN_REPORT"; then
+  echo "--- vulnerable packages ---" >&2
+  grep -E '^ +> |^ +\[' "$VULN_REPORT" >&2
+  fail "the scaffolded project resolves packages with known advisories"
+fi
+pass "no advisory-affected packages in a generated application"
+
 log "Booting the application"
 authenticate_as "$(mint_token smoke-operator Admin)"
 start_app "$APP_DIR" "$PORT_A" "/api/customers" "$WORK_DIR/app-a.log"

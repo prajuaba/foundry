@@ -555,6 +555,33 @@ single-word entity agreed by luck and every multi-word one named a topic with no
 manifest declares. The smoke test now goes further and checks the exported specification against the
 **running server** — a claim two components cannot satisfy by agreeing on the same mistake.
 
+### The fix existed; the generated application never got it
+
+`Directory.Packages.props` pins MessagePack off 2.5.187 — two high-severity advisories and nine
+moderate ones, arriving transitively through SignalR. Every project in this repository resolves the
+patched version, and `dotnet list package --vulnerable` reports nothing across all thirty of them.
+
+A scaffolded project does not:
+
+```
+> MessagePack  2.5.187  High  GHSA-hv8m-jj95-wg3x
+```
+
+`Directory.Packages.props` governs the directory tree it sits in, and a generated project is outside
+that tree. **The framework's own dependencies were clean and the applications it generates were not**
+— which is the half that matters, and the same shape as the template-versus-scaffold drift that let
+generated APIs ship anonymous.
+
+The scaffolder already pins packages it must, reading the versions from `Directory.Packages.props` so
+the repository stays the single place that says which version. MessagePack was simply not on the list
+of *which packages*, because the earlier pins were added to make a scaffolded project run rather than
+to make it safe.
+
+The check added is deliberately not "MessagePack is pinned". The smoke test runs
+`dotnet list package --vulnerable --include-transitive` against the project it scaffolds and fails on
+any hit, so the next transitive advisory is caught by the same assertion rather than by someone
+remembering to look. Reverting the pin fails it.
+
 ### Masking is a policy rather than one switch
 
 `view:pii` unmasked every masked property on every entity, so letting a caller read one field meant
@@ -1035,9 +1062,7 @@ mint them. That is the right split — an identity provider's job is not a code 
 adopting this still has to stand one up, and the scaffolded project says so only by leaving the
 configuration empty.
 
-**Scaffolded projects pull in `MessagePack` 2.5.187, which carries known high-severity advisories**
-(transitively, via SignalR). The framework's own dependencies are clean; the generated application's
-are not, and a scaffolded project prints those warnings on its first build.
+**Nothing else known.** The MessagePack advisory that stood here is fixed; see section 3.
 
 **MongoDB is still the only data provider.** That is the commercial ceiling for enterprise .NET shops.
 

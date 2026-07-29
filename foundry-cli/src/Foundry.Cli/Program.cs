@@ -545,11 +545,23 @@ public class Program
         // advisory) and then fails at startup with a FileNotFoundException for the 2.11.0 assembly
         // Foundry.Api was built against. The app compiled cleanly and died on first request, so
         // pinning here is what makes a scaffolded project actually run.
+        //
+        // The same gap applies to the pins that exist purely for security. Directory.Packages.props
+        // moves MessagePack off 2.5.187 -- two high-severity advisories and nine moderate ones,
+        // arriving transitively through SignalR -- and a scaffolded project inherited none of it,
+        // because Directory.Packages.props applies to the directory tree it sits in and a generated
+        // project is outside it. The framework's own dependencies were clean and the applications it
+        // generates were not, which is the more consequential half.
+        //
+        // Versions come from Directory.Packages.props rather than being written here, so this list
+        // says *which* packages a generated project must pin and the repository stays the single
+        // place that says *what version*.
         var requiredPackages = new[]
         {
             "FluentValidation.DependencyInjectionExtensions",
             "Microsoft.OpenApi",
-            "Swashbuckle.AspNetCore"
+            "Swashbuckle.AspNetCore",
+            "MessagePack"
         };
 
         var packageReferences = new List<string>();
