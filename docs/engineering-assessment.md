@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-979, on a repository whose CI had never passed once.
+990, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 973 C# tests across 13 suites, against a replica set **and** a standalone MongoDB |
+| `Build and test` | 984 C# tests across 13 suites, against a replica set **and** a standalone MongoDB |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -659,6 +659,44 @@ no longer overwrite another worker's successful mark. An at-least-once outbox ca
 duplicate is impossible — a worker killed between publishing and marking will re-send — but it must
 not make one the ordinary result of running two replicas.
 
+### The autonomous testing engine could not fail
+
+`foundry test` generates xUnit suites from a schema. Nothing compiled them and nothing ran them, and
+both halves of that showed.
+
+**The route was wrong.** It composed `/api/v1/{lowercase-singular}` while the application serves
+`/api/{plural}` — the *fourth* copy of that same rule, after the OpenAPI exporter, the Postman
+exporter and Studio. The first three were corrected in earlier cycles; this one survived both
+cleanups because nothing ever ran what it writes. It survived even though this module already
+references the compiler: `RouteFor` was `internal`, so the one consumer that could have asked was
+made to guess. It is public now, with `EnabledMethods` and `TransitionRouteFor`, for exactly that
+reason.
+
+**It asserted `200 OK` with no `Authorization` header**, against a framework where every generated
+endpoint calls `RequireAuthorization()`. Every REST assertion it produced failed on a healthy
+application, and blamed it.
+
+**And five of its seven suite types could not fail at all.** The Kafka suite read `var topic =
+"order-events"; topic.Should().NotBeNullOrEmpty();`. The FileIO and business-rule suites were a bare
+`await Task.CompletedTask;`. The workflow suite compared a literal with itself. So the product whose
+job is to tell you whether your application works could produce a green report without contacting
+one — which is worse than producing nothing, because the report claims the coverage.
+
+The tautologies are gone rather than papered over. Real-time and workflow suites now assert something
+a schema can actually support: those channels and transitions are HTTP routes, so who may reach them
+is checkable. Kafka, FileIO and rules suites are no longer emitted, because whether a message reached
+a broker or a rule refused the right payload cannot be derived from a schema — that needs a harness
+the developer writes, and saying so is more useful than a passing stub.
+
+REST suites are emitted only for the methods an entity declares, GraphQL suites only for entities
+that opted in, the POST payload carries the entity's required properties, and the address and token
+come from the environment through one emitted helper rather than being baked into every file.
+
+Two gates, and both were verified by breaking the generator. The suites are compiled by a real
+`dotnet build` — a brace slip fails it. And the smoke test generates suites for the schema its
+application was built from, points them at the running process and runs them: **18 generated tests
+pass against a live application**, and putting the old route back fails six of them.
+
 ### The Studio backend wrote wherever it was told
 
 `Foundry.Schema.Backend` is the service every compiler-backed feature in Studio talks to. It is in
@@ -1129,7 +1167,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **979 C# tests in total**, from 258 at the start, plus 50 TypeScript across
+Every module has tests. **990 C# tests in total**, from 258 at the start, plus 50 TypeScript across
 Studio and the VS Code extension. Counts below are read off a solution-wide run rather than carried forward — the figures in
 this table had drifted from the suites they describe, which is the same defect the document is about:
 
@@ -1148,7 +1186,7 @@ this table had drifted from the suites they describe, which is the same defect t
 | `foundry-studio` | 33 | — (TypeScript) |
 | `foundry-vscode` | 17 | — (TypeScript) |
 | `foundry-realtime` | 40 | — |
-| `foundry-testing` | 26 | — |
+| `foundry-testing` | 37 | — |
 | `foundry-cli` | 30 | — |
 | `foundry-kafka-integration` | 6 | MongoDB **and** a Kafka broker |
 

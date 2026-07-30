@@ -268,7 +268,8 @@ namespace Foundry.Schema.Compiler
         }
 
         /// <summary>Route for triggering one transition, e.g. <c>/api/orders/transitions/approve</c>.</summary>
-        internal static string TransitionRouteFor(string entityName, string trigger)
+        /// <remarks>Public for the same reason as <see cref="RouteFor"/>: so nobody recomputes it.</remarks>
+        public static string TransitionRouteFor(string entityName, string trigger)
             => RouteFor(entityName) + "/transitions/" + trigger.ToLowerInvariant();
 
         /// <summary>The identifier the workflow engine matches a transition on.</summary>
@@ -358,7 +359,16 @@ namespace Foundry.Schema.Compiler
         /// published — every one of them assuming full CRUD — so the OpenAPI and Postman documents
         /// described endpoints that returned 404, for entities that had no REST surface at all.
         /// </remarks>
-        internal static List<string> EnabledMethods(Entity entity)
+        /// <summary>
+        /// The HTTP methods an entity actually exposes.
+        /// </summary>
+        /// <remarks>
+        /// Public because other Foundry tools need the answer and, when they could not ask for it,
+        /// they guessed. Studio gave an entity with no declared methods a full CRUD surface; the
+        /// autonomous test generator emitted REST suites for entities that expose nothing at all.
+        /// A rule kept private is a rule that gets reimplemented.
+        /// </remarks>
+        public static List<string> EnabledMethods(Entity entity)
             => (entity.ApiEnabledMethods ?? new List<string>())
                 .Where(m => !string.IsNullOrWhiteSpace(m))
                 .Select(m => m.Trim().ToUpperInvariant())
@@ -366,7 +376,15 @@ namespace Foundry.Schema.Compiler
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
 
-        internal static string RouteFor(string entityName)
+        /// <summary>
+        /// The route the generated API serves for an entity.
+        /// </summary>
+        /// <remarks>
+        /// Public for the same reason. This exact rule has been reimplemented wrongly four times —
+        /// the OpenAPI exporter, the Postman exporter, Studio and the test generator all composed
+        /// <c>/api/v1/{lowercase-singular}</c> while the application serves <c>/api/{plural}</c>.
+        /// </remarks>
+        public static string RouteFor(string entityName)
         {
             if (string.IsNullOrWhiteSpace(entityName)) return "/api";
             return "/api/" + Pluralize(entityName).ToLowerInvariant();

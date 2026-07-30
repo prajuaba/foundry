@@ -1200,6 +1200,61 @@ GQL_NOTE=$(curl -sS --max-time 15 -X POST "$BASE/graphql" \
 echo "$GQL_NOTE" | grep -q '"errors"' \
   || fail "Note is exposed over GraphQL although its schema never asked: $GQL_NOTE"
 
+# ── The autonomous testing engine, run against this application ─────────────
+#
+# `foundry test` generates xUnit suites from a schema, and nothing had ever compiled or run one. So
+# the generator emitted /api/v1/{lowercase-singular} -- the fourth copy of a route rule the
+# application does not serve, after the OpenAPI exporter, the Postman exporter and Studio, all three
+# of which were corrected while this one survived. It also asserted 200 OK with no Authorization
+# header against a framework where every generated endpoint calls RequireAuthorization(), and five of
+# its seven suite types asserted string literals against themselves, so a green report could be
+# produced without contacting an application at all.
+#
+# This phase generates the suites for the schema this application was built from, points them at the
+# running process, and runs them. It is the only check that can catch a suite which compiles, reads
+# correctly, and asks the wrong question.
+log "The generated test suites pass against the application they describe"
+
+SUITE_DIR="$WORK_DIR/generated-suites"
+( cd "$WORK_DIR" && dotnet "$CLI_DLL" test -i "$WORK_DIR/tenant-schema.json" -o "$SUITE_DIR" \
+    -r "$SUITE_DIR/report.html" ) > "$WORK_DIR/suite-gen.log" 2>&1 \
+  || fail "foundry test did not generate suites: $(tail -5 "$WORK_DIR/suite-gen.log")"
+
+[[ -f "$SUITE_DIR/FoundryTestEnvironment.cs" ]] \
+  || fail "the generated suites carry no shared test environment"
+
+cat > "$SUITE_DIR/GeneratedSuites.csproj" <<'CSPROJ'
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="FluentAssertions" Version="6.12.0" />
+  </ItemGroup>
+</Project>
+CSPROJ
+
+# A caller holding every role the tenant schema declares, so the authenticated assertions exercise
+# the endpoints rather than the role checks -- those have their own phases above.
+SUITE_TOKEN=$(mint_token suite-runner "Admin,Supervisor,Auditor,Warehouse,Sales" acme)
+
+if ! ( cd "$SUITE_DIR" \
+       && FOUNDRY_TEST_BASE_URL="$BASE" \
+          FOUNDRY_TEST_TOKEN="$SUITE_TOKEN" \
+          FOUNDRY_TEST_TENANT="acme" \
+          dotnet test --nologo -v q ) > "$WORK_DIR/suite-run.log" 2>&1; then
+  fail "the generated suites failed against the application they were generated from:
+$(grep -E "error|Failed|failed" "$WORK_DIR/suite-run.log" | head -20)"
+fi
+
+pass "$(grep -oE "Passed! *- *Failed: *[0-9]+, *Passed: *[0-9]+" "$WORK_DIR/suite-run.log" | head -1)"
+
 # ── Exported specifications ─────────────────────────────────────────────────
 #
 # 'foundry export' had no test in any form, and all four formats exit 0 whatever they emit -- so
