@@ -228,6 +228,111 @@ public class CliContractTests : IDisposable
         Assert.False(File.Exists(Path.Combine(output, "api-manifest.json")));
     }
 
+    // ---- migrate ----
+
+    private const string CanvasSchema = """
+    {
+      "namespace": "MyDomain",
+      "nodes": [
+        {
+          "id": "node-1",
+          "type": "classNode",
+          "position": { "x": 250, "y": 150 },
+          "data": {
+            "Name": "User",
+            "SoftDelete": true,
+            "Properties": [
+              { "Name": "Id", "Type": "ObjectId", "IsKey": true },
+              { "Name": "Email", "Type": "string", "Attributes": ["Required"] }
+            ]
+          }
+        }
+      ],
+      "edges": []
+    }
+    """;
+
+    [Fact]
+    public async Task Migrate_ConvertsACanvasDocumentAndTheResultValidates()
+    {
+        // FDY1010's hint has always said to run this, and the command did not exist: it printed the
+        // help banner. The VS Code extension's "New Schema" wrote exactly this document, so a user
+        // hit the dead end without doing anything unusual.
+        var canvas = WriteSchema("mydomain.foundry.json", CanvasSchema);
+
+        var migrate = await Cli.RunAsync(_workspace, "migrate", canvas);
+
+        Assert.Equal(0, migrate.ExitCode);
+
+        var ir = Path.Combine(_workspace, "mydomain.ir.json");
+        Assert.True(File.Exists(ir), $"no IR written; output was: {migrate.Output}");
+
+        var validate = await Cli.RunAsync(_workspace, "validate", ir);
+        Assert.Equal(0, validate.ExitCode);
+    }
+
+    [Fact]
+    public async Task Migrate_LeavesTheCanvasFileAlone()
+    {
+        // The canvas is still the layout Studio draws from. Overwriting it would trade one format
+        // for the other rather than deriving one from the other.
+        var canvas = WriteSchema("mydomain.foundry.json", CanvasSchema);
+
+        await Cli.RunAsync(_workspace, "migrate", canvas);
+
+        Assert.Equal(CanvasSchema, File.ReadAllText(canvas));
+    }
+
+    [Fact]
+    public async Task Migrate_HonoursAnExplicitOutputPath()
+    {
+        var canvas = WriteSchema("mydomain.foundry.json", CanvasSchema);
+        var target = Path.Combine(_workspace, "nested", "domain.ir.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+
+        var result = await Cli.RunAsync(_workspace, "migrate", canvas, "--out", target);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.True(File.Exists(target));
+    }
+
+    [Fact]
+    public async Task Migrate_OnADocumentThatIsAlreadyIr_ExitsNonZeroAndSaysSo()
+    {
+        var ir = WriteSchema("already.ir.json", ValidSchema);
+
+        var result = await Cli.RunAsync(_workspace, "migrate", ir);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("not a Studio canvas document", result.Output);
+    }
+
+    [Fact]
+    public async Task Migrate_OnAMissingFile_ExitsNonZero()
+    {
+        var result = await Cli.RunAsync(_workspace, "migrate", Path.Combine(_workspace, "nope.json"));
+
+        Assert.NotEqual(0, result.ExitCode);
+    }
+
+    [Fact]
+    public async Task Migrate_WritesNothingWhenTheResultWouldNotValidate()
+    {
+        // A canvas can be missing what the IR requires -- here, an entity with no key property.
+        // Writing it anyway would move the failure to the next command instead of reporting it.
+        var canvas = WriteSchema("broken.foundry.json", """
+        {
+          "namespace": "MyDomain",
+          "nodes": [ { "type": "classNode", "data": { "entity": { "name": "User", "properties": [] } } } ]
+        }
+        """);
+
+        var result = await Cli.RunAsync(_workspace, "migrate", canvas);
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.False(File.Exists(Path.Combine(_workspace, "broken.ir.json")));
+    }
+
     [Fact]
     public async Task AnUnknownCommand_ExitsNonZero()
     {

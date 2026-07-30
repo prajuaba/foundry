@@ -83,7 +83,7 @@ export class FoundryEditorProvider implements vscode.CustomTextEditorProvider {
         }
 
         case 'compileSchema': {
-          await compilerService.compileSchema(document.uri, message.schema || JSON.parse(document.getText() || '{}'));
+          await compilerService.compileSchema(document.uri);
           return;
         }
       }

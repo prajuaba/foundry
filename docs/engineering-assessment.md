@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-946, on a repository whose CI had never passed once.
+966, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 940 C# tests across 12 suites, against a replica set **and** a standalone MongoDB |
+| `Build and test` | 960 C# tests across 12 suites, against a replica set **and** a standalone MongoDB |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -659,6 +659,42 @@ no longer overwrite another worker's successful mark. An at-least-once outbox ca
 duplicate is impossible — a worker killed between publishing and marking will re-send — but it must
 not make one the ordinary result of running two replicas.
 
+### The VS Code extension told users their schema had compiled
+
+It had not been touched since before the IR became normative, it was in no CI job — not built, not
+typechecked, not run — and it was the last component with no gate of any kind. Everything below was
+verified by running it, not by reading it:
+
+- **Its compile command had never worked.** It invoked the compiler positionally,
+  `dotnet run --project ... -- <in> <out>`, and the compiler declares `--input` and `--output`. Every
+  invocation exited with *"Both --input and --output are required"* having written zero files.
+- **And every failure was reported as success.** The `if (error)` branch called
+  `showInformationMessage("Foundry: Schema compiled! Saved manifest successfully.")`, with stdout and
+  stderr discarded. The compiler failed every single time and said so to nobody — the silent-success
+  class in its purest form, in the one place a user would never think to check.
+- **"Create New Schema Manifest" wrote a document the toolchain refuses.** It emitted a Studio canvas
+  file, and `foundry validate` answers FDY1010 — *"Document is in Studio canvas format, which the
+  compiler does not consume. No code would be generated"* — plus FDY1002.
+- **FDY1010's own hint named a command that did not exist.** It says to convert the document with
+  `foundry migrate`, and the CLI had no such command; it printed the help banner. The one diagnostic
+  that explains the difference between the two formats ended in an instruction nobody could follow.
+- **The advertised LSP integration was not there at all.** No `vscode-languageclient` dependency, no
+  reference to the LSP anywhere in the source, while the README called it "Native VS Code Extension &
+  LSP Server integration". `foundry lsp` speaks the protocol and had its framing bug fixed a cycle
+  earlier — and nothing had ever connected to it.
+
+`foundry migrate` now exists and reads **both** shipped canvas shapes, because the extension emitted
+an older one than Studio currently writes — a third format, discovered by trying to migrate the
+extension's own output. It validates before writing, so a migration whose result the compiler would
+still reject writes nothing, and it trims defaults because the migrated file is what its author edits
+next.
+
+The extension compiles through the real CLI, reports the compiler's own output in an output channel,
+starts a language client against `foundry lsp`, and creates IR rather than canvas. It has tests for
+the first time — the invocation logic is now free of any `vscode` import so it can be asserted
+outside an editor, and reverting the flags to positional fails two of them — and a CI job that
+installs, typechecks, tests and bundles it.
+
 ### One rule, three transports, one implementation
 
 `realTimeRoles` says who may watch an entity's events. The framework ships three ways to watch, and
@@ -1057,13 +1093,13 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **946 C# tests in total**, from 258 at the start, plus 33 TypeScript in
-Studio. Counts below are read off a solution-wide run rather than carried forward — the figures in
+Every module has tests. **966 C# tests in total**, from 258 at the start, plus 50 TypeScript across
+Studio and the VS Code extension. Counts below are read off a solution-wide run rather than carried forward — the figures in
 this table had drifted from the suites they describe, which is the same defect the document is about:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
-| `foundry-schema` | 247 | — |
+| `foundry-schema` | 261 | — |
 | `foundry-mongo` | 126 | MongoDB, **both** a replica set and a standalone |
 | `foundry-rules` | 92 | — |
 | `foundry-integration-tests` | 90 | MongoDB |
@@ -1073,9 +1109,10 @@ this table had drifted from the suites they describe, which is the same defect t
 | `foundry-connectors` | 52 | — |
 | `foundry-kafka` | 39 | — |
 | `foundry-studio` | 33 | — (TypeScript) |
+| `foundry-vscode` | 17 | — (TypeScript) |
 | `foundry-realtime` | 40 | — |
 | `foundry-testing` | 26 | — |
-| `foundry-cli` | 24 | — |
+| `foundry-cli` | 30 | — |
 | `foundry-kafka-integration` | 6 | MongoDB **and** a Kafka broker |
 
 The suites that need infrastructure **fail rather than skip** without it. That is the house rule, and

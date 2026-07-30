@@ -77,6 +77,9 @@ public class Program
             case "lsp":
                 return await Foundry.Cli.Lsp.LspServer.RunAsync();
 
+            case "migrate":
+                return HandleMigrateCommand(args.Skip(1).ToArray());
+
             case "validate":
                 return HandleValidateCommand(args.Skip(1).ToArray());
 
@@ -105,6 +108,143 @@ public class Program
     /// <remarks>
     /// Exits non-zero on any error so it can be used as a CI gate.
     /// </remarks>
+    /// <summary>
+    /// Converts a Studio canvas document to normative IR.
+    /// </summary>
+    /// <remarks>
+    /// FDY1010 — the diagnostic a canvas document trips — has always ended with "convert the document
+    /// to normative IR form with 'foundry migrate &lt;file&gt;'". There was no such command, so the one
+    /// message that explains the difference between the two formats told the reader to run something
+    /// that printed the help banner. The VS Code extension's "New Schema" command emitted exactly the
+    /// document that trips it, which is how a user met the dead end without doing anything unusual.
+    /// </remarks>
+    private static int HandleMigrateCommand(string[] args)
+    {
+        string? inputPath = null;
+        string? outPath = null;
+        var inPlace = false;
+
+        for (int i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--out" or "-o" when i + 1 < args.Length: outPath = args[++i]; break;
+                case "--in-place": inPlace = true; break;
+                default:
+                    inputPath ??= args[i];
+                    break;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(inputPath))
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("[Error] Usage: foundry migrate <canvas.json> [--out <ir.json>] [--in-place]");
+            Console.ResetColor();
+            return 1;
+        }
+
+        if (!File.Exists(inputPath))
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"[Error] '{inputPath}' does not exist.");
+            Console.ResetColor();
+            return 1;
+        }
+
+        var json = File.ReadAllText(inputPath);
+
+        if (!Foundry.Schema.Compiler.CanvasMigrator.IsCanvasDocument(json))
+        {
+            // Not an error worth a non-zero exit on its own terms -- but saying "already IR" is much
+            // more useful than converting nothing and reporting success.
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine(
+                $"'{inputPath}' is not a Studio canvas document (it has no 'nodes' array). "
+                + "If it is already IR, validate it with 'foundry validate' instead.");
+            Console.ResetColor();
+            return 1;
+        }
+
+        string irJson;
+        try
+        {
+            irJson = Foundry.Schema.Compiler.CanvasMigrator.MigrateToJson(json);
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"[Error] Could not migrate '{inputPath}': {ex.Message}");
+            Console.ResetColor();
+            return 1;
+        }
+
+        // Validated before it is written. A migration that produces a document the compiler still
+        // rejects has not migrated anything, and writing it would move the failure to the next
+        // command rather than reporting it here.
+        var bag = new Foundry.Schema.Compiler.DiagnosticBag();
+        Foundry.Schema.Compiler.SchemaValidator.ValidateRawDocument(irJson, bag);
+        bag.AddRange(Foundry.Schema.Compiler.SchemaValidator.Validate(
+            System.Text.Json.JsonSerializer.Deserialize<Foundry.Schema.Compiler.SchemaModel>(
+                irJson,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })).Items);
+
+        if (bag.Items.Count > 0)
+        {
+            Console.WriteLine(bag.Render());
+            Console.WriteLine();
+        }
+
+        var target = inPlace
+            ? inputPath
+            : outPath ?? DefaultIrPathFor(inputPath);
+
+        if (bag.HasErrors)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine(
+                $"[Error] The migrated document still has {bag.ErrorCount} error(s), so nothing was "
+                + "written. The canvas is missing information the IR requires -- most often a key "
+                + "property, or an entity with no name.");
+            Console.ResetColor();
+            return 1;
+        }
+
+        File.WriteAllText(target, irJson);
+
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine($"✓ Migrated '{inputPath}' to normative IR at '{target}'");
+        Console.ResetColor();
+
+        if (!inPlace && !string.Equals(target, inputPath, StringComparison.Ordinal))
+        {
+            Console.WriteLine("  The canvas file is left alone; it is still the layout Studio draws from.");
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Names the IR file beside a canvas file: <c>domain.foundry.json</c> becomes <c>domain.ir.json</c>.
+    /// </summary>
+    internal static string DefaultIrPathFor(string canvasPath)
+    {
+        var directory = Path.GetDirectoryName(canvasPath) ?? string.Empty;
+        var name = Path.GetFileName(canvasPath);
+
+        // Strip a compound extension, so 'orders.foundry.json' does not become 'orders.foundry.ir.json'.
+        foreach (var suffix in new[] { ".foundry.json", ".canvas.json", ".foundry", ".json" })
+        {
+            if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                name = name.Substring(0, name.Length - suffix.Length);
+                break;
+            }
+        }
+
+        return Path.Combine(directory, name + ".ir.json");
+    }
+
     private static int HandleValidateCommand(string[] args)
     {
         var inputPath = args.FirstOrDefault(a => !a.StartsWith("-", StringComparison.Ordinal));
@@ -1601,6 +1741,10 @@ jobs:
         Console.Write("  validate <schema.json> ");
         Console.ResetColor();
         Console.WriteLine("Validates an IR document; exits non-zero on error (CI gate).");
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.Write("  migrate <canvas.json>  ");
+        Console.ResetColor();
+        Console.WriteLine("Converts a Studio canvas document to normative IR.");
         Console.ForegroundColor = ConsoleColor.Green;
         Console.Write("  ai-spec [--out dir]    ");
         Console.ResetColor();

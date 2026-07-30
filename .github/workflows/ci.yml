@@ -197,6 +197,38 @@ jobs:
             dotnet "$CLI" validate "$f"
           done
 
+  vscode-extension:
+    name: VS Code extension
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: foundry-vscode
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      # The extension had no gate of any kind: not built, not typechecked, not run. It shipped a
+      # compile command whose arguments the compiler rejects, a "new schema" command that wrote a
+      # document the compiler refuses, and a README claim of LSP integration with no language client
+      # in it. None of that is visible to a typecheck alone, which is why the tests below exist -- but
+      # a component nothing builds is one nobody notices breaking either.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Bundle
+        run: npm run build
+
   studio:
     name: Studio tests and typecheck
     runs-on: ubuntu-latest

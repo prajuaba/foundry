@@ -34,9 +34,9 @@ graph TD
 | **`Foundry.Connectors`** | [`foundry-connectors/`](foundry-connectors/) | Enterprise external service connectors (REST, SOAP 1.1/1.2, GraphQL) with Polly v8 resilience pipelines, authentication, and health checks. |
 | **`Foundry.Testing`** | [`foundry-testing/`](foundry-testing/) | Autonomous multi-protocol testing engine generating schema-driven mock data, xUnit test suites, and interactive HTML execution reports. |
 | **`Foundry.Api`** | [`foundry-api/`](foundry-api/) | API Gateway with MediatR pipeline behaviors (Security, Tenant Middleware, Sliding Window Rate Limiting, Caching, Audit, Rules Validation). |
-| **`Foundry.Cli`** | [`foundry-cli/`](foundry-cli/) | Unified CLI: `new`, `compile`, `validate`, `export`, `sdk`, `doctor`, `test`, `lsp`, `studio`, `api`, plus the AI toolchain (`ai`, `ai-spec`, `eval`). |
+| **`Foundry.Cli`** | [`foundry-cli/`](foundry-cli/) | Unified CLI: `new`, `schema build`, `validate`, `migrate`, `export`, `sdk`, `doctor`, `test`, `lsp`, `studio`, `api`, plus the AI toolchain (`ai`, `ai-spec`, `eval`). |
 | **`Foundry.Studio`** | [`foundry-studio/`](foundry-studio/) | React 19 + Vite Visual Studio IDE featuring domain modeling, DTO composition, workflow designer, external connector setup, API playground, and autonomous test suite runner. |
-| **`foundry-vscode`** | [`foundry-vscode/`](foundry-vscode/) | Native VS Code Extension & LSP Server integration embedding Foundry Studio canvas into editor tabs with native schema sync. |
+| **`foundry-vscode`** | [`foundry-vscode/`](foundry-vscode/) | VS Code extension: Studio canvas in an editor tab, a language client for `foundry lsp` giving IR diagnostics as you type, and commands to create, validate, migrate and compile a schema. |
 
 ---
 
@@ -92,16 +92,20 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **946 C# tests passing**: 247 compiler, 126 MongoDB, 92 rules, 90 integration, 77 API,
-75 file-IO, 52 core, 52 connectors, 40 real-time, 39 Kafka, 26 testing, 24 CLI, and 6 Kafka
+Expect **966 C# tests passing**: 261 compiler, 126 MongoDB, 92 rules, 90 integration, 77 API,
+75 file-IO, 52 core, 52 connectors, 40 real-time, 39 Kafka, 30 CLI, 26 testing, and 6 Kafka
 round-trip against a live broker. Run it this way rather than per-project — a solution-wide run
 exercises project interactions that individual runs miss, and it is what CI does, save for the six
 round-trip tests, which CI runs in a separate job that provisions a broker.
 
-Studio is TypeScript and has its own suite (33 tests):
+Studio and the VS Code extension are TypeScript and have their own suites (33 and 17 tests):
 
 ```bash
 cd foundry-studio && npm test
+```
+
+```bash
+cd foundry-vscode && npm test
 ```
 
 The suites above check that code is generated and that it compiles. Neither says an application

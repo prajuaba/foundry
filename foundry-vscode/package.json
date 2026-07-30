@@ -2,7 +2,7 @@
   "name": "foundry-vscode",
   "displayName": "Foundry Studio IDE",
   "description": "Visual Domain Schema Compiler and RAD Studio for Foundry Framework (.NET 10 & React 19)",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "foundry",
   "engines": {
     "vscode": "^1.85.0"
@@ -14,9 +14,7 @@
   ],
   "activationEvents": [
     "onCustomEditor:foundry.studioEditor",
-    "onCommand:foundry.openStudio",
-    "onCommand:foundry.compileSchema",
-    "onView:foundry.explorerView"
+    "workspaceContains:**/*.ir.json"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -44,16 +42,13 @@
         "displayName": "Foundry Studio Designer",
         "selector": [
           {
+            "filenamePattern": "*.ir.json"
+          },
+          {
             "filenamePattern": "*.foundry.json"
           },
           {
             "filenamePattern": "*.foundry"
-          },
-          {
-            "filenamePattern": "foundry.json"
-          },
-          {
-            "filenamePattern": "*foundry*.json"
           }
         ],
         "priority": "default"
@@ -74,6 +69,16 @@
         "command": "foundry.newSchema",
         "title": "Foundry: Create New Schema Manifest",
         "icon": "$(add)"
+      },
+      {
+        "command": "foundry.migrateSchema",
+        "title": "Foundry: Migrate Studio Canvas to IR",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "foundry.validateSchema",
+        "title": "Foundry: Validate Active IR Document",
+        "icon": "$(check)"
       }
     ]
   },
@@ -83,12 +88,19 @@
     "watch": "tsc -w -p ./",
     "build": "node esbuild.js",
     "build:all": "cd ../foundry-studio && npm run build && cd ../foundry-vscode && rm -rf ./dist-studio && mkdir -p ./dist-studio && cp -r ../foundry-studio/dist/* ./dist-studio/ && node esbuild.js",
-    "package": "npx -y @vscode/vsce package --no-dependencies"
+    "package": "npx -y @vscode/vsce package --no-dependencies",
+    "typecheck": "tsc --noEmit -p ./",
+    "verify": "node scripts/verify-extension.js",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/vscode": "^1.85.0",
     "esbuild": "^0.19.8",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
   }
 }
