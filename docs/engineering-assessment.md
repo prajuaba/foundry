@@ -1200,9 +1200,14 @@ configuration empty.
 
 **Nothing else known.** The MessagePack advisory that stood here is fixed; see section 3.
 
-**MongoDB is still the only data provider.** That is the commercial ceiling for enterprise .NET shops.
-
 ### Deliberate limits, chosen with the reasoning recorded
+
+**MongoDB is the only data provider, and that is now a decision rather than a gap.** The repository
+abstraction would make a second one plausible, and it was carried in this document as the largest
+piece of outstanding work and the commercial ceiling for enterprise .NET shops that mandate SQL
+Server. The owner has descoped it: Foundry targets document-shaped domains on MongoDB. Recorded here
+rather than deleted, because a reader evaluating the framework needs to know it is a boundary that was
+chosen, not one nobody noticed.
 
 **A multi-tenant write with no tenant returns 500.** An application that declares multi-tenant entities
 and cannot resolve a tenant is misconfigured, and refusing is much better than writing a row belonging
@@ -1285,9 +1290,10 @@ ask a more expensive one.
 path recorded as "run once, never under stress" has been driven under it. What follows is design work
 rather than verification, which is a different kind of list and a more expensive one.
 
-1. **A second data provider.** The repository abstraction exists, so it is plausible rather than a
-   rewrite — but it doubles the surface, and it should follow the verification work rather than
-   precede it.
+**And the backlog is empty.** A second data provider was the one item left on it, and it has been
+descoped rather than deferred — see section 5. There is no recorded work outstanding, which is a
+statement about this document rather than about the software: the next thing worth doing has to be
+chosen from the product, not read off a list.
 
 ---
 
