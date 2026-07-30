@@ -92,9 +92,9 @@ Then run the whole solution in one command:
 dotnet test Foundry.slnx
 ```
 
-Expect **966 C# tests passing**: 261 compiler, 126 MongoDB, 92 rules, 90 integration, 77 API,
-75 file-IO, 52 core, 52 connectors, 40 real-time, 39 Kafka, 30 CLI, 26 testing, and 6 Kafka
-round-trip against a live broker. Run it this way rather than per-project — a solution-wide run
+Expect **979 C# tests passing**: 261 compiler, 126 MongoDB, 92 rules, 90 integration, 77 API,
+75 file-IO, 52 core, 52 connectors, 40 real-time, 39 Kafka, 30 CLI, 26 testing, 13 Studio backend,
+and 6 Kafka round-trip against a live broker. Run it this way rather than per-project — a solution-wide run
 exercises project interactions that individual runs miss, and it is what CI does, save for the six
 round-trip tests, which CI runs in a separate job that provisions a broker.
 
@@ -119,6 +119,28 @@ by agreeing on the same mistake. It needs MongoDB on `localhost:27017`:
 ```bash
 ./scripts/runtime-smoke-test.sh
 ```
+
+### Studio needs its backend
+
+The Studio UI derives manifests and compiles schemas through `Foundry.Schema.Backend`, a small
+ASP.NET service on **port 5100**. Everything in the designer that needs the compiler — the route each
+entity gets, C# preview, saving generated classes, the AI panel — asks that service, so that one
+producer owns those answers and Studio cannot drift from `foundry compile`.
+
+It is a separate process from the UI, and it has to be running:
+
+```bash
+dotnet run --project foundry-schema/backend    # the compiler-backed API on :5100
+foundry studio                                  # the bundled UI, or `cd foundry-studio && npm run dev`
+```
+
+`foundry studio --port 5100` is **not** the way to start it: that serves the UI itself on 5100, which
+is the port the UI expects the backend on, so every compiler-backed feature answers 404 against a
+server that is plainly listening. The README said to do exactly that until this was corrected.
+
+The backend writes files on request, and confines itself to a workspace root — the repository by
+default, or `FOUNDRY_WORKSPACE_ROOT` if set. Both the directory and every file name inside it are
+resolved and checked against that root.
 
 ### The showcase: the whole IR in one application
 
@@ -271,8 +293,8 @@ foundry sdk -i schema.json -l py -o sdk/
 # Run autonomous multi-protocol test suite
 foundry test schema.json --output-dir tests/
 
-# Boot visual Studio IDE in browser
-foundry studio --port 5100
+# Boot the visual Studio IDE in a browser (serves the bundled UI)
+foundry studio
 
 # Validate a schema; exits non-zero on error, so it works as a CI gate
 foundry validate schema.json

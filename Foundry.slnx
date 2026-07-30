@@ -80,6 +80,7 @@
   <Folder Name="/foundry-schema/" />
   <Folder Name="/foundry-schema/backend/">
     <Project Path="foundry-schema/backend/Foundry.Schema.Backend.csproj" />
+    <Project Path="foundry-schema/tests/Foundry.Schema.Backend.Tests/Foundry.Schema.Backend.Tests.csproj" />
   </Folder>
   <Folder Name="/foundry-schema/compiler/">
     <Project Path="foundry-schema/compiler/Foundry.Schema.Compiler.csproj" />

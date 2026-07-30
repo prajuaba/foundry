@@ -10,7 +10,9 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using System.Collections.Generic;
 using Foundry.Schema.Compiler;
+using Foundry.Schema.Backend;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -148,32 +150,56 @@ app.MapGet("/api/ai/models", async (string host, IHttpClientFactory httpClientFa
     }
 });
 
+// Writes generated classes to disk.
+//
+// Every destination is resolved and checked for containment, the directory *and* each file name.
+// Only the directory used to be checked, and the file name went straight into Path.Combine -- so a
+// key of "../../../../../../tmp/x" left the workspace while the response reported success naming the
+// directory it had not written to.
 app.MapPost("/api/save-pocos", (SaveRequest request) =>
 {
     try
     {
-        if (request == null || string.IsNullOrEmpty(request.OutputPath))
+        if (request == null)
         {
-            return Results.BadRequest(new { error = "Invalid request. OutputPath is required." });
+            return Results.BadRequest(new { error = "Invalid request." });
         }
 
-        // Validate the output path is within an allowed directory to prevent path traversal
-        var resolvedPath = Path.GetFullPath(request.OutputPath);
-        var allowedRoot = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "..", ".."));
-        if (!resolvedPath.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
+        if (!WorkspacePaths.TryResolveDirectory(request.OutputPath, out var resolvedPath, out var pathError))
         {
-            return Results.BadRequest(new { error = $"Output path must be within the workspace: {allowedRoot}" });
+            return Results.BadRequest(new { error = pathError });
+        }
+
+        // Resolved before anything is written. A batch that is half-written and then refused leaves
+        // the workspace in a state neither the caller nor the user asked for.
+        var targets = new List<(string Path, string Content)>();
+        foreach (var file in request.Files)
+        {
+            if (!WorkspacePaths.TryResolveFile(resolvedPath, file.Key, out var filePath, out var fileError))
+            {
+                return Results.BadRequest(new { error = fileError });
+            }
+
+            targets.Add((filePath, file.Value));
         }
 
         Directory.CreateDirectory(resolvedPath);
 
-        foreach (var file in request.Files)
+        foreach (var (filePath, content) in targets)
         {
-            var filePath = Path.Combine(resolvedPath, file.Key);
-            File.WriteAllText(filePath, file.Value);
+            // The compiler emits into subdirectories, so a key legitimately carries separators.
+            var parent = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+
+            File.WriteAllText(filePath, content);
         }
 
-        return Results.Ok(new { message = $"Successfully saved {request.Files.Count} classes to: {resolvedPath}" });
+        // Reports what was written rather than what was requested.
+        return Results.Ok(new
+        {
+            message = $"Successfully saved {targets.Count} file(s) to: {resolvedPath}",
+            files = targets.Select(t => t.Path).ToArray()
+        });
     }
     catch (Exception ex)
     {
@@ -195,12 +221,12 @@ app.MapPost("/api/save-manifest", (SaveManifestRequest request) =>
             return Results.BadRequest(new { error = "Invalid request. A schema with a namespace is required." });
         }
 
-        // Validate the output path is within an allowed directory to prevent path traversal
-        var targetPath = Path.GetFullPath(request.OutputPath);
-        var allowedRoot = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "..", ".."));
-        if (!targetPath.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
+        // Same containment rule as save-pocos, from the same place. This endpoint was already
+        // correct -- it validates one fully-resolved file path -- and the point of sharing the rule
+        // is that the two cannot drift apart again.
+        if (!WorkspacePaths.TryResolveDirectory(request.OutputPath, out var targetPath, out var pathError))
         {
-            return Results.BadRequest(new { error = $"Output path must be within the workspace: {allowedRoot}" });
+            return Results.BadRequest(new { error = pathError });
         }
 
         var directory = Path.GetDirectoryName(targetPath);
@@ -225,6 +251,17 @@ app.MapPost("/api/save-manifest", (SaveManifestRequest request) =>
 });
 
 app.Run();
+
+/// <summary>
+/// Named so a test host can reference it.
+/// </summary>
+/// <remarks>
+/// A minimal-API entry point is an internal generated class, so <c>WebApplicationFactory&lt;T&gt;</c>
+/// has nothing to bind to. This backend had no tests and no gate that ran it, which is how an
+/// incomplete path-traversal guard sat in it: it compiled as part of the solution and nothing ever
+/// sent it a request.
+/// </remarks>
+public partial class Program { }
 
 public record AiRequest
 {

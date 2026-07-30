@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-966, on a repository whose CI had never passed once.
+979, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 960 C# tests across 12 suites, against a replica set **and** a standalone MongoDB |
+| `Build and test` | 973 C# tests across 13 suites, against a replica set **and** a standalone MongoDB |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -659,6 +659,42 @@ no longer overwrite another worker's successful mark. An at-least-once outbox ca
 duplicate is impossible — a worker killed between publishing and marking will re-send — but it must
 not make one the ordinary result of running two replicas.
 
+### The Studio backend wrote wherever it was told
+
+`Foundry.Schema.Backend` is the service every compiler-backed feature in Studio talks to. It is in
+the solution, so it compiled on every CI run — and nothing had ever sent it a request. No tests, no
+job that starts it.
+
+`/api/save-pocos` had a path-traversal guard that checked the output **directory** and then did
+`Path.Combine(resolvedPath, file.Key)` with a key taken straight from the request body. Proven by
+sending one:
+
+```
+POST /api/save-pocos   { "Files": { "../../../../../../../../tmp/x.txt": "…" } }
+→ {"message":"Successfully saved 1 classes to: …/foundry-studio"}
+```
+
+The file was written to `/tmp`. So it escaped the workspace **and** reported success naming a
+directory it had not written to. A guard that reads as protection and is not is worse than no guard,
+because it stops anyone looking again.
+
+Rejecting separators was not the fix — the compiler emits into subdirectories, so
+`Commands/SubmitOrderCommand.cs` is an ordinary key. The rule is that the *resolved* destination must
+stay inside the root, and it now lives in one place that both writing endpoints call.
+`/api/save-manifest` was already correct; sharing the rule is what stops the two drifting apart
+again. Containment is also checked with a trailing separator, so a sibling named `foundry-evil` no
+longer passes a prefix test against `foundry`. The workspace root is read from
+`FOUNDRY_WORKSPACE_ROOT` rather than derived from the current directory, because a boundary that
+moves with the caller's shell is not one anyone can reason about.
+
+Thirteen tests drive the endpoints over HTTP, six of which fail against the old guard. The success
+response now lists the paths actually written.
+
+**And the README sent every user into a broken setup.** It said to start Studio with
+`foundry studio --port 5100`, which serves the *UI* on 5100 — the port the UI expects the *backend*
+on. Following the documentation, every compiler-backed feature answered 404 against a server that was
+plainly listening, and nothing anywhere mentioned starting the backend at all.
+
 ### The VS Code extension told users their schema had compiled
 
 It had not been touched since before the IR became normative, it was in no CI job — not built, not
@@ -1093,7 +1129,7 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **966 C# tests in total**, from 258 at the start, plus 50 TypeScript across
+Every module has tests. **979 C# tests in total**, from 258 at the start, plus 50 TypeScript across
 Studio and the VS Code extension. Counts below are read off a solution-wide run rather than carried forward — the figures in
 this table had drifted from the suites they describe, which is the same defect the document is about:
 
@@ -1108,6 +1144,7 @@ this table had drifted from the suites they describe, which is the same defect t
 | `foundry-core` | 52 | — |
 | `foundry-connectors` | 52 | — |
 | `foundry-kafka` | 39 | — |
+| `foundry-schema` backend | 13 | — |
 | `foundry-studio` | 33 | — (TypeScript) |
 | `foundry-vscode` | 17 | — (TypeScript) |
 | `foundry-realtime` | 40 | — |
