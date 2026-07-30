@@ -168,4 +168,124 @@ public class SdkGeneratorTests
         // A client creating a record does not supply the id.
         Assert.Contains("Id?: string;", TypeScriptSdkGenerator.Generate(Schema()));
     }
+
+    // ── The surface each SDK exposes ────────────────────────────────────────
+    //
+    // All three generators decided this for themselves and all three decided it the same wrong way:
+    // every entity got getAll/getById/create/delete whatever its apiEnabledMethods said, and none of
+    // them got update even though PUT is the commonest declared method after GET. So the SDKs offered
+    // calls that answer 405 and omitted one the API serves. SdkSurface answers it once now.
+
+    private static SchemaModel SurfaceSchema(params string[] methods) => new()
+    {
+        Namespace = "Sales.Domain",
+        Entities =
+        [
+            new Entity
+            {
+                Name = "Order",
+                ApiEnabledMethods = [.. methods],
+                Properties =
+                [
+                    new Property { Name = "Id", Type = "ObjectId", IsKey = true },
+                    new Property { Name = "TenantId", Type = "string", IsTenantKey = true },
+                    new Property { Name = "Reference", Type = "string", Attributes = ["Required"] },
+                    new Property { Name = "Note", Type = "string" }
+                ]
+            }
+        ]
+    };
+
+    [Fact]
+    public void NoSdkOffersDeleteForAnEntityThatDoesNotServeIt()
+    {
+        var schema = SurfaceSchema("GET", "POST");
+
+        Assert.DoesNotContain("async delete(", TypeScriptSdkGenerator.Generate(schema));
+        Assert.DoesNotContain("def delete_order", PythonSdkGenerator.Generate(schema));
+        Assert.DoesNotContain("DeleteAsync", CsharpSdkGenerator.Generate(schema));
+    }
+
+    [Fact]
+    public void EverySdkOffersUpdateWhenTheEntityServesPut()
+    {
+        // Missing entirely from all three, in every SDK the framework has ever produced.
+        var schema = SurfaceSchema("GET", "PUT");
+
+        Assert.Contains("async update(", TypeScriptSdkGenerator.Generate(schema));
+        Assert.Contains("def update_order", PythonSdkGenerator.Generate(schema));
+        Assert.Contains("UpdateAsync", CsharpSdkGenerator.Generate(schema));
+    }
+
+    [Fact]
+    public void AnEntityWithNoApiSurfaceGetsNoClient()
+    {
+        var schema = SurfaceSchema();
+
+        Assert.DoesNotContain("OrderClient", TypeScriptSdkGenerator.Generate(schema));
+        Assert.DoesNotContain("def get_all_order", PythonSdkGenerator.Generate(schema));
+        Assert.DoesNotContain("class OrderClient", CsharpSdkGenerator.Generate(schema));
+    }
+
+    // ── Authentication ──────────────────────────────────────────────────────
+
+    [Fact]
+    public void TheTypeScriptClientSendsABearerToken()
+    {
+        // Every generated endpoint calls RequireAuthorization(), and this client sent no
+        // Authorization header at all -- so every call it made answered 401.
+        var sdk = TypeScriptSdkGenerator.Generate(SurfaceSchema("GET"));
+
+        Assert.Contains("token?: string;", sdk);
+        Assert.Contains("Bearer ${config.token}", sdk);
+    }
+
+    [Fact]
+    public void ThePythonClientSendsABearerToken()
+    {
+        var sdk = PythonSdkGenerator.Generate(SurfaceSchema("GET"));
+
+        Assert.Contains("token: Optional[str]", sdk);
+        Assert.Contains("f'Bearer {token}'", sdk);
+    }
+
+    // ── Failures are not returned as data ───────────────────────────────────
+
+    [Fact]
+    public void TheTypeScriptClientRefusesToParseAFailedResponse()
+    {
+        // It called res.json() without looking at the status, so a 401 body was parsed and handed
+        // back typed as the entity the caller asked for. A failure that arrives typed as success is
+        // the worst shape a client can have.
+        var sdk = TypeScriptSdkGenerator.Generate(SurfaceSchema("GET", "POST"));
+
+        Assert.Contains("class FoundryApiError", sdk);
+        Assert.Contains("ensureOk(res, url)", sdk);
+    }
+
+    [Fact]
+    public void TheCsharpClientChecksTheStatusBeforeDeserialising()
+    {
+        var sdk = CsharpSdkGenerator.Generate(SurfaceSchema("POST"));
+
+        Assert.Contains("EnsureSuccessStatusCode", sdk);
+    }
+
+    // ── What a caller must supply ───────────────────────────────────────────
+
+    [Fact]
+    public void ServerAssignedPropertiesAreNotDemandedFromTheCaller()
+    {
+        // Only the key used to be optional, so a caller had to construct every field to satisfy the
+        // type -- including the tenant key, which the server stamps from their token and refuses to
+        // take from a request body.
+        var sdk = TypeScriptSdkGenerator.Generate(SurfaceSchema("GET", "POST"));
+
+        Assert.Contains("Id?: string;", sdk);
+        Assert.Contains("TenantId?: string;", sdk);
+        Assert.Contains("Note?: string;", sdk);
+
+        // The control: a property the schema marks Required stays required.
+        Assert.Contains("Reference: string;", sdk);
+    }
 }

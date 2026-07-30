@@ -8,7 +8,7 @@ not to market the project.
 demo-grade. It is now verified where it matters: the repository builds from a clean clone, five CI
 jobs pass, every module has tests, and a scaffolded application is driven over HTTP through
 authentication, roles, ownership, tenancy, workflows and a restart. The suite went from 258 tests to
-990, on a repository whose CI had never passed once.
+1,000, on a repository whose CI had never passed once.
 
 The single most important finding is not any individual bug. It is this:
 
@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 984 C# tests across 13 suites, against a replica set **and** a standalone MongoDB |
+| `Build and test` | 994 C# tests across 13 suites, against a replica set **and** a standalone MongoDB |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
@@ -659,6 +659,42 @@ no longer overwrite another worker's successful mark. An at-least-once outbox ca
 duplicate is impossible — a worker killed between publishing and marking will re-send — but it must
 not make one the ordinary result of running two replicas.
 
+### The client SDKs could not make a single successful call
+
+Three SDK generators, and the C# one was compiled by a gate that had already earned its place — it
+caught an SDK shipping `public ObjectId Id` with no `using MongoDB.Bson`, a build error in the
+*consumer's* project. TypeScript and Python had no equivalent: every assertion about them was a
+string comparison. Both turn out to be valid code that asks the wrong questions.
+
+- **No authentication, in any of the three.** Every generated endpoint calls
+  `RequireAuthorization()`, and the TypeScript and Python clients sent no `Authorization` header at
+  all, so every call answered 401. The C# client takes an injected `HttpClient`, which is the
+  idiomatic place for a token — but nothing said so.
+- **The TypeScript client returned failures as data.** It passed every response straight to
+  `res.json()` without looking at the status, so a 401 body was parsed and handed back typed as the
+  entity the caller asked for. A failure that arrives typed as success is the worst shape a client
+  can have. The C# `CreateAsync` did the same.
+- **All three ignored `apiEnabledMethods`.** Every entity got `getAll`, `getById`, `create` and
+  `delete` whatever it declared — so the showcase's SDK offered `delete_product` and
+  `delete_ledgerentry` against entities that serve no DELETE.
+- **And none of them offered `update`,** though four of the showcase's five entities declare PUT. The
+  SDKs shipped calls the API answers 405 to, and omitted one it serves.
+- **Only the key was optional in the TypeScript types,** so a caller had to construct every field to
+  satisfy the interface — including the tenant and owner keys the server stamps from their token and
+  refuses to take from a request body.
+
+Three generators deciding the same question three times is what produced one answer three times
+wrong, so `SdkSurface` now answers it once for all of them. Optionality follows the schema: the key,
+the tenant key, the owner key and anything not marked `Required` are optional, and a `Required`
+property stays required — asserted both ways.
+
+The gates are the real fix. The TypeScript SDK is type-checked by the real `tsc` under `--strict`,
+and the Python SDK byte-compiled by the real `python3`; both were verified by breaking the generator.
+A live end-to-end phase was considered and left out on purpose: exercising the Python client against
+the running application would need `requests` installed on the runner, and the route it calls already
+comes from `ApiManifestGenerator.RouteFor`, which the smoke test checks against the running server
+through the exported OpenAPI.
+
 ### The autonomous testing engine could not fail
 
 `foundry test` generates xUnit suites from a schema. Nothing compiled them and nothing ran them, and
@@ -1167,13 +1203,13 @@ and is now its only home rather than one of two copies. Studio's suite went from
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **990 C# tests in total**, from 258 at the start, plus 50 TypeScript across
+Every module has tests. **1,000 C# tests in total**, from 258 at the start, plus 50 TypeScript across
 Studio and the VS Code extension. Counts below are read off a solution-wide run rather than carried forward — the figures in
 this table had drifted from the suites they describe, which is the same defect the document is about:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
-| `foundry-schema` | 261 | — |
+| `foundry-schema` | 271 | — |
 | `foundry-mongo` | 126 | MongoDB, **both** a replica set and a standalone |
 | `foundry-rules` | 92 | — |
 | `foundry-integration-tests` | 90 | MongoDB |

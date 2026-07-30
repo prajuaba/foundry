@@ -1,10 +1,19 @@
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace Foundry.Schema.Compiler.Generators;
 
 /// <summary>
-/// Generator that creates a Python Client SDK using httpx/requests from a Foundry domain schema.
+/// Generates a Python client for a Foundry domain schema.
 /// </summary>
+/// <remarks>
+/// Every generated endpoint calls <c>RequireAuthorization()</c>, and this client sent no
+/// <c>Authorization</c> header, so every call it made answered 401 — which <c>raise_for_status()</c>
+/// then reported as an HTTP error rather than as "you did not authenticate". It also offered
+/// <c>delete_*</c> for entities that declare no DELETE, and no <c>update_*</c> at all for the ones
+/// that declare PUT. <see cref="SdkSurface"/> answers both questions for all three languages.
+/// </remarks>
 public static class PythonSdkGenerator
 {
     public static string Generate(SchemaModel schema)
@@ -17,9 +26,20 @@ public static class PythonSdkGenerator
         sb.AppendLine("from typing import List, Dict, Any, Optional\n");
 
         sb.AppendLine("class FoundryClient:");
-        sb.AppendLine("    def __init__(self, base_url: str, tenant_id: Optional[str] = None):");
+        sb.AppendLine("    \"\"\"Client for the generated API.");
+        sb.AppendLine("");
+        sb.AppendLine("    Every endpoint requires an authenticated caller, so `token` is not optional");
+        sb.AppendLine("    in practice: without it the API answers 401 to everything.");
+        sb.AppendLine("    \"\"\"");
+        sb.AppendLine("");
+        sb.AppendLine("    def __init__(self, base_url: str, token: Optional[str] = None,");
+        sb.AppendLine("                 tenant_id: Optional[str] = None):");
         sb.AppendLine("        self.base_url = base_url.rstrip('/')");
-        sb.AppendLine("        self.headers = {'X-Tenant-ID': tenant_id} if tenant_id else {}\n");
+        sb.AppendLine("        self.headers: Dict[str, str] = {}");
+        sb.AppendLine("        if token:");
+        sb.AppendLine("            self.headers['Authorization'] = f'Bearer {token}'");
+        sb.AppendLine("        if tenant_id:");
+        sb.AppendLine("            self.headers['X-Tenant-ID'] = tenant_id\n");
 
         if (schema.Entities != null)
         {
@@ -33,25 +53,48 @@ public static class PythonSdkGenerator
                 // used for the Python method names, which are a naming choice rather than a contract.
                 var route = ApiManifestGenerator.RouteFor(name);
 
-                sb.AppendLine($"    # {name} endpoints");
-                sb.AppendLine($"    def get_all_{lower}(self) -> List[Dict[str, Any]]:");
-                sb.AppendLine($"        res = requests.get(f'{{self.base_url}}{route}', headers=self.headers)");
-                sb.AppendLine("        res.raise_for_status()");
-                sb.AppendLine("        return res.json()\n");
+                if (!SdkSurface.HasAnySurface(entity)) continue;
 
-                sb.AppendLine($"    def get_{lower}_by_id(self, item_id: str) -> Dict[str, Any]:");
-                sb.AppendLine($"        res = requests.get(f'{{self.base_url}}{route}/{{item_id}}', headers=self.headers)");
-                sb.AppendLine("        res.raise_for_status()");
-                sb.AppendLine("        return res.json()\n");
+                sb.AppendLine($"    # {name} endpoints. Serves: {string.Join(", ", SdkSurface.MethodsFor(entity))}");
 
-                sb.AppendLine($"    def create_{lower}(self, data: Dict[str, Any]) -> Dict[str, Any]:");
-                sb.AppendLine($"        res = requests.post(f'{{self.base_url}}{route}', json=data, headers=self.headers)");
-                sb.AppendLine("        res.raise_for_status()");
-                sb.AppendLine("        return res.json()\n");
+                if (SdkSurface.HasList(entity))
+                {
+                    sb.AppendLine($"    def get_all_{lower}(self) -> List[Dict[str, Any]]:");
+                    sb.AppendLine($"        res = requests.get(f'{{self.base_url}}{route}', headers=self.headers)");
+                    sb.AppendLine("        res.raise_for_status()");
+                    sb.AppendLine("        return res.json()\n");
+                }
 
-                sb.AppendLine($"    def delete_{lower}(self, item_id: str) -> None:");
-                sb.AppendLine($"        res = requests.delete(f'{{self.base_url}}{route}/{{item_id}}', headers=self.headers)");
-                sb.AppendLine("        res.raise_for_status()\n");
+                if (SdkSurface.HasGetById(entity))
+                {
+                    sb.AppendLine($"    def get_{lower}_by_id(self, item_id: str) -> Dict[str, Any]:");
+                    sb.AppendLine($"        res = requests.get(f'{{self.base_url}}{route}/{{item_id}}', headers=self.headers)");
+                    sb.AppendLine("        res.raise_for_status()");
+                    sb.AppendLine("        return res.json()\n");
+                }
+
+                if (SdkSurface.HasCreate(entity))
+                {
+                    sb.AppendLine($"    def create_{lower}(self, data: Dict[str, Any]) -> Dict[str, Any]:");
+                    sb.AppendLine($"        res = requests.post(f'{{self.base_url}}{route}', json=data, headers=self.headers)");
+                    sb.AppendLine("        res.raise_for_status()");
+                    sb.AppendLine("        return res.json()\n");
+                }
+
+                if (SdkSurface.HasUpdate(entity))
+                {
+                    sb.AppendLine($"    def update_{lower}(self, item_id: str, data: Dict[str, Any]) -> Dict[str, Any]:");
+                    sb.AppendLine($"        res = requests.put(f'{{self.base_url}}{route}/{{item_id}}', json=data, headers=self.headers)");
+                    sb.AppendLine("        res.raise_for_status()");
+                    sb.AppendLine("        return res.json()\n");
+                }
+
+                if (SdkSurface.HasDelete(entity))
+                {
+                    sb.AppendLine($"    def delete_{lower}(self, item_id: str) -> None:");
+                    sb.AppendLine($"        res = requests.delete(f'{{self.base_url}}{route}/{{item_id}}', headers=self.headers)");
+                    sb.AppendLine("        res.raise_for_status()\n");
+                }
             }
         }
 

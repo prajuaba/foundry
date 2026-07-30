@@ -50,25 +50,61 @@ public static class CsharpSdkGenerator
                 }
                 sb.AppendLine("}");
 
-                sb.AppendLine($"\npublic class {entity.Name}Client");
+                if (!SdkSurface.HasAnySurface(entity)) continue;
+
+                sb.AppendLine($"\n/// <summary>Client for {entity.Name}. Serves: {string.Join(", ", SdkSurface.MethodsFor(entity))}</summary>");
+                sb.AppendLine("/// <remarks>");
+                sb.AppendLine("/// Every endpoint requires an authenticated caller, so the supplied HttpClient must carry a");
+                sb.AppendLine("/// bearer token -- set DefaultRequestHeaders.Authorization, or register it with AddHttpClient.");
+                sb.AppendLine("/// </remarks>");
+                sb.AppendLine($"public class {entity.Name}Client");
                 sb.AppendLine("{");
                 sb.AppendLine("    private readonly HttpClient _http;");
                 sb.AppendLine($"    public {entity.Name}Client(HttpClient http) => _http = http;\n");
 
-                sb.AppendLine($"    public async Task<List<{entity.Name}Model>?> GetAllAsync()");
-                sb.AppendLine($"        => await _http.GetFromJsonAsync<List<{entity.Name}Model>>(\"{route}\");\n");
+                if (SdkSurface.HasList(entity))
+                {
+                    sb.AppendLine($"    public async Task<List<{entity.Name}Model>?> GetAllAsync()");
+                    sb.AppendLine($"        => await _http.GetFromJsonAsync<List<{entity.Name}Model>>(\"{route}\");\n");
+                }
 
-                sb.AppendLine($"    public async Task<{entity.Name}Model?> GetByIdAsync(string id)");
-                sb.AppendLine($"        => await _http.GetFromJsonAsync<{entity.Name}Model>($\"{route}/{{id}}\");\n");
+                if (SdkSurface.HasGetById(entity))
+                {
+                    sb.AppendLine($"    public async Task<{entity.Name}Model?> GetByIdAsync(string id)");
+                    sb.AppendLine($"        => await _http.GetFromJsonAsync<{entity.Name}Model>($\"{route}/{{id}}\");\n");
+                }
 
-                sb.AppendLine($"    public async Task<{entity.Name}Model?> CreateAsync({entity.Name}Model model)");
-                sb.AppendLine("    {");
-                sb.AppendLine($"        var res = await _http.PostAsJsonAsync(\"{route}\", model);");
-                sb.AppendLine($"        return await res.Content.ReadFromJsonAsync<{entity.Name}Model>();");
-                sb.AppendLine("    }\n");
+                if (SdkSurface.HasCreate(entity))
+                {
+                    sb.AppendLine($"    public async Task<{entity.Name}Model?> CreateAsync({entity.Name}Model model)");
+                    sb.AppendLine("    {");
+                    sb.AppendLine($"        var res = await _http.PostAsJsonAsync(\"{route}\", model);");
+                    // Checked. Without this a 401 body was deserialised into the model and handed
+                    // back as though the create had succeeded.
+                    sb.AppendLine("        res.EnsureSuccessStatusCode();");
+                    sb.AppendLine($"        return await res.Content.ReadFromJsonAsync<{entity.Name}Model>();");
+                    sb.AppendLine("    }\n");
+                }
 
-                sb.AppendLine($"    public async Task DeleteAsync(string id)");
-                sb.AppendLine($"        => await _http.DeleteAsync($\"{route}/{{id}}\");");
+                if (SdkSurface.HasUpdate(entity))
+                {
+                    sb.AppendLine($"    public async Task<{entity.Name}Model?> UpdateAsync(string id, {entity.Name}Model model)");
+                    sb.AppendLine("    {");
+                    sb.AppendLine($"        var res = await _http.PutAsJsonAsync($\"{route}/{{id}}\", model);");
+                    sb.AppendLine("        res.EnsureSuccessStatusCode();");
+                    sb.AppendLine($"        return await res.Content.ReadFromJsonAsync<{entity.Name}Model>();");
+                    sb.AppendLine("    }\n");
+                }
+
+                if (SdkSurface.HasDelete(entity))
+                {
+                    sb.AppendLine("    public async Task DeleteAsync(string id)");
+                    sb.AppendLine("    {");
+                    sb.AppendLine($"        var res = await _http.DeleteAsync($\"{route}/{{id}}\");");
+                    sb.AppendLine("        res.EnsureSuccessStatusCode();");
+                    sb.AppendLine("    }");
+                }
+
                 sb.AppendLine("}");
             }
         }

@@ -5,8 +5,22 @@ using System.Text;
 namespace Foundry.Schema.Compiler.Generators;
 
 /// <summary>
-/// Generator that creates a strongly-typed TypeScript Client SDK from a Foundry domain schema.
+/// Generates a typed TypeScript client for a Foundry domain schema.
 /// </summary>
+/// <remarks>
+/// <para>
+/// Every generated endpoint calls <c>RequireAuthorization()</c>, and this client sent no
+/// <c>Authorization</c> header — so every call it made answered 401. It then passed the response
+/// straight to <c>res.json()</c> without looking at the status, so that 401 body was parsed and
+/// returned as though it were the entity the caller asked for. A failure that arrives typed as
+/// success is the worst shape a client can have.
+/// </para>
+/// <para>
+/// It also offered <c>delete</c> for entities that declare no DELETE, and no <c>update</c> at all
+/// for the four in five that declare PUT. <see cref="SdkSurface"/> now answers both questions for
+/// all three languages at once.
+/// </para>
+/// </remarks>
 public static class TypeScriptSdkGenerator
 {
     public static string Generate(SchemaModel schema)
@@ -17,77 +31,124 @@ public static class TypeScriptSdkGenerator
 
         sb.AppendLine("export interface ApiConfig {");
         sb.AppendLine("  baseUrl: string;");
+        sb.AppendLine("  /** Bearer token. Every generated endpoint requires an authenticated caller. */");
+        sb.AppendLine("  token?: string;");
         sb.AppendLine("  tenantId?: string;");
         sb.AppendLine("  headers?: Record<string, string>;");
         sb.AppendLine("}\n");
 
-        if (schema.Entities != null)
-        {
-            foreach (var entity in schema.Entities)
-            {
-                sb.AppendLine($"export interface {entity.Name} {{");
-                foreach (var prop in entity.Properties)
-                {
-                    var propType = MapTypeScriptType(prop.Type);
-                    var optional = prop.IsKey || prop.Type.EndsWith("?") ? "?" : "";
+        sb.AppendLine("/** Thrown when the API answers with a non-success status. */");
+        sb.AppendLine("export class FoundryApiError extends Error {");
+        sb.AppendLine("  constructor(readonly status: number, readonly url: string, readonly body: string) {");
+        sb.AppendLine("    super(`${url} answered ${status}: ${body}`);");
+        sb.AppendLine("    this.name = 'FoundryApiError';");
+        sb.AppendLine("  }");
+        sb.AppendLine("}\n");
 
-                    // Emitted exactly as declared. These were lower-cased, and the API applies no
-                    // naming policy -- it serialises "FullName", not "fullname" -- so every field on
-                    // every generated interface read back as undefined. TypeScript compiled it
-                    // happily, which is why nothing caught it.
-                    sb.AppendLine($"  {prop.Name}{optional}: {propType};");
-                }
-                sb.AppendLine("}\n");
+        sb.AppendLine("function buildHeaders(config: ApiConfig, json = false): Record<string, string> {");
+        sb.AppendLine("  const headers: Record<string, string> = { ...config.headers };");
+        sb.AppendLine("  if (json) headers['Content-Type'] = 'application/json';");
+        sb.AppendLine("  if (config.token) headers['Authorization'] = `Bearer ${config.token}`;");
+        sb.AppendLine("  if (config.tenantId) headers['X-Tenant-ID'] = config.tenantId;");
+        sb.AppendLine("  return headers;");
+        sb.AppendLine("}\n");
+
+        sb.AppendLine("async function ensureOk(res: Response, url: string): Promise<Response> {");
+        sb.AppendLine("  if (!res.ok) throw new FoundryApiError(res.status, url, await res.text().catch(() => ''));");
+        sb.AppendLine("  return res;");
+        sb.AppendLine("}\n");
+
+        foreach (var entity in schema.Entities ?? new List<Entity>())
+        {
+            sb.AppendLine($"export interface {entity.Name} {{");
+
+            foreach (var prop in entity.Properties ?? new List<Property>())
+            {
+                var propType = MapTypeScriptType(prop.Type);
+
+                // Optional unless the schema says the caller must supply it. Only the key used to be
+                // optional, so a caller had to build every field -- including the tenant and owner
+                // keys the server stamps from their token and refuses to take from a body.
+                var optional = SdkSurface.IsRequired(prop) ? "" : "?";
+
+                // Emitted exactly as declared. These were lower-cased, and the API applies no naming
+                // policy -- it serialises "FullName", not "fullname" -- so every field on every
+                // generated interface read back as undefined. TypeScript compiled it happily.
+                sb.AppendLine($"  {prop.Name}{optional}: {propType};");
             }
+
+            sb.AppendLine("}\n");
         }
 
-        if (schema.Entities != null)
+        foreach (var entity in schema.Entities ?? new List<Entity>())
         {
-            foreach (var entity in schema.Entities)
+            if (!SdkSurface.HasAnySurface(entity)) continue;
+
+            var name = entity.Name;
+
+            // The route the application actually serves, from the one producer of that contract.
+            // This emitted "/api/v1/{singular-lowercase}" -- the identical mistake found and fixed in
+            // Studio, in the exporters and in the test generator, and each time missed here.
+            var route = ApiManifestGenerator.RouteFor(name);
+
+            sb.AppendLine($"/** Serves: {string.Join(", ", SdkSurface.MethodsFor(entity))} */");
+            sb.AppendLine($"export class {name}Client {{");
+            sb.AppendLine("  constructor(private config: ApiConfig) {}\n");
+
+            if (SdkSurface.HasList(entity))
             {
-                var name = entity.Name;
-
-                // The route the application actually serves, from the one producer of that contract.
-                // This emitted "/api/v1/{singular-lowercase}" -- the identical mistake that was found
-                // and fixed in Studio's designer and playground, and never fixed here. Every SDK this
-                // generator has ever produced, in all three languages, called URLs the running
-                // application does not serve, so every request 404'd.
-                var route = ApiManifestGenerator.RouteFor(name);
-
-                sb.AppendLine($"export class {name}Client {{");
-                sb.AppendLine("  constructor(private config: ApiConfig) {}\n");
-
                 sb.AppendLine($"  async getAll(): Promise<{name}[]> {{");
-                sb.AppendLine($"    const res = await fetch(`${{this.config.baseUrl}}{route}`, {{");
-                sb.AppendLine("      headers: { 'X-Tenant-ID': this.config.tenantId || '', ...this.config.headers }");
-                sb.AppendLine("    });");
-                sb.AppendLine("    return await res.json();");
+                sb.AppendLine($"    const url = `${{this.config.baseUrl}}{route}`;");
+                sb.AppendLine("    const res = await fetch(url, { headers: buildHeaders(this.config) });");
+                sb.AppendLine("    return await (await ensureOk(res, url)).json();");
                 sb.AppendLine("  }\n");
+            }
 
+            if (SdkSurface.HasGetById(entity))
+            {
                 sb.AppendLine($"  async getById(id: string): Promise<{name}> {{");
-                sb.AppendLine($"    const res = await fetch(`${{this.config.baseUrl}}{route}/${{id}}`, {{");
-                sb.AppendLine("      headers: { 'X-Tenant-ID': this.config.tenantId || '', ...this.config.headers }");
-                sb.AppendLine("    });");
-                sb.AppendLine("    return await res.json();");
+                sb.AppendLine($"    const url = `${{this.config.baseUrl}}{route}/${{id}}`;");
+                sb.AppendLine("    const res = await fetch(url, { headers: buildHeaders(this.config) });");
+                sb.AppendLine("    return await (await ensureOk(res, url)).json();");
                 sb.AppendLine("  }\n");
+            }
 
+            if (SdkSurface.HasCreate(entity))
+            {
                 sb.AppendLine($"  async create(data: Partial<{name}>): Promise<{name}> {{");
-                sb.AppendLine($"    const res = await fetch(`${{this.config.baseUrl}}{route}`, {{");
+                sb.AppendLine($"    const url = `${{this.config.baseUrl}}{route}`;");
+                sb.AppendLine("    const res = await fetch(url, {");
                 sb.AppendLine("      method: 'POST',");
-                sb.AppendLine("      headers: { 'Content-Type': 'application/json', 'X-Tenant-ID': this.config.tenantId || '', ...this.config.headers },");
+                sb.AppendLine("      headers: buildHeaders(this.config, true),");
                 sb.AppendLine("      body: JSON.stringify(data)");
                 sb.AppendLine("    });");
-                sb.AppendLine("    return await res.json();");
+                sb.AppendLine("    return await (await ensureOk(res, url)).json();");
                 sb.AppendLine("  }\n");
-
-                sb.AppendLine($"  async delete(id: string): Promise<void> {{");
-                sb.AppendLine($"    await fetch(`${{this.config.baseUrl}}{route}/${{id}}`, {{");
-                sb.AppendLine("      method: 'DELETE',");
-                sb.AppendLine("      headers: { 'X-Tenant-ID': this.config.tenantId || '', ...this.config.headers }");
-                sb.AppendLine("    });");
-                sb.AppendLine("  }");
-                sb.AppendLine("}\n");
             }
+
+            if (SdkSurface.HasUpdate(entity))
+            {
+                sb.AppendLine($"  async update(id: string, data: Partial<{name}>): Promise<{name}> {{");
+                sb.AppendLine($"    const url = `${{this.config.baseUrl}}{route}/${{id}}`;");
+                sb.AppendLine("    const res = await fetch(url, {");
+                sb.AppendLine("      method: 'PUT',");
+                sb.AppendLine("      headers: buildHeaders(this.config, true),");
+                sb.AppendLine("      body: JSON.stringify(data)");
+                sb.AppendLine("    });");
+                sb.AppendLine("    return await (await ensureOk(res, url)).json();");
+                sb.AppendLine("  }\n");
+            }
+
+            if (SdkSurface.HasDelete(entity))
+            {
+                sb.AppendLine("  async delete(id: string): Promise<void> {");
+                sb.AppendLine($"    const url = `${{this.config.baseUrl}}{route}/${{id}}`;");
+                sb.AppendLine("    const res = await fetch(url, { method: 'DELETE', headers: buildHeaders(this.config) });");
+                sb.AppendLine("    await ensureOk(res, url);");
+                sb.AppendLine("  }\n");
+            }
+
+            sb.AppendLine("}\n");
         }
 
         return sb.ToString();
@@ -100,6 +161,7 @@ public static class TypeScriptSdkGenerator
             "int" or "int32" or "long" or "decimal" or "double" or "float" => "number",
             "bool" or "boolean" => "boolean",
             "datetime" => "string",
+            "list<string>" => "string[]",
             _ => "string"
         };
     }
