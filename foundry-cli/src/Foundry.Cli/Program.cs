@@ -13,6 +13,76 @@ namespace Foundry.Cli;
 
 public class Program
 {
+    /// <summary>One command: how it is invoked, what it does, and what runs it.</summary>
+    private sealed record CommandSpec(
+        string Name,
+        string Usage,
+        string Summary,
+        Func<string[], Task<int>> Handler,
+        params string[] Aliases);
+
+    /// <summary>
+    /// Every command the CLI accepts.
+    /// </summary>
+    /// <remarks>
+    /// Dispatch and <c>--help</c> both read this table, so a command cannot be one without being the
+    /// other. They were two separate lists — a switch and a sequence of Console.WriteLine calls — and
+    /// they disagreed: <c>schema</c>, <c>api</c>, <c>sdk</c>, <c>test</c> and <c>lsp</c> all worked
+    /// and none of them appeared in the help. Five of seventeen commands were reachable only by
+    /// reading the source, which is the same class of defect as a rule with several implementations:
+    /// two things that must agree, kept in two places, with nothing checking.
+    /// </remarks>
+    private static readonly CommandSpec[] Commands =
+    [
+        new("new", "new <ProjectName> [--schema <f>]", "Scaffolds a complete, ready-to-run C# API project.",
+            args => Task.FromResult(HandleNewCommand(args)), "init", "create"),
+
+        new("schema", "schema build -i <f> -o <dir>", "Compiles an IR document to C# and an api-manifest.json.",
+            args => Task.FromResult(HandleSchemaCommand(args))),
+
+        new("validate", "validate <schema.json>", "Validates an IR document; exits non-zero on error (CI gate).",
+            args => Task.FromResult(HandleValidateCommand(args))),
+
+        new("migrate", "migrate <canvas.json>", "Converts a Studio canvas document to normative IR.",
+            args => Task.FromResult(HandleMigrateCommand(args))),
+
+        new("export", "export -i <f> -f <format>", "Exports openapi | asyncapi | postman | mermaid.",
+            args => Task.FromResult(HandleExportCommand(args))),
+
+        new("sdk", "sdk -i <f> -l <lang>", "Generates a client SDK: ts | csharp | python.",
+            args => Task.FromResult(HandleSdkCommand(args))),
+
+        new("test", "test -i <f> -o <dir>", "Generates xUnit suites from a schema (does not run them).",
+            args => Task.FromResult(HandleTestCommand(args))),
+
+        new("api", "api [--project <csproj>]", "Runs a Foundry API project in the current directory.",
+            HandleApiCommandAsync),
+
+        new("studio", "studio [--port 5000]", "Boots the embedded Standalone Visual Studio IDE web server.",
+            ServeStudioAsync),
+
+        new("lsp", "lsp", "Runs the IR language server over stdio (for editors).",
+            _ => Foundry.Cli.Lsp.LspServer.RunAsync()),
+
+        new("generate", "generate ci", "Generates production GitHub Actions / CI pipeline YAML.",
+            args => Task.FromResult(HandleGenerateCommand(args))),
+
+        new("doctor", "doctor", "Checks the local environment; exits non-zero if a prerequisite is missing.",
+            args => HandleDoctorCommandAsync(args)),
+
+        new("ai", "ai \"<instruction>\"", "Generates validated IR from natural language via local Ollama.",
+            HandleAiCommandAsync),
+
+        new("ai-spec", "ai-spec [--out <dir>]", "Writes the AI skill bundle for local-model IR authoring.",
+            args => Task.FromResult(HandleAiSpecCommand(args))),
+
+        new("eval", "eval [--runs N]", "Measures local-model IR accuracy per construct; gates with --min-pass.",
+            HandleEvalCommandAsync),
+
+        new("version", "version", "Prints the executable framework version.",
+            _ => { Console.WriteLine("Foundry Framework Unified Executable v1.0.0 (.NET 10)"); return Task.FromResult(0); }),
+    ];
+
     public static async Task<int> Main(string[] args)
     {
         if (args.Length == 0)
@@ -25,81 +95,44 @@ public class Program
             return 1;
         }
 
-        var command = args[0].ToLowerInvariant();
+        var name = args[0].ToLowerInvariant();
 
-        switch (command)
+        var command = Array.Find(
+            Commands,
+            c => c.Name == name || Array.IndexOf(c.Aliases, name) >= 0);
+
+        if (command is null)
         {
-            case "new":
-            case "init":
-            case "create":
-                if (args.Length < 2)
-                {
-                    Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine("[Error] Please specify a project name. Example: foundry new MyOrderingApp --schema my-schema.json");
-                    Console.ResetColor();
-                    return 1;
-                }
-                string pName = args[1];
-                string? schemaPathArg = null;
-                for (int i = 2; i < args.Length; i++)
-                {
-                    if ((args[i] == "--schema" || args[i] == "-s") && i + 1 < args.Length)
-                    {
-                        schemaPathArg = args[i + 1];
-                    }
-                }
-                return CreateNewProject(pName, schemaPathArg);
-
-            case "schema":
-                return HandleSchemaCommand(args.Skip(1).ToArray());
-
-            case "studio":
-                return await ServeStudioAsync(args.Skip(1).ToArray());
-
-            case "api":
-                return await HandleApiCommandAsync(args.Skip(1).ToArray());
-
-            case "export":
-                return HandleExportCommand(args.Skip(1).ToArray());
-
-            case "doctor":
-                return HandleDoctorCommand();
-
-            case "generate":
-                return HandleGenerateCommand(args.Skip(1).ToArray());
-
-            case "sdk":
-                return HandleSdkCommand(args.Skip(1).ToArray());
-
-            case "test":
-                return HandleTestCommand(args.Skip(1).ToArray());
-
-            case "lsp":
-                return await Foundry.Cli.Lsp.LspServer.RunAsync();
-
-            case "migrate":
-                return HandleMigrateCommand(args.Skip(1).ToArray());
-
-            case "validate":
-                return HandleValidateCommand(args.Skip(1).ToArray());
-
-            case "ai-spec":
-                return HandleAiSpecCommand(args.Skip(1).ToArray());
-
-            case "ai":
-                return await HandleAiCommandAsync(args.Skip(1).ToArray());
-
-            case "eval":
-                return await HandleEvalCommandAsync(args.Skip(1).ToArray());
-
-            case "version":
-                Console.WriteLine("Foundry Framework Unified Executable v1.0.0 (.NET 10)");
-                return 0;
-
-            default:
-                PrintHelp();
-                return 1;
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"[Error] Unknown command '{args[0]}'.");
+            Console.ResetColor();
+            PrintHelp();
+            return 1;
         }
+
+        return await command.Handler(args.Skip(1).ToArray());
+    }
+
+    private static int HandleNewCommand(string[] args)
+    {
+        if (args.Length < 1)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("[Error] Please specify a project name. Example: foundry new MyOrderingApp --schema my-schema.json");
+            Console.ResetColor();
+            return 1;
+        }
+
+        string? schemaPathArg = null;
+        for (int i = 1; i < args.Length; i++)
+        {
+            if ((args[i] == "--schema" || args[i] == "-s") && i + 1 < args.Length)
+            {
+                schemaPathArg = args[i + 1];
+            }
+        }
+
+        return CreateNewProject(args[0], schemaPathArg);
     }
 
     /// <summary>
@@ -1492,22 +1525,11 @@ app.Run();
         return 0;
     }
 
-    private static int HandleDoctorCommand()
+    /// <summary>Runs the environment checks in <see cref="Doctor"/> and prints them.</summary>
+    private static async Task<int> HandleDoctorCommandAsync(string[] args)
     {
-        Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("=================================================================");
-        Console.WriteLine("              FOUNDRY ENVIRONMENT DIAGNOSTICS DOCTOR             ");
-        Console.WriteLine("=================================================================");
-        Console.ResetColor();
-
-        Console.WriteLine("➜ .NET SDK Version: " + Environment.Version);
-        Console.WriteLine("➜ OS Platform: " + System.Runtime.InteropServices.RuntimeInformation.OSDescription);
-        Console.WriteLine("➜ Framework Assembly: " + Assembly.GetExecutingAssembly().GetName().Version);
-
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine("\n  ✓ Local environment is fully healthy for Foundry development!");
-        Console.ResetColor();
-        return 0;
+        var checks = await Doctor.RunAsync();
+        return Doctor.Render(checks);
     }
 
     private static int HandleGenerateCommand(string[] args)
@@ -1703,6 +1725,10 @@ jobs:
         return 0;
     }
 
+    /// <summary>
+    /// Renders <see cref="Commands"/>. Every command is listed because the list is the same one
+    /// dispatch uses; there is no second place to forget to update.
+    /// </summary>
     private static void PrintHelp()
     {
         Console.ForegroundColor = ConsoleColor.Cyan;
@@ -1714,53 +1740,28 @@ jobs:
         Console.WriteLine("  foundry <command> [arguments]");
         Console.WriteLine();
         Console.WriteLine("Commands:");
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("  new <ProjectName>      ");
-        Console.ResetColor();
-        Console.WriteLine("Scaffolds a complete, ready-to-run C# API project instantly.");
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("  studio [--port 5000]   ");
-        Console.ResetColor();
-        Console.WriteLine("Boots the embedded Standalone Visual Studio IDE web server.");
-        Console.ForegroundColor = ConsoleColor.Green;
-        // The four formats the command actually accepts. This advertised "openapi|kafka", so two of
-        // the four were invisible to anyone reading --help, and "kafka" is an alias rather than the
-        // name of the format it produces.
-        Console.Write("  export -f <format>     ");
-        Console.ResetColor();
-        Console.WriteLine("Exports openapi | asyncapi | postman | mermaid.");
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("  doctor                 ");
-        Console.ResetColor();
-        Console.WriteLine("Runs local environment diagnostic health checks.");
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("  generate ci            ");
-        Console.ResetColor();
-        Console.WriteLine("Generates production GitHub Actions / CI pipeline YAML.");
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("  validate <schema.json> ");
-        Console.ResetColor();
-        Console.WriteLine("Validates an IR document; exits non-zero on error (CI gate).");
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("  migrate <canvas.json>  ");
-        Console.ResetColor();
-        Console.WriteLine("Converts a Studio canvas document to normative IR.");
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("  ai-spec [--out dir]    ");
-        Console.ResetColor();
-        Console.WriteLine("Writes the AI skill bundle for local-model IR authoring.");
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("  ai \"<instruction>\"     ");
-        Console.ResetColor();
-        Console.WriteLine("Generates validated IR from natural language via local Ollama.");
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("  eval [--runs N]        ");
-        Console.ResetColor();
-        Console.WriteLine("Measures local-model IR accuracy per construct; gates with --min-pass.");
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("  version                ");
-        Console.ResetColor();
-        Console.WriteLine("Prints the executable framework version.");
+
+        var width = Commands.Max(c => c.Usage.Length);
+
+        foreach (var command in Commands)
+        {
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.Write("  " + command.Usage.PadRight(width + 2));
+            Console.ResetColor();
+            Console.WriteLine(command.Summary);
+        }
+
+        var aliases = Commands
+            .Where(c => c.Aliases.Length > 0)
+            .Select(c => $"{c.Name} = {string.Join(", ", c.Aliases)}")
+            .ToList();
+
+        if (aliases.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Aliases: " + string.Join("; ", aliases));
+        }
+
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("=================================================================");

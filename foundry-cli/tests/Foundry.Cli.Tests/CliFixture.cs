@@ -70,8 +70,34 @@ public static class Cli
 
     /// <summary>Runs the CLI with the given arguments and waits for it to exit.</summary>
     public static async Task<Result> RunAsync(string? workingDirectory = null, params string[] args)
+        => await RunCoreAsync(workingDirectory, environment: null, clearPath: false, args);
+
+    /// <summary>
+    /// Runs the CLI with extra environment variables, optionally with an empty <c>PATH</c>.
+    /// </summary>
+    /// <remarks>
+    /// Clearing PATH is how `foundry doctor` is tested for the thing it exists to do: report a
+    /// missing prerequisite. The .NET host is launched by absolute path so the CLI still starts,
+    /// while its own probe for a `dotnet` SDK on PATH finds nothing — which is the situation a user
+    /// on a fresh machine is actually in.
+    /// </remarks>
+    public static async Task<Result> RunWithEnvironmentAsync(
+        IReadOnlyDictionary<string, string?> environment,
+        bool clearPath = false,
+        params string[] args)
+        => await RunCoreAsync(workingDirectory: null, environment, clearPath, args);
+
+    private static async Task<Result> RunCoreAsync(
+        string? workingDirectory,
+        IReadOnlyDictionary<string, string?>? environment,
+        bool clearPath,
+        string[] args)
     {
-        var startInfo = new ProcessStartInfo("dotnet")
+        // An absolute path when PATH is about to be emptied; the bare name otherwise, so the normal
+        // case keeps resolving the same dotnet the test run itself is using.
+        var host = clearPath ? ResolveDotnetPath() : "dotnet";
+
+        var startInfo = new ProcessStartInfo(host)
         {
             WorkingDirectory = workingDirectory ?? Path.GetTempPath(),
             RedirectStandardOutput = true,
@@ -82,8 +108,16 @@ public static class Cli
         startInfo.ArgumentList.Add(AssemblyPath.Value);
         foreach (var arg in args) startInfo.ArgumentList.Add(arg);
 
+        if (clearPath) startInfo.Environment["PATH"] = "";
+
+        foreach (var pair in environment ?? new Dictionary<string, string?>())
+        {
+            if (pair.Value is null) startInfo.Environment.Remove(pair.Key);
+            else startInfo.Environment[pair.Key] = pair.Value;
+        }
+
         using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("Could not start 'dotnet'.");
+            ?? throw new InvalidOperationException($"Could not start '{host}'.");
 
         var stdOutTask = process.StandardOutput.ReadToEndAsync();
         var stdErrTask = process.StandardError.ReadToEndAsync();
@@ -92,6 +126,30 @@ public static class Cli
         await process.WaitForExitAsync(timeout.Token);
 
         return new Result(process.ExitCode, await stdOutTask, await stdErrTask);
+    }
+
+    /// <summary>Finds the `dotnet` host on PATH, so it can still be launched once PATH is emptied.</summary>
+    private static string ResolveDotnetPath()
+    {
+        var executable = OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
+
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "")
+                 .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var candidate = Path.Combine(directory.Trim(), executable);
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        // DOTNET_ROOT is set on hosted runners even where PATH resolution is unusual.
+        var root = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+        if (!string.IsNullOrEmpty(root))
+        {
+            var candidate = Path.Combine(root, executable);
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        throw new InvalidOperationException(
+            "Could not locate the 'dotnet' host on PATH or under DOTNET_ROOT.");
     }
 
     /// <summary>

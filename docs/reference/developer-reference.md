@@ -92,15 +92,18 @@ so `foundry $UNSET_VAR` fails rather than looking like a successful no-op.
 | `sdk` | Generate a client SDK | 0 / 1 |
 | `test` | Generate xUnit suites + report | 0 / 1 |
 | `generate ci` | Write a GitHub Actions workflow | 0 |
-| `doctor` | Print environment info (see [1.13](#113-foundry-doctor-generate-ci-studio-lsp-version)) | always 0 |
+| `doctor` | Check the local environment | 0 = usable, 1 = a prerequisite is missing |
 | `lsp` | Language server over stdio | 0 |
 | `ai` | Natural language → validated IR | 0 / 1 |
 | `ai-spec` | Write the AI skill bundle | 0 / 1 |
 | `eval` | Measure local-model IR accuracy | 0 / 1 |
 | `version` | Print framework version | 0 |
 
-> `schema`, `api`, `sdk`, `test` and `lsp` are functional but are not listed in `--help`
-> ([`Program.cs:1706`](../../foundry-cli/src/Foundry.Cli/Program.cs#L1706)).
+Dispatch and `--help` both read one table — `Program.Commands`
+([`Program.cs`](../../foundry-cli/src/Foundry.Cli/Program.cs)) — so every command the CLI accepts is
+listed, and an unrecognised one is rejected by name rather than silently printing help. They were
+two separate lists for a long time and disagreed: `schema`, `api`, `sdk`, `test` and `lsp` all
+worked and none of them appeared in `--help`.
 
 ### 1.2 `foundry new <ProjectName> [--schema|-s <path>]`
 
@@ -218,11 +221,29 @@ Runs the local-model accuracy harness per IR construct.
 
 ### 1.13 `foundry doctor`, `generate ci`, `studio`, `lsp`, `version`
 
-- **`doctor`** — prints the .NET runtime version, the OS description and the framework assembly
-  version, then reports the environment healthy. It probes nothing external: no SDK resolution, no
-  Docker, no MongoDB reachability. It therefore reports "fully healthy" on a machine where none of
-  those work, which is the silent-success shape this framework treats as a defect elsewhere. Treat
-  its output as *informational only*, not as a precondition check.
+- **`doctor`** — probes the local environment and reports what it found. Exits **1** if a required
+  item is missing, **0** otherwise, so it can gate a setup script.
+
+  | Check | Severity if absent | What it does |
+  | :--- | :--- | :--- |
+  | Platform | — | OS, architecture, CLI and runtime versions |
+  | Studio bundle | warning | Whether *this build* embeds the Studio UI |
+  | dotnet SDK | **failure** | Resolves `dotnet` on PATH, then runs `dotnet --version` |
+  | Node.js | warning | `node --version`; needed only to rebuild Studio or the extension |
+  | Docker | warning | `docker info`; needed for the compose stack |
+  | MongoDB | warning | TCP connect, honouring `MONGODB_CONNECTION` (default `localhost:27017`) |
+  | Kafka | warning | TCP connect to `localhost:9092` |
+  | Ollama | warning | `GET {FOUNDRY_OLLAMA_HOST}/api/tags`, and whether the configured model is present |
+
+  Only the SDK is fatal: a database and a broker are needed to *run* an application, not to model,
+  validate or compile one. The SDK is resolved against PATH explicitly rather than by handing
+  `"dotnet"` to `Process.Start` — when the CLI runs as `dotnet foundry.dll`, that resolves the host
+  which launched it whatever PATH says, so the probe would have reported a healthy SDK on a machine
+  where `dotnet build` in a shell fails. PATH is also the question that matters, because PATH is
+  what the user's own shell will search.
+
+  This command previously printed three version strings and then declared the environment "fully
+  healthy" unconditionally, having probed nothing at all.
 - **`generate ci [--provider github]`** — writes `.github/workflows/ci.yml`.
 - **`studio [--port 5000]`** — serves the embedded Studio SPA.
 - **`lsp`** — LSP server over stdio; implements `initialize` and `textDocument/completion`

@@ -79,26 +79,51 @@ trap 'rm -rf "$WORK"' EXIT
 "$BIN" validate "$SCHEMA" >/dev/null
 echo "  ok: validate"
 
+# doctor exits non-zero when a required prerequisite is missing. A machine that just published this
+# binary has the SDK, so 0 is the expected answer -- and a non-zero here means either the machine is
+# genuinely short of something or the command is misreporting, both worth stopping for.
+"$BIN" doctor >/dev/null
+echo "  ok: doctor"
+
 "$BIN" schema build -i "$SCHEMA" -o "$WORK/Generated" -m "$WORK/Generated/api-manifest.json" >/dev/null
 [ -f "$WORK/Generated/api-manifest.json" ] || { echo "  FAIL: no manifest emitted" >&2; exit 1; }
 echo "  ok: schema build emitted $(find "$WORK/Generated" -name '*.cs' | wc -l | tr -d ' ') source files and a manifest"
 
 # The embedded Studio asset. Checked by serving it, because its absence is only a build warning.
-PORT=5099
+#
+# The loop waits for the page to be *right*, not merely for curl to connect. Waiting on the
+# connection alone made this flaky: the listener accepts before the app has finished starting, so an
+# early request could return a body without the SPA marker and the check would fail a working build.
+# A gate that fails at random teaches people to re-run it, which is how a real failure gets waved
+# through.
+PORT="${FOUNDRY_STUDIO_PORT:-$((20000 + RANDOM % 20000))}"
 "$BIN" studio --port "$PORT" >"$WORK/studio.log" 2>&1 &
 STUDIO_PID=$!
 trap 'kill "$STUDIO_PID" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
-for _ in $(seq 1 30); do
-  if curl -fsS "http://localhost:$PORT/" -o "$WORK/page.html" 2>/dev/null; then break; fi
+SERVED=0
+for _ in $(seq 1 45); do
+  # If the server died there is nothing to wait for; report immediately rather than after 45s.
+  if ! kill -0 "$STUDIO_PID" 2>/dev/null; then
+    echo "  FAIL: 'foundry studio' exited before serving anything." >&2
+    tail -30 "$WORK/studio.log" >&2 || true
+    exit 1
+  fi
+
+  if curl -fsS --max-time 5 "http://localhost:$PORT/" -o "$WORK/page.html" 2>/dev/null \
+     && grep -q 'id="root"' "$WORK/page.html"; then
+    SERVED=1
+    break
+  fi
+
   sleep 1
 done
 
-if grep -q 'id="root"' "$WORK/page.html" 2>/dev/null; then
+if [ "$SERVED" -eq 1 ]; then
   echo "  ok: embedded Studio bundle served ($(wc -c <"$WORK/page.html" | tr -d ' ') bytes)"
 else
-  echo "  FAIL: 'foundry studio' did not serve the embedded bundle." >&2
-  tail -20 "$WORK/studio.log" >&2 || true
+  echo "  FAIL: 'foundry studio' did not serve the embedded bundle on port $PORT." >&2
+  tail -30 "$WORK/studio.log" >&2 || true
   exit 1
 fi
 
