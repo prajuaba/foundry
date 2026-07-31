@@ -285,13 +285,17 @@ foundry export -i schema.json -f asyncapi -o docs/asyncapi.json
 foundry export -i schema.json -f postman  -o docs/postman_collection.json
 foundry export -i schema.json -f mermaid  -o docs/schema.mmd
 
-# Generate client SDKs for frontend/backend integration
-foundry sdk -i schema.json -l ts -o sdk/
-foundry sdk -i schema.json -l cs -o sdk/
-foundry sdk -i schema.json -l py -o sdk/
+# Generate client SDKs for frontend/backend integration. Like export, -o names the output
+# *file*, not a directory: passing 'sdk/' fails rather than writing into it.
+foundry sdk -i schema.json -l ts -o sdk/foundryClient.ts
+foundry sdk -i schema.json -l cs -o sdk/FoundryClient.cs
+foundry sdk -i schema.json -l py -o sdk/foundry_client.py
 
-# Run autonomous multi-protocol test suite
-foundry test schema.json --output-dir tests/
+# Generate the autonomous multi-protocol test suites. The schema is passed with -i, the suite
+# directory with -o, and the report with -r; a positional path is ignored, so 'foundry test
+# schema.json' silently reads the default domain.foundry.json instead.
+# This generates suites — it does not run them, and the report says so.
+foundry test -i schema.json -o tests/ -r tests/test-report.html
 
 # Boot the visual Studio IDE in a browser (serves the bundled UI)
 foundry studio
@@ -378,3 +382,13 @@ To run all unit and integration tests (with `docker compose up -d` already runni
 ```bash
 dotnet test Foundry.slnx
 ```
+
+---
+
+## 📖 Full API Reference
+
+Every public function, type and CLI command in one document — the IR schema language and its
+attribute vocabulary, the compiler API, the generated HTTP contract, and the complete surface of all
+nine runtime libraries:
+
+**[docs/reference/developer-reference.md](docs/reference/developer-reference.md)**

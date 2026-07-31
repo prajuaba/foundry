@@ -19,7 +19,10 @@ Welcome to the centralized documentation hub for the **Foundry Framework**. This
 * [Foundry Mongo DAL](modules/foundry-mongo.md) — Advanced MongoDB repository layer, OCC, seeking pagination, and migration runner.
 * [Foundry API Engine](modules/foundry-api.md) — Endpoint generation, MediatR pipeline, RBAC, caching, and health checks.
 
-### 🔎 [4. Project Status](engineering-assessment.md)
+### 📖 [4. API Reference](reference/developer-reference.md)
+* [Developer Reference](reference/developer-reference.md) — Every public function, type and CLI command in one place: the IR schema language and its attribute vocabulary, the compiler API, the generated HTTP contract, and the full surface of all nine runtime libraries.
+
+### 🔎 [5. Project Status](engineering-assessment.md)
 * [Engineering Assessment (2026-07-26)](engineering-assessment.md) — Candid read of current maturity: measured AI/IR accuracy, the silent-failure defect class, test-coverage reality, and the prioritised case for verification over features.
 
 ---
