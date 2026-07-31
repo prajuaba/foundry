@@ -18,6 +18,11 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Foundry.Testing/Foundry.Testing.csproj" />
+
+    <!-- Declared explicitly: these tests use SchemaModel, Entity and ApiManifestGenerator directly.
+         They used to reach them transitively through Foundry.Testing, which is a dependency this
+         project has and did not state. -->
+    <ProjectReference Include="../../../foundry-schema/compiler/Foundry.Schema.Compiler.csproj" />
   </ItemGroup>
 
 </Project>

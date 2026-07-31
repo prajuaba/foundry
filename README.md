@@ -77,6 +77,16 @@ Then build all 21 projects via the solution file at the repository root:
 dotnet build Foundry.slnx
 ```
 
+To produce the distributable single-file `foundry` binary in `dist-bin/`, use the script rather than
+calling `dotnet publish` yourself — it builds the Studio bundle first, passes the one non-obvious
+flag the publish requires, and then runs the binary to check it works:
+
+```bash
+bash scripts/build-distro.sh
+```
+
+It infers the runtime identifier from the host; pass one to override (`bash scripts/build-distro.sh linux-x64`).
+
 ### 2. Run the Test Suites
 
 Start the infrastructure first. The MongoDB and API suites talk to a real database and

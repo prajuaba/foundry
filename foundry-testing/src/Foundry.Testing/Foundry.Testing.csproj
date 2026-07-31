@@ -5,24 +5,41 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
-    <!-- This is a helper library that other suites consume, not a suite itself. Because it
-         references xunit, `dotnet test` on the solution treated it as a test project, launched
-         a testhost against it and failed with a missing assembly in its deps.json, taking the
-         whole Test step to exit 1 even though all 258 real tests passed. -->
+    <!-- This is a code generator that emits test suites as text, not a suite itself. It once
+         referenced xunit, Moq, FluentAssertions and Microsoft.AspNetCore.Mvc.Testing, and compiled
+         against none of them: the only mention of xunit in this project is inside the strings it
+         emits. Those references cost three things.
+
+         `dotnet test` on the solution saw xunit and treated this library as a test project,
+         launching a testhost that failed on a missing assembly in its deps.json and taking the
+         whole Test step to exit 1 while every real test passed. These two properties are the
+         workaround for that, and they are kept as a guard rather than because they are still load-
+         bearing.
+
+         Microsoft.AspNetCore.Mvc.Testing pulled the ASP.NET Core testing targets into the CLI's
+         publish graph, which forced a second, RID-agnostic evaluation of the referenced schema
+         compiler. Two builds of one executable project collided on their apphost and deps.json,
+         and `dotnet publish` of the self-contained `foundry` binary failed with NETSDK1152. The
+         distro could not be built at all.
+
+         And a production CLI shipped a test framework inside it. -->
     <IsTestProject>false</IsTestProject>
     <IsTestingPlatformApplication>false</IsTestingPlatformApplication>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\..\foundry-schema\compiler\Foundry.Schema.Compiler.csproj" />
-    <ProjectReference Include="..\..\..\foundry-core\src\Foundry.Core\Foundry.Core.csproj" />
-  </ItemGroup>
+    <!-- PrivateAssets: the compiler is an *executable* project, and this is a RID-agnostic library.
+         When a self-contained, RID-specific publish walked its graph through here, the compiler was
+         evaluated a second time without the RID; the two builds then collided on their apphost,
+         deps.json and runtimeconfig.json and `dotnet publish` of the `foundry` binary failed with
+         NETSDK1152. Referencing the compiler *directly* from an executable is fine — it is only
+         this indirect leg that produces the second variant.
 
-  <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
-    <PackageReference Include="xunit" />
-    <PackageReference Include="FluentAssertions" />
-    <PackageReference Include="Moq" />
+         Consumers that need compiler types reference the compiler themselves rather than
+         free-riding on this edge, which is what they should have been doing anyway. -->
+    <ProjectReference Include="..\..\..\foundry-schema\compiler\Foundry.Schema.Compiler.csproj"
+                      PrivateAssets="all" ExcludeAssets="runtime" Private="false" />
+    <ProjectReference Include="..\..\..\foundry-core\src\Foundry.Core\Foundry.Core.csproj" />
   </ItemGroup>
 
 </Project>
