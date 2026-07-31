@@ -1696,6 +1696,7 @@ Two things the host must not omit:
 | C# SDK | `dotnet build` |
 | TypeScript SDK | `tsc --noEmit --strict` |
 | Python SDK | `python3 -m py_compile` |
+| The `foundry` distro binary | Published for `linux-x64` in CI, then run — `version`, `validate`, `schema build`, and serving the embedded Studio page |
 
 Every artifact in that list is checked by a real compiler or by an executed test. Semantic string
 assertions still exist alongside those gates — they are useful for pinning intent — but no emitted

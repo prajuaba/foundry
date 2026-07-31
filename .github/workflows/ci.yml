@@ -163,6 +163,54 @@ jobs:
       - name: Scaffold, run and verify a generated application
         run: ./scripts/runtime-smoke-test.sh
 
+  distro-binary:
+    name: Distro binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # The script runs `npm ci` itself for the Studio bundle it embeds.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+
+      # Nothing in CI published the distributable binary, and `dotnet publish` of it had been
+      # failing for some time: the schema compiler is an executable project, and reaching it
+      # through a RID-agnostic library made a self-contained publish evaluate it a second time
+      # without the RID, so two builds collided on their apphost and deps.json. Every other job
+      # here was green throughout. `dotnet build` does not exercise the publish graph, so the one
+      # artifact users actually install was the one thing no gate touched.
+      #
+      # One RID is enough to catch that class -- the failure was in the shape of the project graph,
+      # not in anything platform-specific -- so this does not matrix over macOS and Windows, whose
+      # runners cost several times more per minute. A RID-specific packaging break would still get
+      # through; that is a deliberate trade, not an oversight.
+      #
+      # The script publishes and then runs the binary: version, the non-zero exit on no arguments,
+      # validate, schema build, and serving the embedded Studio page. That last one is the reason a
+      # build step alone would not be enough -- the Studio bundle is embedded as a resource and its
+      # absence is only an MSBuild warning, so a publish that omits it succeeds and ships a CLI
+      # whose `foundry studio` command silently does nothing.
+      - name: Publish and verify the foundry binary
+        run: bash scripts/build-distro.sh linux-x64
+
+      # Uploaded only for main, where it is the build someone might actually want to install.
+      # Pull requests get the verification without paying to store a 60 MB artifact per run.
+      - name: Upload binary
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundry-linux-x64
+          path: dist-bin/foundry
+          retention-days: 14
+          if-no-files-found: error
+
   schema-gates:
     name: Schema gates
     runs-on: ubuntu-latest

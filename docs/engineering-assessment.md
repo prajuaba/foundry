@@ -129,11 +129,21 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 994 C# tests across 13 suites, against a replica set **and** a standalone MongoDB |
+| `Build and test` | 1,000 C# tests across 14 suites, against a replica set **and** a standalone MongoDB; also type-checks the generated TypeScript SDK with `tsc --strict` and byte-compiles the Python one |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
+| `VS Code extension` | 17 TypeScript tests, plus typecheck and bundle |
 | `Schema gates` | Sample schemas validate; the AI skill bundle regenerates and its golden examples validate |
 | `Runtime smoke test` | Two scaffolded apps boot and are driven over HTTP with real JWTs: **authentication, declared roles, row-level ownership, workflow transitions and the real-time channels**, the CRUD contract (create, read, update, delete, filter, validate, optimistic concurrency, restart) and **tenant isolation** |
+| `Distro binary` | The self-contained `foundry` binary **publishes and then runs**: version, the non-zero exit on no arguments, `validate`, `schema build`, and serving the embedded Studio page |
+
+`Distro binary` closes a wide gap. `dotnet publish` of the shipped binary was failing while all six
+other jobs stayed green, because `dotnet build` does not exercise the publish graph — so the one
+artifact a user installs was the only thing nothing built. How long it had been broken is not
+known; the last binary in `dist-bin/` was published on 25 July and predates every fix made since.
+It was found by being asked for rather than by a gate, which is how most of what is in this document
+was found. The job publishes and then runs what it published, because the Studio bundle it embeds
+can go missing with nothing but an MSBuild warning to say so.
 
 CI first went green on `bf3e227`. The runtime smoke test is the one that matters most, because it is the
 only gate that runs a generated application rather than compiling one — and reaching it required six
