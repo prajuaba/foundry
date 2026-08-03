@@ -376,8 +376,30 @@ application supplies both. The workflow definition still names the trigger, so t
 hand-written command exactly as it matches a generated one; if nobody writes it, the build fails on
 the missing type, which is the right place to find out.
 
+`WorkflowConditionModel` carries **`source`** — `entity` (default) or `request` — naming which object
+the guard reads. The engine used to evaluate every guard against the request *and* the entity and
+pass if either satisfied it, so a guard about a value the server owns could be answered with a value
+the caller sent, and the same fallback decided choice-node routing. An unrecognised `source` falls
+back to `entity`, never to the caller.
+
 `WorkflowActionModel` covers both internal (`requestType`, `payloadTemplate`) and external
 (`method`, `url`, `headers`, `bodyTemplate`) actions.
+
+**External actions**, in execution order and with their limits:
+
+| | |
+| :--- | :--- |
+| Ordering | Guards → handler → actions → state save → activity log. The handler's rejection is cheap and local; an external call is neither, so it happens after. |
+| Templating | `{{Property}}` tokens escaped for their grammar — JSON string, URL data segment, header value (CRLF rejected). A token cannot change the host, add a path segment, or open a query. |
+| Redirects | **Not followed.** A 3xx is not a success status, so the action fails visibly rather than letting the remote endpoint choose the next address. |
+| Retries | Only for methods HTTP defines as repeatable (`GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE`). `POST` and `PATCH` get one attempt, because a timed-out POST may already have been acted on. |
+| Response size | Capped at `WorkflowHttpLimits.MaxResponseBytes` (1 MB) when read, trimmed to 8 KB when recorded — with a marker saying it was trimmed. |
+| Compensation | **None.** An action that fails after an earlier one succeeded leaves that effect in place. Every executed action is recorded, including on the failure path, so what happened is knowable. |
+
+The activity log's `PayloadDetails` is written through `WorkflowPayloadRedactor`: properties carrying
+`[SensitiveData]` or `[PiiData]` are replaced with `[redacted]`. It previously stored the command as
+sent, so a value the entity encrypts at rest sat in clear text in a second collection. Redaction
+covers top-level properties only — a sensitive value nested inside another object is not caught.
 
 ### 2.8 DTOs, custom endpoints, connectors
 

@@ -142,6 +142,21 @@ public class WorkflowTransitionConfig
 public class WorkflowConditionConfig
 {
     /// <summary>
+    /// Which object this guard reads: <c>entity</c> (the stored record) or <c>request</c> (the
+    /// caller's command). Anything else — including absent — is treated as <c>entity</c>.
+    /// </summary>
+    /// <remarks>
+    /// The engine used to evaluate every guard against the request and then the entity, passing if
+    /// either satisfied it. That let a caller answer a guard about a value the server owns with a
+    /// value they chose, and it decided choice-node routing too. Unrecognised values fall back to
+    /// the entity rather than the request, so a typo cannot hand a guard to the caller.
+    /// </remarks>
+    public string Source { get; set; } = "entity";
+
+    /// <summary>True when this guard reads the caller's command rather than the stored record.</summary>
+    public bool ReadsRequest => string.Equals(Source, "request", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Gets or sets the type of comparison (e.g. PropertyComparison).
     /// </summary>
     public string Type { get; set; } = string.Empty;

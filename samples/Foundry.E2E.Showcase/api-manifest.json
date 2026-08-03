@@ -312,7 +312,8 @@
             {
               "Property": "TotalAmount",
               "Operator": "GreaterThan",
-              "Value": "0"
+              "Value": "0",
+              "Source": "entity"
             }
           ]
         },
@@ -363,7 +364,8 @@
                 {
                   "Property": "TotalAmount",
                   "Operator": "GreaterThan",
-                  "Value": "10000"
+                  "Value": "10000",
+                  "Source": "entity"
                 }
               ]
             },
@@ -373,7 +375,8 @@
                 {
                   "Property": "PaymentCardNumber",
                   "Operator": "Equals",
-                  "Value": ""
+                  "Value": "",
+                  "Source": "entity"
                 }
               ]
             }

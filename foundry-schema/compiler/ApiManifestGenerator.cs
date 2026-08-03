@@ -154,7 +154,8 @@ namespace Foundry.Schema.Compiler
                     {
                         ["Property"] = condition.Property,
                         ["Operator"] = condition.Operator ?? string.Empty,
-                        ["Value"] = condition.Value ?? string.Empty
+                        ["Value"] = condition.Value ?? string.Empty,
+                        ["Source"] = SourceOf(condition)
                     });
                 }
 
@@ -193,7 +194,8 @@ namespace Foundry.Schema.Compiler
                         {
                             ["Property"] = branch.Condition!.Property,
                             ["Operator"] = branch.Condition.Operator ?? string.Empty,
-                            ["Value"] = branch.Condition.Value ?? string.Empty
+                            ["Value"] = branch.Condition.Value ?? string.Empty,
+                            ["Source"] = SourceOf(branch.Condition)
                         });
                     }
 
@@ -275,6 +277,19 @@ namespace Foundry.Schema.Compiler
         /// <summary>The identifier the workflow engine matches a transition on.</summary>
         internal static string TransitionId(WorkflowTransitionModel transition)
             => string.IsNullOrWhiteSpace(transition.Id) ? transition.Trigger : transition.Id;
+
+        /// <summary>
+        /// The object a guard reads, normalised. Anything unrecognised becomes "entity".
+        /// </summary>
+        /// <remarks>
+        /// Defaulting the unknown case to the record rather than the request is deliberate: the
+        /// request is the caller-controlled side, and a typo in a schema must not quietly hand a
+        /// guard over to it.
+        /// </remarks>
+        private static string SourceOf(WorkflowConditionModel condition)
+            => string.Equals(condition.Source, "request", StringComparison.OrdinalIgnoreCase)
+                ? "request"
+                : "entity";
 
         private static JsonArray ToArray(IEnumerable<string>? values)
             => new((values ?? Enumerable.Empty<string>())

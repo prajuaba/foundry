@@ -693,16 +693,26 @@ public class WorkflowTransitionBehaviorTests
         Assert.Empty(store.Logs);
     }
 
+    /// <summary>
+    /// The state is persisted only after the handler has succeeded.
+    /// </summary>
+    /// <remarks>
+    /// This test asserted the opposite — that the save had already happened by the time the handler
+    /// ran — and it passed, because that is what the code did. It was encoding the defect as intent:
+    /// a handler that threw left the entity advanced while its own history recorded the failure. The
+    /// ordering is now handler, then state, then log, and this asserts the first half of that.
+    /// </remarks>
     [Fact]
-    public async Task TheHandlerRunsAfterTheStateIsPersisted()
+    public async Task TheStateIsPersistedOnlyAfterTheHandlerSucceeds()
     {
         var store = new FakeStore(new StatefulEntity());
         var behavior = Behavior<TransitionCommand>(new FakeDefinitions(OrderWorkflow()), store);
-        var savedBeforeNext = 0;
+        var savedBeforeNext = -1;
 
         await behavior.Handle(new TransitionCommand(), () => Next(() => savedBeforeNext = store.Saved.Count), default);
 
-        Assert.Equal(1, savedBeforeNext);
+        Assert.Equal(0, savedBeforeNext);
+        Assert.Single(store.Saved);
     }
 
     // ---- construction ----

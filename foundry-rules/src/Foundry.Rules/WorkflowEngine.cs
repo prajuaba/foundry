@@ -173,8 +173,14 @@ public class WorkflowEngine : IWorkflowEngine
                 var targetUrl = SubstituteTokens(url, requestPayload, TokenContext.Url);
                 var body = SubstituteTokens(bodyTemplate ?? "{}", requestPayload, TokenContext.Json);
 
+                // The client is chosen by method: retries are only safe where HTTP says the method
+                // may be repeated. A POST that timed out may already have been acted on, and
+                // retrying it delivers the action twice.
                 var httpClientFactory = _serviceProvider.GetService<IHttpClientFactory>();
-                using var client = httpClientFactory != null ? httpClientFactory.CreateClient("FoundryWorkflow") : new HttpClient();
+                using var client = httpClientFactory != null
+                    ? httpClientFactory.CreateClient(WorkflowHttpLimits.ClientNameFor(method))
+                    : new HttpClient { MaxResponseContentBufferSize = WorkflowHttpLimits.MaxResponseBytes };
+
                 using var requestMsg = new HttpRequestMessage(new HttpMethod(method ?? "POST"), targetUrl);
 
                 if (headers != null)
@@ -199,7 +205,9 @@ public class WorkflowEngine : IWorkflowEngine
                     ActionName = actionName,
                     Success = response.IsSuccessStatusCode,
                     StatusCode = (int)response.StatusCode,
-                    ResponseBody = responseBody
+
+                    // Trimmed before it reaches the activity log, which is a MongoDB document.
+                    ResponseBody = WorkflowHttpLimits.ForRecording(responseBody)
                 };
             }
             catch (Exception ex)

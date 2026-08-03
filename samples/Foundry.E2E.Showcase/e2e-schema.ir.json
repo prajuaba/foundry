@@ -609,7 +609,8 @@
                 "type": "Property",
                 "property": "TotalAmount",
                 "operator": "GreaterThan",
-                "value": "10000"
+                "value": "10000",
+                "source": "entity"
               },
               "targetState": "Review"
             },
@@ -619,7 +620,8 @@
                 "type": "Property",
                 "property": "PaymentCardNumber",
                 "operator": "Equals",
-                "value": ""
+                "value": "",
+                "source": "entity"
               },
               "targetState": "Cancelled"
             }
@@ -643,7 +645,8 @@
               "type": "Property",
               "property": "TotalAmount",
               "operator": "GreaterThan",
-              "value": "0"
+              "value": "0",
+              "source": "entity"
             }
           ]
         },

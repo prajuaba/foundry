@@ -142,52 +142,52 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
                 + $"but this transition requires state '{transitionRequest.FromState}'.");
         }
 
-        // 6. Guard conditions, evaluated against the request first and then the entity.
+        // 6. Guard conditions, each evaluated against the one object it names.
+        //
+        // This used to evaluate every guard against the request and then the entity, passing if
+        // *either* satisfied it. The request is the MediatR command bound from the caller's body, so
+        // a guard about a value the server owns could be answered with a value the caller chose: a
+        // guard reading the order's TotalAmount was equally satisfied by a command carrying its own
+        // TotalAmount. Transition commands are partial records and guards on request payloads are a
+        // supported feature, so that collision is an ordinary design rather than a contrived one.
         foreach (var condition in transitionConfig.Conditions ?? new List<WorkflowConditionConfig>())
         {
-            var passed = _workflowEngine.EvaluateCondition(condition.Property, condition.Operator, condition.Value, request)
-                || _workflowEngine.EvaluateCondition(condition.Property, condition.Operator, condition.Value, entity);
-
-            if (!passed)
+            if (!Evaluate(condition, request, entity))
             {
                 throw new WorkflowException(
-                    $"Guard condition failed: {condition.Property} must satisfy operator "
-                    + $"'{condition.Operator}' with value '{condition.Value}'.");
+                    $"Guard condition failed: {condition.Source} property {condition.Property} must "
+                    + $"satisfy operator '{condition.Operator}' with value '{condition.Value}'.");
             }
         }
 
-        // 7. Automated actions. A failed action fails the transition.
-        var actionDetails = new List<ActionExecutionDetail>();
-        foreach (var action in transitionConfig.Actions ?? new List<WorkflowActionConfig>())
-        {
-            var detail = await _workflowEngine.ExecuteActionAsync(
-                action.Type, action.RequestType, action.PayloadTemplate,
-                action.Method, action.Url, action.Headers, action.BodyTemplate, request, ct);
-
-            actionDetails.Add(detail);
-
-            if (!detail.Success)
-            {
-                throw new WorkflowException(
-                    $"Workflow action execution failed on '{detail.ActionName}': {detail.ResponseBody}");
-            }
-        }
-
-        // 8. Resolve the final state, following choice nodes.
+        // 7. Resolve the final state, following choice nodes.
         var resolvedTargetState = ResolveTargetState(workflowConfig, transitionRequest.ToState, request, entity);
 
-        entity.CurrentState = resolvedTargetState;
-        entity.WorkflowId = workflowConfig.Id;
-        entity.WorkflowVersion = workflowConfig.Version;
+        var actionDetails = new List<ActionExecutionDetail>();
 
-        await _stateStore.SaveAsync(transitionRequest.EntityType, entity, ct);
-
-        // 9. Run the handler, then record what actually happened.
+        // 8. Run the handler, then the automated actions, then persist, then record what happened.
         //
-        // The activity log used to be written before the handler ran, with Success hardcoded to true.
-        // A handler that threw left a history entry claiming the transition had succeeded -- a false
-        // record in the one place someone would look to find out. It is now written after the handler
-        // returns, and a failure is recorded as a failure before the exception propagates.
+        // The order of these three has been wrong twice, in the same direction each time: recording
+        // or committing something before knowing whether it happened.
+        //
+        // The activity log used to be written before the handler ran, with Success hardcoded to true,
+        // so a handler that threw left a history entry claiming success. That was fixed. The state
+        // write was not: the entity was moved to its new state and saved *before* the handler ran, so
+        // a handler that threw left the record advanced while the log correctly recorded a failure --
+        // an order sitting in Approved with its own history saying the approval failed.
+        //
+        // The handler now runs first. A transition that fails leaves the entity where it was.
+        //
+        // The external actions moved with it, and for a stronger reason. They used to run before the
+        // handler, so a transition the handler went on to reject had already charged a card or sent a
+        // notification -- effects outside this process that nothing here can take back. Running them
+        // after the handler means the cheap, local, reversible check happens before the expensive,
+        // remote, irreversible one.
+        //
+        // What remains is genuinely hard: an action that fails after an earlier action succeeded
+        // leaves that earlier effect in place, and no compensation is attempted. Every executed
+        // action is recorded in the activity log including on the failure path, so what happened is
+        // at least knowable. A saga would be the real answer and is not what this is.
         TResponse response;
         try
         {
@@ -199,6 +199,30 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
                 request, actionDetails, success: false, ex.Message, ct);
             throw;
         }
+
+        foreach (var action in transitionConfig.Actions ?? new List<WorkflowActionConfig>())
+        {
+            var detail = await _workflowEngine.ExecuteActionAsync(
+                action.Type, action.RequestType, action.PayloadTemplate,
+                action.Method, action.Url, action.Headers, action.BodyTemplate, request, ct);
+
+            actionDetails.Add(detail);
+
+            if (!detail.Success)
+            {
+                await AppendLogAsync(transitionRequest, workflowConfig, resolvedTargetState, operatorId,
+                    request, actionDetails, success: false, detail.ResponseBody, ct);
+
+                throw new WorkflowException(
+                    $"Workflow action execution failed on '{detail.ActionName}': {detail.ResponseBody}");
+            }
+        }
+
+        entity.CurrentState = resolvedTargetState;
+        entity.WorkflowId = workflowConfig.Id;
+        entity.WorkflowVersion = workflowConfig.Version;
+
+        await _stateStore.SaveAsync(transitionRequest.EntityType, entity, ct);
 
         await AppendLogAsync(transitionRequest, workflowConfig, resolvedTargetState, operatorId,
             request, actionDetails, success: true, errorMessage: null, ct);
@@ -237,9 +261,10 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
             var matched = false;
             foreach (var branch in choiceNode.Branches ?? new List<WorkflowChoiceBranchConfig>())
             {
-                var branchPassed = (branch.Conditions ?? new List<WorkflowConditionConfig>()).All(condition =>
-                    _workflowEngine.EvaluateCondition(condition.Property, condition.Operator, condition.Value, request)
-                    || _workflowEngine.EvaluateCondition(condition.Property, condition.Operator, condition.Value, entity));
+                // Same rule as a transition guard, and for the same reason: routing decided by an
+                // either-source fallback let a caller choose which state they landed in.
+                var branchPassed = (branch.Conditions ?? new List<WorkflowConditionConfig>())
+                    .All(condition => Evaluate(condition, request, entity));
 
                 if (branchPassed)
                 {
@@ -272,6 +297,20 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
         return resolved;
     }
 
+    /// <summary>
+    /// Evaluates one guard against the single object it names.
+    /// </summary>
+    /// <remarks>
+    /// The one place the source is decided, so a transition guard and a choice-node branch cannot
+    /// disagree about what "this condition reads" means.
+    /// </remarks>
+    private bool Evaluate(WorkflowConditionConfig condition, object request, IWorkflowStateful entity)
+    {
+        var target = condition.ReadsRequest ? request : (object)entity;
+        return _workflowEngine.EvaluateCondition(
+            condition.Property, condition.Operator, condition.Value, target);
+    }
+
     private async Task AppendLogAsync(
         IWorkflowTransitionRequest transitionRequest,
         WorkflowConfig workflowConfig,
@@ -295,7 +334,9 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
             TransitionId = transitionRequest.TransitionId,
             TriggeredBy = operatorId,
             TriggeredAt = DateTime.UtcNow,
-            PayloadDetails = JsonSerializer.Serialize(request),
+            // Declared-sensitive values are withheld: the entity encrypts and masks them,
+            // and the log used to store the same values beside it in clear text.
+            PayloadDetails = WorkflowPayloadRedactor.Serialize(request),
             Success = success,
             ErrorMessage = errorMessage,
             ExecutedActions = actionDetails

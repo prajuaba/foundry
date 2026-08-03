@@ -239,6 +239,9 @@ What changed:
 | Scaffold, template, sample | All three wire authentication, `UseAuthentication`/`UseAuthorization`, and `SecurityBehavior` identically |
 | `TenantContextMiddleware` | The signed token is the only source of the tenant; caller-supplied header and query values are ignored unless a deployment opts in |
 | `AddFoundryMongo` | No longer registers a development KMS mock as the default `IKmsClient`; selecting envelope encryption without a real one throws instead of encrypting under a key published in this repository |
+| `WorkflowTransitionBehavior` | A guard reads the one source it names (`entity` by default) instead of passing if either the entity **or** the caller's command satisfied it |
+| Workflow external actions | Run after the handler, do not follow redirects, retry only repeatable methods, and cap what they read and record |
+| `WorkflowActivityLog` | Declared-sensitive payload values are redacted instead of stored as sent |
 
 That penultimate row took two passes, and the first was not enough. The header was read *before* the
 token, so an authenticated caller could override the tenant their own token asserted just by setting

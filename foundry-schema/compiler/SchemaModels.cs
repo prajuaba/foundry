@@ -100,6 +100,24 @@ namespace Foundry.Schema.Compiler
         public string Property { get; init; } = string.Empty;
         public string Operator { get; init; } = string.Empty;
         public string Value { get; init; } = string.Empty;
+
+        /// <summary>
+        /// Which object the guard reads: <c>entity</c> (the stored record) or <c>request</c> (the
+        /// caller's command). Defaults to <c>entity</c>.
+        /// </summary>
+        /// <remarks>
+        /// This used to be neither: the engine evaluated the condition against the request and then
+        /// against the entity and passed if <i>either</i> satisfied it. A guard meaning "the order's
+        /// total is over 10000" was therefore also satisfied by a command carrying its own
+        /// <c>TotalAmount</c>, which the caller sets — so a guard on a value the server owns could be
+        /// answered with a value the caller chose. The same fallback decided choice-node routing, so
+        /// a caller could pick which state they landed in.
+        /// <para>
+        /// Naming the source makes the guard mean one thing. <c>entity</c> is the default because a
+        /// guard whose source was never stated was almost always intended to read the record.
+        /// </para>
+        /// </remarks>
+        public string Source { get; init; } = "entity";
     }
 
     public record WorkflowActionModel
