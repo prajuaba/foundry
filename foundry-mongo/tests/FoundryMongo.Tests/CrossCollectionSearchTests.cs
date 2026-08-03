@@ -114,7 +114,13 @@ public class CrossCollectionSearchTests
         // Assert initial match stage filters by price
         var matchStage = renderedStages[0];
         Assert.True(matchStage.Contains("$match"));
-        Assert.Equal(99, matchStage["$match"]["Price"]["$eq"].AsInt32);
+        // camelCase, for the same reason as the soft-delete assertion below: a criterion names the
+        // property "Price" and the document stores the element "price". This asserted "Price" and
+        // passed, because it checks the document the code builds and never the one MongoDB matches
+        // against -- so the criteria matched no field and the search returned nothing, which reads as
+        // "no results" every time. Same defect as the predicate beside it, one line apart, fixed a
+        // cycle later because it costs results rather than isolation.
+        Assert.Equal(99, matchStage["$match"]["price"]["$eq"].AsInt32);
 
         // Assert union stage has union with Customers collection and includes soft-delete match filter since Customer is ISoftDelete
         var unionStage = renderedStages[2];

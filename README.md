@@ -96,15 +96,21 @@ Start the infrastructure first. The MongoDB and API suites talk to a real databa
 docker compose up -d
 ```
 
-Then run the whole solution in one command:
+Then run the suites through the script rather than calling `dotnet test` directly. It checks that the
+containers are actually up first, and says which one is missing:
 
 ```bash
-dotnet test Foundry.slnx
+bash scripts/run-tests.sh
 ```
 
-Expect **1,000 C# tests passing**: 271 compiler, 126 MongoDB, 92 rules, 90 integration, 77 API,
-75 file-IO, 52 core, 52 connectors, 40 real-time, 39 Kafka, 37 testing, 30 CLI, 13 Studio backend,
-and 6 Kafka round-trip against a live broker. Run it this way rather than per-project — a solution-wide run
+Arguments pass through (`bash scripts/run-tests.sh --filter FullyQualifiedName~Ownership`). The check
+exists because a container that has died produces around a hundred failures, each taking a minute to
+time out, and they look exactly like a code regression — which has cost real diagnosis time more than
+once. To bypass it: `FOUNDRY_SKIP_INFRA_CHECK=1 bash scripts/run-tests.sh`.
+
+Expect **1,074 C# tests passing**: 277 compiler, 145 MongoDB, 118 rules, 90 integration, 81 API,
+75 file-IO, 60 connectors, 52 core, 41 CLI, 40 real-time, 39 Kafka, 37 testing, 13 Studio backend,
+and 6 Kafka round-trip against a live broker. Run the whole solution rather than per-project — a solution-wide run
 exercises project interactions that individual runs miss, and it is what CI does, save for the six
 round-trip tests, which CI runs in a separate job that provisions a broker.
 

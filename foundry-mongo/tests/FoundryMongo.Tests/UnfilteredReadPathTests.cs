@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using Foundry.Core.Entities;
+using Foundry.Core.Search;
 using Foundry.Core.Security;
 using Foundry.Core.Tenant;
 using Foundry.Core.User;
@@ -224,5 +225,34 @@ public class UnfilteredReadPathTests : IDisposable
         public string Body { get; set; } = string.Empty;
         public bool IsDeleted { get; init; }
         public DateTime? DeletedAt { get; init; }
+    }
+
+    /// <summary>
+    /// A criterion actually filters, rather than matching nothing.
+    /// </summary>
+    /// <remarks>
+    /// The match document was built from the property name and the documents store camelCased
+    /// elements, so every cross-collection criterion matched no field. A filter that matches nothing
+    /// returns nothing, which reads as "no results" rather than as a bug — and this is a *search*, so
+    /// "no results" is a plausible answer every time.
+    /// </remarks>
+    [Fact]
+    public async Task CrossCollectionCriteriaActuallyMatch()
+    {
+        await InvoicesAs("acme").InsertAsync(
+            new Invoice { Id = ObjectId.GenerateNewId(), Reference = "WANTED" });
+        await InvoicesAs("acme").InsertAsync(
+            new Invoice { Id = ObjectId.GenerateNewId(), Reference = "OTHER" });
+
+        var request = new CrossCollectionSearchRequest
+        {
+            EntityTypes = [typeof(Invoice)],
+            CollectionToEntityTypeMap = new Dictionary<string, Type> { ["Invoices"] = typeof(Invoice) },
+            Criteria = [SearchCriterion.Equals("Reference", "WANTED")]
+        };
+
+        var found = await InvoicesAs("acme").CrossCollectionSearchAsync(request);
+
+        Assert.Single(found.Items);
     }
 }

@@ -163,7 +163,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 1,073 C# tests across 14 suites, against a replica set **and** a standalone MongoDB; also type-checks the generated TypeScript SDK with `tsc --strict` and byte-compiles the Python one |
+| `Build and test` | 1,074 C# tests across 14 suites, against a replica set **and** a standalone MongoDB; also type-checks the generated TypeScript SDK with `tsc --strict` and byte-compiles the Python one |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `VS Code extension` | 17 TypeScript tests, plus typecheck and bundle |
@@ -1398,14 +1398,14 @@ document, this time caught before it shipped.
 
 ## 4. Coverage and what covering it found
 
-Every module has tests. **1,073 C# tests in total**, from 258 at the start, plus 50 TypeScript across
+Every module has tests. **1,074 C# tests in total**, from 258 at the start, plus 50 TypeScript across
 Studio and the VS Code extension. Counts below are read off a solution-wide run rather than carried forward — the figures in
 this table had drifted from the suites they describe, which is the same defect the document is about:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
 | `foundry-schema` | 277 | — |
-| `foundry-mongo` | 144 | MongoDB, **both** a replica set and a standalone |
+| `foundry-mongo` | 145 | MongoDB, **both** a replica set and a standalone |
 | `foundry-rules` | 118 | — |
 | `foundry-integration-tests` | 90 | MongoDB |
 | `foundry-api` | 81 | MongoDB |
@@ -1710,10 +1710,12 @@ The surfaces that deserve that treatment next, in order:
    values, and an unclamped page size, in section 3.
 3. ~~`Foundry.Connectors`.~~ **Done** — no redirect or size policy on any client, and credentials as
    literals in the IR, in section 3.
-4. **Every other hand-built `BsonDocument` filter.** The camelCase defect above is a class, not an
-   instance: anywhere a filter is written as raw BSON rather than through `Builders<T>`, a wrong
-   element name fails silently and open. `BuildBsonFilter` and the archival sweep are the places to
-   look first.
+4. ~~Every other hand-built `BsonDocument` filter.~~ **Done** — `BuildBsonFilter` had the same defect
+   one line from the one already fixed, and survived a cycle longer because it costs results rather
+   than isolation: a filter matching no field returns nothing, and for a *search* "no results" is a
+   plausible answer every time. The only other raw-BSON name, a `$sort` on `EntityId`, is correct —
+   it sorts on a field the projection produces. Worth noting that "same root cause, lower severity"
+   is a category that gets deferred and then forgotten.
 
 The three workflow items left unfixed above are smaller than any of these, and are recorded so they
 are not rediscovered rather than because they should come first.

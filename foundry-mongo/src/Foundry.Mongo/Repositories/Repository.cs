@@ -1224,7 +1224,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         }
 
         var first = list[0];
-        var firstMatchDoc = BuildBsonFilter(request.Criteria);
+        var firstMatchDoc = BuildBsonFilter(request.Criteria, first.EntityType);
         ApplyIsolationTo(firstMatchDoc, first.EntityType);
 
         var firstProjectDoc = new BsonDocument
@@ -1240,7 +1240,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         for (int i = 1; i < list.Count; i++)
         {
             var other = list[i];
-            var otherMatchDoc = BuildBsonFilter(request.Criteria);
+            var otherMatchDoc = BuildBsonFilter(request.Criteria, other.EntityType);
             ApplyIsolationTo(otherMatchDoc, other.EntityType);
 
             var otherProjectDoc = new BsonDocument
@@ -2434,11 +2434,23 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         return Builders<T>.Sort.Descending(e => e.Id);
     }
 
-    private static BsonDocument BuildBsonFilter(SearchCriterion[] criteria)
+    /// <summary>
+    /// Builds an aggregation <c>$match</c> from search criteria, for <paramref name="entityType"/>.
+    /// </summary>
+    /// <remarks>
+    /// The type is a parameter because the field names are not. A criterion names a property —
+    /// <c>Price</c> — and the document stores an element — <c>price</c>, because
+    /// <c>MongoDbConventions</c> registers <c>CamelCaseElementNameConvention</c>. This built the match
+    /// from the property name, so every criterion matched no field and the search returned nothing,
+    /// silently and without error. It is the same defect as the soft-delete predicate beside it, found
+    /// the same way and left in place a cycle longer because it costs results rather than isolation.
+    /// </remarks>
+    private static BsonDocument BuildBsonFilter(SearchCriterion[] criteria, Type entityType)
     {
         var filterDoc = new BsonDocument();
         foreach (var criterion in criteria)
         {
+            var field = ElementName(entityType, criterion.Field);
             var valueDoc = ConvertToBsonValue(criterion.Value);
             BsonValue operatorValue = criterion.Operator switch
             {
@@ -2457,17 +2469,17 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
             if (operatorValue is BsonRegularExpression)
             {
-                filterDoc[criterion.Field] = operatorValue;
+                filterDoc[field] = operatorValue;
             }
             else
             {
-                if (filterDoc.Contains(criterion.Field) && filterDoc[criterion.Field].IsBsonDocument)
+                if (filterDoc.Contains(field) && filterDoc[field].IsBsonDocument)
                 {
-                    filterDoc[criterion.Field].AsBsonDocument.Merge(operatorValue.AsBsonDocument);
+                    filterDoc[field].AsBsonDocument.Merge(operatorValue.AsBsonDocument);
                 }
                 else
                 {
-                    filterDoc[criterion.Field] = operatorValue;
+                    filterDoc[field] = operatorValue;
                 }
             }
         }
