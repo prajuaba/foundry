@@ -347,7 +347,12 @@ namespace Foundry.Api.SourceGenerators
                         sb.AppendLine("            {");
                         sb.AppendLine("                var sortBy = context.Request.Query[\"sortBy\"].ToString();");
                         sb.AppendLine("                var limitStr = context.Request.Query[\"limit\"].ToString();");
+                        // Clamped. This read the caller's number and passed it straight to the repository, so
+                        // ?limit=100000000 asked a generated endpoint to serialise as much as the tenant
+                        // held. MaxDepthCap guards offset paging and never applied here.
                         sb.AppendLine("                var limit = int.TryParse(limitStr, out var parsedLimit) ? parsedLimit : 100;");
+                        sb.AppendLine("                if (limit < 1) limit = 1;");
+                        sb.AppendLine("                if (limit > 500) limit = 500;");
                         sb.AppendLine("                var sortOrder = string.Equals(context.Request.Query[\"sortOrder\"].ToString(), \"asc\", System.StringComparison.OrdinalIgnoreCase) || string.Equals(context.Request.Query[\"sortOrder\"].ToString(), \"ascending\", System.StringComparison.OrdinalIgnoreCase) ? Foundry.Core.Paging.SortOrder.Ascending : Foundry.Core.Paging.SortOrder.Descending;");
                         sb.AppendLine();
                         sb.AppendLine("                // Advanced Criteria Support");

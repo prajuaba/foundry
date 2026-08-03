@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 1,046 C# tests across 14 suites, against a replica set **and** a standalone MongoDB; also type-checks the generated TypeScript SDK with `tsc --strict` and byte-compiles the Python one |
+| `Build and test` | 1,059 C# tests across 14 suites, against a replica set **and** a standalone MongoDB; also type-checks the generated TypeScript SDK with `tsc --strict` and byte-compiles the Python one |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `VS Code extension` | 17 TypeScript tests, plus typecheck and bundle |
@@ -1263,16 +1263,81 @@ redacted.
 
 Twenty-six tests. Reverting the guard and the redaction fails five of them.
 
+### Three read paths on the repository composed no isolation
+
+The next surface on the list, reviewed with the same question. Eight read paths route through
+`ApplyReadFilters` and both of its overloads now agree — the defect fixed in an earlier cycle stayed
+fixed. Every write path scopes by tenant and owner. Three read paths did neither:
+
+- **Revision history was keyed on the entity id alone.** `GetRevisionsAsync` and
+  `GetRevisionByVersionAsync` queried `{Collection}_History` with no tenant and no owner predicate, so
+  naming another tenant's id returned that record's full history. `[Encrypt]` fields stay ciphertext in
+  a revision; `[Mask]` and `[SensitiveData]` ones do not, because masking happens on the way out. The
+  repository's own `ScopeToTenant` already argues the point — *an id is not a secret* — and applies the
+  filter to writes for that reason. Reads now load the record through the tenant- and owner-scoped
+  filter first, and return empty rather than confirming the id exists elsewhere.
+- **`CrossCollectionSearchAsync` applied the soft-delete predicate and stopped.** 206 lines with no
+  reference to tenancy or ownership anywhere in them, projecting `$$ROOT` — the whole document — for
+  every collection it was given.
+- **`AggregateAsync` ran the caller's pipeline against the collection.** No `$match`, so any
+  aggregation saw every tenant's rows and deleted rows too. It sat on `IRepository<T>` beside eleven
+  methods that enforce isolation, with nothing in its name or documentation to say it was different.
+
+None is a generated endpoint, so reaching them takes application code — which is why they matter
+rather than why they do not. `IRepository<T>` is the layer this framework presents as the isolation
+boundary, and code calling one of these is entitled to what the other eleven methods give.
+
+**A fourth defect surfaced from fixing the second.** The tenant filter added to cross-collection
+search matched nothing, and the test that expected rows got none. The cause was that a hand-built
+`BsonDocument` stage does not resolve names through the class map, and `MongoDbConventions` registers
+`CamelCaseElementNameConvention` — so `TenantId` had to be `tenantId`. **The soft-delete predicate
+that method has always applied was written the same way**, which means cross-collection search never
+excluded a soft-deleted row either. A wrong element name does not error; it matches nothing, and a
+filter that matches nothing is a filter that does not filter. Element names now come from the class
+map.
+
+Six tests, all six failing when the fixes are reverted.
+
+### Filtering was a read nobody entitled
+
+The generated list endpoint's `criteria` parameter, reviewed next. It composes correctly — criteria
+are ANDed into the expression `ApplyReadFilters` then extends, so no caller can widen past their own
+rows — and it is not injectable: operators are a closed enum and values are typed constants, never
+concatenated text. An unknown field throws rather than being ignored.
+
+**But any property was filterable, including the ones every response masks.** Masking is a read-time
+transform and the stored value is clear text, so `PaymentCardNumber startsWith "4111"` answered the
+question the mask exists to refuse. Rows come back or they do not; sixteen digits fall out of a few
+hundred requests, with every response along the way correctly masked. The showcase carries exactly
+that shape — `Order.PaymentCardNumber` is `[Mask]` in category `financial`, and `Customer.PhoneNumber`
+is `[Mask]` in `contact`.
+
+The sharpest case is the auditor. `[OwnerReadExemptRoles]` exists so someone can read every row in a
+tenant while still seeing sensitive fields masked — and an unrestricted filter turned that grant into
+"may extract every value in the tenant", which is precisely what its shape was meant to prevent.
+
+Filtering on a sensitive property now requires the same scope that unmasks it, refused rather than
+silently dropped: a dropped predicate widens the result set, which is the wrong direction to fail. The
+entitlement is `ShouldMask` itself, so "may read it" and "may filter on it" cannot drift apart.
+
+Two limits came with it. `limit` was read from the query string and passed to the repository
+unclamped, so `?limit=100000000` asked a generated endpoint to serialise as much as the tenant held —
+`MaxDepthCap` guards offset paging and never applied here; it is now bounded to 500. And a request may
+combine at most 32 criteria, which bounds the expression tree rather than protecting anything.
+
+Seven tests. Five fail when the entitlement check is removed; the two that still pass are the
+controls — an ordinary field keeps filtering, and an entitled caller still gets both a hit and a miss.
+
 ## 4. Coverage and what covering it found
 
-Every module has tests. **1,046 C# tests in total**, from 258 at the start, plus 50 TypeScript across
+Every module has tests. **1,059 C# tests in total**, from 258 at the start, plus 50 TypeScript across
 Studio and the VS Code extension. Counts below are read off a solution-wide run rather than carried forward — the figures in
 this table had drifted from the suites they describe, which is the same defect the document is about:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
 | `foundry-schema` | 271 | — |
-| `foundry-mongo` | 131 | MongoDB, **both** a replica set and a standalone |
+| `foundry-mongo` | 144 | MongoDB, **both** a replica set and a standalone |
 | `foundry-rules` | 118 | — |
 | `foundry-integration-tests` | 90 | MongoDB |
 | `foundry-api` | 81 | MongoDB |
@@ -1561,13 +1626,18 @@ whether behaviour matches intent and the intent was the defect.
 
 The surfaces that deserve that treatment next, in order:
 
-1. **`Repository<T>`'s filter composition.** 1,700 lines carrying tenancy, ownership, soft delete and
-   search. Every read path assembles those filters, and the review question is whether any path
-   assembles them incompletely — which is precisely the shape of the two defects already found there.
-2. **The generated GET endpoint's `criteria` parameter.** Caller-supplied JSON deserialised into a
-   filter expression. It has been run and it works; nobody has asked what it permits.
+1. ~~`Repository<T>`'s filter composition.~~ **Done** — three unfiltered read paths and one
+   silently-inert filter, in section 3. It produced the strongest argument yet for this method: the
+   file had already been reviewed twice and fixed twice, and still held three paths that composed no
+   isolation at all.
+2. ~~The generated GET endpoint's `criteria` parameter.~~ **Done** — a filter oracle over masked
+   values, and an unclamped page size, in section 3.
 3. **`Foundry.Connectors`.** Outbound REST, SOAP and GraphQL with credentials in configuration,
    reviewed for correctness and never for what a hostile endpoint can do back.
+4. **Every other hand-built `BsonDocument` filter.** The camelCase defect above is a class, not an
+   instance: anywhere a filter is written as raw BSON rather than through `Builders<T>`, a wrong
+   element name fails silently and open. `BuildBsonFilter` and the archival sweep are the places to
+   look first.
 
 The three workflow items left unfixed above are smaller than any of these, and are recorded so they
 are not rediscovered rather than because they should come first.

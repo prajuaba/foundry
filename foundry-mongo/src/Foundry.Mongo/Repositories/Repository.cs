@@ -1225,10 +1225,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
         var first = list[0];
         var firstMatchDoc = BuildBsonFilter(request.Criteria);
-        if (typeof(ISoftDelete).IsAssignableFrom(first.EntityType))
-        {
-            firstMatchDoc["IsDeleted"] = new BsonDocument("$ne", true);
-        }
+        ApplyIsolationTo(firstMatchDoc, first.EntityType);
 
         var firstProjectDoc = new BsonDocument
         {
@@ -1244,10 +1241,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         {
             var other = list[i];
             var otherMatchDoc = BuildBsonFilter(request.Criteria);
-            if (typeof(ISoftDelete).IsAssignableFrom(other.EntityType))
-            {
-                otherMatchDoc["IsDeleted"] = new BsonDocument("$ne", true);
-            }
+            ApplyIsolationTo(otherMatchDoc, other.EntityType);
 
             var otherProjectDoc = new BsonDocument
             {
@@ -1409,9 +1403,47 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
     // ─── Historical Versioning operations ─────────────────────────────────
 
+    /// <summary>
+    /// Whether the caller may see this record at all, for the purpose of reading things attached to it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Revision history lives in a second collection keyed only by entity id, and was read with that
+    /// id and nothing else. An id is not a secret — this repository's own <see cref="ScopeToTenant"/>
+    /// says so, and applies the tenant filter to writes for exactly that reason — so a caller could
+    /// name another tenant's record and read its full history. <c>[Encrypt]</c> fields stay ciphertext
+    /// in a revision, but <c>[Mask]</c> and <c>[SensitiveData]</c> ones do not: masking happens on the
+    /// way out, so those sit in the revision in clear text.
+    /// </para>
+    /// <para>
+    /// Tenant and owner, deliberately without the soft-delete filter. Reading the history of a deleted
+    /// record is a reasonable thing to want and is what <c>RestoreVersionAsync</c> needs; the question
+    /// here is whose record it is, not whether it is live. This is the same filter the restore paths
+    /// already use, and the same rule the workflow history endpoint applies by loading the entity
+    /// through the repository before serving anything attached to it.
+    /// </para>
+    /// </remarks>
+    private async Task<bool> CallerMaySeeRecordAsync(ObjectId id, IClientSessionHandle? session, CancellationToken ct)
+    {
+        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, id)));
+        var options = new FindOptions<T> { Limit = 1, Projection = Builders<T>.Projection.Include(e => e.Id) };
+
+        var cursor = session != null
+            ? await _collection.FindAsync(session, filter, options, ct)
+            : await _collection.FindAsync(filter, options, ct);
+
+        return await cursor.AnyAsync(ct);
+    }
+
     public async Task<IReadOnlyList<EntityRevision>> GetRevisionsAsync(object id, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        var objectIdStr = ConvertToObjectId(id).ToString();
+        var objectId = ConvertToObjectId(id);
+
+        // Empty rather than an error: the same answer a caller gets for an id that does not exist,
+        // so this does not confirm that the record exists in some other tenant.
+        if (!await CallerMaySeeRecordAsync(objectId, session, ct)) return Array.Empty<EntityRevision>();
+
+        var objectIdStr = objectId.ToString();
         var historyCollectionName = CollectionName + "_History";
         var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
 
@@ -1433,7 +1465,25 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
     public async Task<EntityRevision?> GetRevisionByVersionAsync(object id, int version, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        var objectIdStr = ConvertToObjectId(id).ToString();
+        var objectId = ConvertToObjectId(id);
+
+        if (!await CallerMaySeeRecordAsync(objectId, session, ct)) return null;
+
+        return await ReadRevisionAsync(objectId, version, session, ct);
+    }
+
+    /// <summary>
+    /// Reads one revision without checking visibility. Callers must have established it themselves.
+    /// </summary>
+    /// <remarks>
+    /// Private, and named so that is unmissable. <c>RestoreVersionAsync</c> loads the live row through
+    /// the tenant- and owner-scoped filter as its next step, so routing it through the public gated
+    /// reader would query the same row twice to answer the same question.
+    /// </remarks>
+    private async Task<EntityRevision?> ReadRevisionAsync(
+        ObjectId objectId, int version, IClientSessionHandle? session, CancellationToken ct)
+    {
+        var objectIdStr = objectId.ToString();
         var historyCollectionName = CollectionName + "_History";
         var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
 
@@ -1460,7 +1510,9 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         if (!typeof(IVersionable).IsAssignableFrom(typeof(T)))
             throw new NotSupportedException($"Entity type '{typeof(T).Name}' does not support versioning.");
 
-        var revision = await GetRevisionByVersionAsync(id, version, session, ct);
+        // Visibility is established below, against the live row, with ScopeToOwner(ScopeToTenant(...)).
+        // Reading the revision through the gated public method would ask the same question twice.
+        var revision = await ReadRevisionAsync(ConvertToObjectId(id), version, session, ct);
         if (revision == null)
             throw new KeyNotFoundException($"Revision {version} for entity {id} not found.");
 
@@ -1730,10 +1782,26 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
     public async Task<IReadOnlyList<TResult>> AggregateAsync<TResult>(PipelineDefinition<T, TResult> pipeline, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
+        ArgumentNullException.ThrowIfNull(pipeline);
+
+        // The caller's pipeline runs against the rows they are allowed to see, not the collection.
+        //
+        // It used to run against the collection: no tenant, no owner, no soft-delete predicate. That
+        // made this the one method on IRepository<T> that does not enforce isolation, sitting beside
+        // eleven that do, with nothing in its name or its documentation to say so. An escape hatch is
+        // a defensible thing to offer; one that looks identical to the safe methods is not.
+        //
+        // Prepending rather than appending: a $match after a $group would filter on fields the
+        // grouping has already discarded, and would have read every tenant's rows to build the groups
+        // in the first place.
+        var scoped = new PrependedStagePipelineDefinition<T, T, TResult>(
+            PipelineStageDefinitionBuilder.Match(ApplyReadFilters(Builders<T>.Filter.Empty)),
+            pipeline);
+
         var collection = _collection.WithReadPreference(ReadPreference.SecondaryPreferred);
         var cursor = session != null
-            ? await collection.AggregateAsync(session, pipeline, cancellationToken: ct)
-            : await collection.AggregateAsync(pipeline, cancellationToken: ct);
+            ? await collection.AggregateAsync(session, scoped, cancellationToken: ct)
+            : await collection.AggregateAsync(scoped, cancellationToken: ct);
         return await cursor.ToListAsync(ct);
     }
 
@@ -1942,6 +2010,128 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     /// <param name="grantedTo">
     /// Identities a grant may name to reach this caller, empty for a write or a non-shareable entity.
     /// </param>
+    /// <summary>
+    /// The owner scope for an entity type other than <typeparamref name="T"/>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TryGetOwnerScope(bool, out string, out List{string})"/> reads statics bound to
+    /// <typeparamref name="T"/>, which is right for every method that reads one collection and useless
+    /// for the one that reads several. Cross-collection search unions other entity types, and each
+    /// carries its own <c>[OwnerExemptRoles]</c> and its own answer to whether it is shareable — so the
+    /// same question has to be asked of the type in hand rather than of T.
+    /// </remarks>
+    private bool TryGetOwnerScopeFor(Type entityType, out string ownerId, out List<string> grantedTo)
+    {
+        ownerId = string.Empty;
+        grantedTo = [];
+
+        if (!typeof(Foundry.Core.Security.IOwnedResource).IsAssignableFrom(entityType)) return false;
+        if (_userContext is null) return false;
+
+        var exempt = ((Foundry.Core.Security.OwnerExemptRolesAttribute?)Attribute.GetCustomAttribute(
+            entityType, typeof(Foundry.Core.Security.OwnerExemptRolesAttribute)))?.Roles
+            ?? Array.Empty<string>();
+
+        var readExempt = ((Foundry.Core.Security.OwnerReadExemptRolesAttribute?)Attribute.GetCustomAttribute(
+            entityType, typeof(Foundry.Core.Security.OwnerReadExemptRolesAttribute)))?.Roles
+            ?? Array.Empty<string>();
+
+        if (HoldsAnyRole(exempt) || HoldsAnyRole(readExempt)) return false;
+
+        var current = CurrentOwnerId;
+        if (current is null) return false;
+
+        ownerId = current;
+
+        if (typeof(Foundry.Core.Security.ISharedResource).IsAssignableFrom(entityType))
+        {
+            grantedTo = CallerIdentities();
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Adds the tenant and ownership predicates for <paramref name="entityType"/> to an aggregation
+    /// <c>$match</c> document.
+    /// </summary>
+    /// <remarks>
+    /// Cross-collection search applied the soft-delete predicate and stopped, so it read every
+    /// tenant's rows out of every collection it was given and projected <c>$$ROOT</c> — the whole
+    /// document — for each. Every other search entry point on this repository is filtered; this one
+    /// was not, and being the only unfiltered one made it the least likely to be noticed.
+    /// </remarks>
+    private void ApplyIsolationTo(BsonDocument match, Type entityType)
+    {
+        if (typeof(ISoftDelete).IsAssignableFrom(entityType))
+        {
+            match[ElementName(entityType, "IsDeleted")] = new BsonDocument("$ne", true);
+        }
+
+        if (typeof(Foundry.Core.Tenant.IMultiTenant).IsAssignableFrom(entityType)
+            && _tenantContext?.HasTenant == true)
+        {
+            match[ElementName(entityType, "TenantId")] = _tenantContext.TenantId;
+        }
+
+        if (TryGetOwnerScopeFor(entityType, out var ownerId, out var grantedTo))
+        {
+            if (grantedTo.Count > 0)
+            {
+                // Mine, or granted to one of the identities I present -- the aggregation equivalent
+                // of the Or(mine, AnyIn(SharedWith, ...)) the find path builds.
+                match["$or"] = new BsonArray
+                {
+                    new BsonDocument(ElementName(entityType, "OwnerId"), ownerId),
+                    new BsonDocument(
+                        ElementName(entityType, "SharedWith"),
+                        new BsonDocument("$in", new BsonArray(grantedTo)))
+                };
+            }
+            else
+            {
+                match[ElementName(entityType, "OwnerId")] = ownerId;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The stored element name for a property, as the class map records it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Not the property name. <c>MongoDbConventions</c> registers
+    /// <c>CamelCaseElementNameConvention</c>, so <c>TenantId</c> is stored as <c>tenantId</c>. The
+    /// <c>Builders&lt;T&gt;</c> filters used everywhere else resolve names through the class map and
+    /// are unaffected; a hand-built <see cref="BsonDocument"/> stage is not, and a match on the wrong
+    /// name does not error — it simply matches nothing.
+    /// </para>
+    /// <para>
+    /// That is not hypothetical. The soft-delete predicate this method has always applied was written
+    /// as <c>match["IsDeleted"]</c> against camelCased documents, so cross-collection search never
+    /// excluded a soft-deleted row. It was found by the tenant filter added beside it failing in the
+    /// same way, in a test that expected rows and got none.
+    /// </para>
+    /// </remarks>
+    private static string ElementName(Type entityType, string propertyName)
+    {
+        try
+        {
+            var map = BsonClassMap.LookupClassMap(entityType);
+            var member = map.AllMemberMaps.FirstOrDefault(m =>
+                string.Equals(m.MemberName, propertyName, StringComparison.Ordinal));
+
+            if (member is not null) return member.ElementName;
+        }
+        catch
+        {
+            // An unmappable type falls through to the convention's own rule rather than throwing:
+            // this is a filter, and failing to build it must not turn into failing to apply it.
+        }
+
+        return char.ToLowerInvariant(propertyName[0]) + propertyName[1..];
+    }
+
     private bool TryGetOwnerScope(bool forWrite, out string ownerId, out List<string> grantedTo)
     {
         ownerId = string.Empty;
@@ -2147,10 +2337,83 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         EntityEncryptionService<T>.SetProperty(obj, propertyName, value);
     }
 
-    private static Expression<Func<T, bool>> BuildExpression(SearchCriterion[] criteria)
+    private Expression<Func<T, bool>> BuildExpression(SearchCriterion[] criteria)
     {
+        EnsureCriteriaAreFilterable(criteria);
         return DynamicExpressionBuilder.BuildExpression<T>(criteria);
     }
+
+    /// <summary>
+    /// Refuses to filter on a property this caller is not entitled to read.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Filtering is a read. <c>[Mask]</c> and <c>[SensitiveData]</c> hide a value on the way out, but
+    /// the value is stored in clear — so a caller who cannot see <c>PaymentCardNumber</c> could still
+    /// ask <c>StartsWith("4111")</c> and learn from whether rows come back. Sixteen digits fall out of
+    /// a few hundred requests, and every response along the way is correctly masked.
+    /// </para>
+    /// <para>
+    /// The sharpest case is the auditor. <c>[OwnerReadExemptRoles]</c> exists to let someone read every
+    /// row in a tenant while still seeing sensitive fields masked; an unrestricted filter turns that
+    /// grant into "may extract every value in the tenant", which is the one thing its shape was meant
+    /// to prevent.
+    /// </para>
+    /// <para>
+    /// The entitlement is the same one <see cref="ShouldMask"/> uses, deliberately: a caller who may
+    /// read the value in full may also filter on it, and the two answers come from one place so they
+    /// cannot drift. Refused rather than silently dropped — a dropped predicate widens the result set,
+    /// which is the wrong direction to fail.
+    /// </para>
+    /// </remarks>
+    private void EnsureCriteriaAreFilterable(SearchCriterion[] criteria)
+    {
+        if (criteria is null || criteria.Length == 0) return;
+
+        if (criteria.Length > MaxCriteriaCount)
+        {
+            throw new ArgumentException(
+                $"A search may combine at most {MaxCriteriaCount} criteria; {criteria.Length} were supplied.",
+                nameof(criteria));
+        }
+
+        foreach (var criterion in criteria)
+        {
+            if (string.IsNullOrWhiteSpace(criterion.Field)) continue;
+
+            var property = typeof(T).GetProperty(
+                criterion.Field,
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+
+            if (property is null) continue;   // BuildExpression reports the unknown field itself.
+
+            var sensitive = property.GetCustomAttribute<Foundry.Core.Entities.SensitiveDataAttribute>();
+            if (sensitive is not null && ShouldMask(sensitive))
+            {
+                throw new UnauthorizedAccessException(
+                    $"'{property.Name}' on '{typeof(T).Name}' is sensitive and this caller may not read it, "
+                    + $"so it cannot be filtered on either: a filter reveals the value it is not allowed "
+                    + $"to see. Hold the '{ViewSensitiveDataScope.For(sensitive.Category)}' scope to do both.");
+            }
+
+            var pii = property.GetCustomAttribute<Foundry.Core.Security.PiiDataAttribute>();
+            if (pii is not null && _userContext?.User?.HasClaim(
+                    ViewSensitiveDataScope.ClaimType, ViewSensitiveDataScope.ClaimValue) != true)
+            {
+                throw new UnauthorizedAccessException(
+                    $"'{property.Name}' on '{typeof(T).Name}' is personally identifiable and this caller "
+                    + $"may not read it, so it cannot be filtered on either. Hold the "
+                    + $"'{ViewSensitiveDataScope.ClaimValue}' scope to do both.");
+            }
+        }
+    }
+
+    /// <summary>How many conditions one search may combine.</summary>
+    /// <remarks>
+    /// Not a security boundary — the criteria are ANDed into a filter the caller could not widen
+    /// anyway. It bounds the expression tree and the query document a single request can build.
+    /// </remarks>
+    private const int MaxCriteriaCount = 32;
 
     private static SortDefinition<T>? BuildSortDefinition(PagedRequest request)
     {

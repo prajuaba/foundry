@@ -1023,6 +1023,13 @@ public sealed record CrossCollectionSearchRequest
 | Type | Role |
 | :--- | :--- |
 | `Repository<T>` | The real implementation. Injects tenant, soft-delete and ownership filters on every read; enforces OCC on `Version`; encrypts `[Encrypt]` fields; writes audit entries and revisions. |
+
+Isolation applies to **every** method on the interface, including the three that once bypassed it:
+`GetRevisionsAsync` and `GetRevisionByVersionAsync` serve history only for a record the caller can
+already see; `CrossCollectionSearchAsync` scopes each unioned collection by that type's own tenant and
+owner rules; and `AggregateAsync` prepends a `$match` so a caller's pipeline runs against the rows they
+may see rather than the collection. A pipeline that needs the unfiltered collection has to go to
+`Collection` directly, which says what it is doing.
 | `CachedRepository<T>` | Decorator over `Repository<T>` with `IMemoryCache`. Reads are cached per id; writes evict. `CachedRepositoryOptions.DefaultTtl` = 5 min. |
 | `PartitionedRepository<T>` | Hot/cold split by year. Reads span the archives when the filter's date range requires it (`DateRangeVisitor` extracts the range from the expression tree). |
 

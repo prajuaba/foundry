@@ -124,9 +124,15 @@ public class CrossCollectionSearchTests
         var unionPipeline = unionStage["$unionWith"]["pipeline"].AsBsonArray;
         var unionMatch = unionPipeline[0].AsBsonDocument;
         Assert.True(unionMatch.Contains("$match"));
-        // Matches soft delete: { "IsDeleted": { "$ne": true } }
-        Assert.True(unionMatch["$match"].AsBsonDocument.Contains("IsDeleted"));
-        Assert.True(unionMatch["$match"]["IsDeleted"]["$ne"].AsBoolean);
+        // Matches soft delete: { "isDeleted": { "$ne": true } }
+        //
+        // camelCase, and this assertion used to say "IsDeleted". It passed, because it was checking
+        // the document the code built rather than the document MongoDB stores -- and MongoDbConventions
+        // registers CamelCaseElementNameConvention, so nothing was ever named "IsDeleted" on disk. The
+        // filter matched no field and excluded no row. A test can only pin the shape of a stage; that
+        // the stage does anything is what UnfilteredReadPathTests asserts, against a real database.
+        Assert.True(unionMatch["$match"].AsBsonDocument.Contains("isDeleted"));
+        Assert.True(unionMatch["$match"]["isDeleted"]["$ne"].AsBoolean);
 
         // Assert facet contains sort on Properties.Price descending, skip 0, limit 10
         var facetStage = renderedStages[3];
