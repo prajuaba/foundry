@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 1,059 C# tests across 14 suites, against a replica set **and** a standalone MongoDB; also type-checks the generated TypeScript SDK with `tsc --strict` and byte-compiles the Python one |
+| `Build and test` | 1,073 C# tests across 14 suites, against a replica set **and** a standalone MongoDB; also type-checks the generated TypeScript SDK with `tsc --strict` and byte-compiles the Python one |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `VS Code extension` | 17 TypeScript tests, plus typecheck and bundle |
@@ -1328,22 +1328,56 @@ combine at most 32 criteria, which bounds the expression tree rather than protec
 Seven tests. Five fail when the entitlement check is removed; the two that still pass are the
 controls — an ordinary field keeps filtering, and an entitled caller still gets both a hit and a miss.
 
+### The connectors, and the rule that never existed
+
+The last of the three surfaces. Two findings mattered.
+
+**No connector client had a redirect policy or a response cap.** Any service a connector called could
+answer 302 and send the request — carrying that connector's credentials — somewhere it was never
+configured to go, and answer with an unbounded body. The workflow engine had been hardened against
+exactly this one cycle earlier.
+
+The instinct is to call that a missed propagation. It was not: the two outbound paths were never one
+rule, so there was nothing for the earlier fix to propagate along. `OutboundHttpPolicy` in
+`Foundry.Core` is now the single producer, and both the connectors and the workflow engine build their
+clients from it. This is the fourth time a rule has been collapsed into one place after existing in
+two — route composition, SDK surface, real-time access, and now outbound HTTP — and the first time it
+was found by reviewing the *second* implementation rather than by the two disagreeing.
+
+**Connector credentials were literals in the IR.** `password`, `apiKey` and `token` took plain
+strings, and the IR is committed to source control, opened in Studio, and passed to a local model as
+prompt context by `foundry ai` — three places a secret should never reach, none of which look like a
+mistake while it is happening. `FDY3020` now requires a `${...}` reference. The showcase already used
+that form: the convention existed and nothing enforced it.
+
+Also: an absolute `endpoint` silently overrode a connector's `BaseUrl`, taking its credentials to
+another host, and `SOAPAction` was interpolated into a quoted header unvalidated. Both refused now.
+
+XXE was checked and is **not** a finding. `XmlSerializer` creates a reader with `DtdProcessing.Prohibit`
+on .NET Core and later, so the SOAP path is safe — by platform default rather than by anything this
+code chose, which is worth knowing but not worth changing working code over.
+
+Ten tests. The validator rule was written and inserted in the wrong place, where it ran only when
+there was no schema to validate; four tests failed on it. Had only the accepting case been written, it
+would have passed and the rule would have been dead code — the same shape as every silent gate in this
+document, this time caught before it shipped.
+
 ## 4. Coverage and what covering it found
 
-Every module has tests. **1,059 C# tests in total**, from 258 at the start, plus 50 TypeScript across
+Every module has tests. **1,073 C# tests in total**, from 258 at the start, plus 50 TypeScript across
 Studio and the VS Code extension. Counts below are read off a solution-wide run rather than carried forward — the figures in
 this table had drifted from the suites they describe, which is the same defect the document is about:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
-| `foundry-schema` | 271 | — |
+| `foundry-schema` | 277 | — |
 | `foundry-mongo` | 144 | MongoDB, **both** a replica set and a standalone |
 | `foundry-rules` | 118 | — |
 | `foundry-integration-tests` | 90 | MongoDB |
 | `foundry-api` | 81 | MongoDB |
 | `foundry-file-io` | 75 | — |
 | `foundry-core` | 52 | — |
-| `foundry-connectors` | 52 | — |
+| `foundry-connectors` | 60 | — |
 | `foundry-kafka` | 39 | — |
 | `foundry-schema` backend | 13 | — |
 | `foundry-studio` | 33 | — (TypeScript) |
@@ -1632,8 +1666,8 @@ The surfaces that deserve that treatment next, in order:
    isolation at all.
 2. ~~The generated GET endpoint's `criteria` parameter.~~ **Done** — a filter oracle over masked
    values, and an unclamped page size, in section 3.
-3. **`Foundry.Connectors`.** Outbound REST, SOAP and GraphQL with credentials in configuration,
-   reviewed for correctness and never for what a hostile endpoint can do back.
+3. ~~`Foundry.Connectors`.~~ **Done** — no redirect or size policy on any client, and credentials as
+   literals in the IR, in section 3.
 4. **Every other hand-built `BsonDocument` filter.** The camelCase defect above is a class, not an
    instance: anywhere a filter is written as raw BSON rather than through `Builders<T>`, a wrong
    element name fails silently and open. `BuildBsonFilter` and the archival sweep are the places to

@@ -35,8 +35,15 @@ public static class WorkflowHttpLimits
     public static string ClientNameFor(string? method)
         => IsSafeToRepeat(method) ? RetryingClientName : SingleAttemptClientName;
 
-    /// <summary>Largest response body the workflow client will read at all.</summary>
-    public const long MaxResponseBytes = 1024 * 1024;
+    /// <summary>
+    /// Largest response body the workflow client will read at all.
+    /// </summary>
+    /// <remarks>
+    /// Delegates to <see cref="Foundry.Core.Http.OutboundHttpPolicy"/>, which the connectors use too.
+    /// This was its own number until the connectors were reviewed and turned out to have no limit at
+    /// all — two outbound paths, hardened one at a time, because nothing made them one rule.
+    /// </remarks>
+    public const long MaxResponseBytes = Foundry.Core.Http.OutboundHttpPolicy.MaxResponseBytes;
 
     /// <summary>Largest response body kept in the activity log.</summary>
     public const int MaxRecordedResponseCharacters = 8 * 1024;

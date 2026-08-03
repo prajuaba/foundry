@@ -43,7 +43,13 @@ public class SoapConnector : IFoundryConnector
 </soap:Envelope>";
 
         var content = new StringContent(soapEnvelope, Encoding.UTF8, "text/xml");
-        var soapActionHeader = !string.IsNullOrEmpty(_options.SoapAction) ? _options.SoapAction : action;
+        // Validated, not sanitised. The value is wrapped in quotes to form the header, so one inside
+        // it terminates the action early -- which changes the operation the remote service performs
+        // rather than merely malforming the request.
+        var soapActionHeader = Foundry.Core.Http.OutboundHttpPolicy.RequireHeaderSafe(
+            !string.IsNullOrEmpty(_options.SoapAction) ? _options.SoapAction : action,
+            "The SOAP action");
+
         content.Headers.Add("SOAPAction", $"\"{soapActionHeader}\"");
 
         var response = await _http.PostAsync("", content, cancellationToken);

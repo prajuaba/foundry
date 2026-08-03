@@ -287,6 +287,9 @@ namespace Foundry.Schema.Compiler
         /// <summary>A decision gate can fail to match any branch and declares no default state.</summary>
         public const string WorkflowGateWithoutDefault = "FDY3019";
 
+        /// <summary>A connector credential is a literal rather than a reference to where it lives.</summary>
+        public const string ConnectorSecretLiteral = "FDY3020";
+
         // ---- FDY4xxx: naming and identifier safety ----
 
         /// <summary>A name is not a valid C# identifier and cannot be emitted as code.</summary>

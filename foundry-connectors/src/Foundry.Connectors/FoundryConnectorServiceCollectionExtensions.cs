@@ -68,8 +68,16 @@ public static class FoundryConnectorServiceCollectionExtensions
             {
                 client.BaseAddress = new Uri(options.BaseUrl);
             }
+            // The connector's own timeout, then the shared limits. A connector may be given a
+            // shorter timeout than the framework default; it may not opt out of the response cap.
+            Foundry.Core.Http.OutboundHttpPolicy.Configure(client);
             client.Timeout = TimeSpan.FromSeconds(options.TimeoutSeconds);
         });
+
+        // The same policy the workflow engine's external actions use. Both call systems Foundry does
+        // not control, and until now only one of them said what an external service is allowed to do
+        // back -- redirect this request somewhere else, or answer with an unbounded body.
+        builder.ConfigurePrimaryHttpMessageHandler(Foundry.Core.Http.OutboundHttpPolicy.CreateHandler);
 
         builder.AddStandardResilienceHandler();
 

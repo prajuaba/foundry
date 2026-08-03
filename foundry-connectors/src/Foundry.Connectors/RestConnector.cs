@@ -85,6 +85,18 @@ public class RestConnector : IFoundryConnector
 
     public async Task<TResponse?> ExecuteAsync<TRequest, TResponse>(string endpoint, TRequest payload, CancellationToken cancellationToken = default)
     {
+        // An absolute URI here would leave the configured service entirely: HttpClient ignores
+        // BaseAddress when given one, so the request -- carrying this connector's credentials --
+        // would go wherever the string said. The parameter reads as a path within the connector and
+        // is now required to be one.
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out _))
+        {
+            throw new ArgumentException(
+                $"[{Name}] '{endpoint}' is an absolute URI. A connector endpoint is a path relative to "
+                + "its configured BaseUrl; sending the connector's credentials to another host has to "
+                + "be a separate connector, declared as one.", nameof(endpoint));
+        }
+
         _logger.LogInformation("[RestConnector:{Name}] Executing request to {Endpoint}", Name, endpoint);
 
         // Only a genuinely absent payload becomes a GET.

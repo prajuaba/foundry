@@ -66,5 +66,5 @@ public static class RulesServiceCollectionExtensions
     /// party chooses what we call", which is not a decision an external service should get. A
     /// redirect now surfaces as a 3xx, which is not a success status, so the action fails visibly.
     /// </remarks>
-    private static HttpClientHandler WorkflowHandler() => new() { AllowAutoRedirect = false };
+    private static HttpClientHandler WorkflowHandler() => Foundry.Core.Http.OutboundHttpPolicy.CreateHandler();
 }

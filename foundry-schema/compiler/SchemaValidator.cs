@@ -75,6 +75,53 @@ namespace Foundry.Schema.Compiler
         /// </summary>
         /// <param name="schema">The document to validate.</param>
         /// <returns>A bag containing every diagnostic found.</returns>
+        /// <summary>
+        /// A connector credential must name where the secret lives, not carry it.
+        /// </summary>
+        /// <remarks>
+        /// The IR is committed to source control, opened in Studio and passed to a local model as
+        /// prompt context by <c>foundry ai</c>. A literal key in a connector definition therefore ends
+        /// up in a repository, on a screen, and in a model's context window — three places a secret
+        /// should never reach, none of which look like a mistake while it is happening. A reference
+        /// resolves at wiring time and puts the value nowhere.
+        /// </remarks>
+        private static void ValidateConnectorSecrets(SchemaModel schema, DiagnosticBag bag)
+        {
+            for (var i = 0; i < (schema.Connectors?.Count ?? 0); i++)
+            {
+                var connector = schema.Connectors![i];
+
+                foreach (var (field, value) in new[]
+                         {
+                             ("password", connector.Password),
+                             ("apiKey", connector.ApiKey),
+                             ("token", connector.Token)
+                         })
+                {
+                    if (string.IsNullOrWhiteSpace(value)) continue;
+                    if (IsSecretReference(value)) continue;
+
+                    bag.Error(
+                        DiagnosticCatalog.ConnectorSecretLiteral,
+                        $"Connector '{connector.Name}' carries a literal '{field}'. The IR is committed, "
+                        + "shown in Studio and sent to a local model as context, so a secret written here "
+                        + "reaches all three.",
+                        $"connectors[{i}].{field}",
+                        "Reference where the secret lives instead, e.g. \"${ENV:ACME_API_KEY}\", and "
+                        + "supply the value to the running application.");
+                }
+            }
+        }
+
+        /// <summary>Whether a value names a secret rather than being one.</summary>
+        private static bool IsSecretReference(string value)
+        {
+            var text = value.Trim();
+            return text.StartsWith("${", StringComparison.Ordinal)
+                && text.EndsWith("}", StringComparison.Ordinal)
+                && text.Length > 3;
+        }
+
         public static DiagnosticBag Validate(SchemaModel? schema)
         {
             var bag = new DiagnosticBag();
@@ -121,6 +168,8 @@ namespace Foundry.Schema.Compiler
             ValidateWorkflows(schema, entityNames, bag);
             ValidateConnectors(schema, bag);
 
+
+            ValidateConnectorSecrets(schema, bag);
             return bag;
         }
 

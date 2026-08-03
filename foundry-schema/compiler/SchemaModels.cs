@@ -22,10 +22,25 @@ namespace Foundry.Schema.Compiler
         public string BaseUrl { get; init; } = string.Empty;
         public string AuthType { get; init; } = "None"; // None, Basic, ApiKey, Bearer, OAuth2
         public string? Username { get; init; }
+
+        /// <summary>
+        /// A reference to where the secret lives, never the secret. <c>${ENV:NAME}</c>.
+        /// </summary>
+        /// <remarks>
+        /// These three fields took literals, and the IR is a document that is committed to source
+        /// control, opened in Studio, and passed to a local model as prompt context by
+        /// <c>foundry ai</c>. A connector described with a real key put that key in all three places.
+        /// The validator now rejects anything that is not a reference, so the mistake fails at
+        /// <c>foundry validate</c> rather than at a code review nobody ran.
+        /// </remarks>
         public string? Password { get; init; }
+
+        /// <inheritdoc cref="Password"/>
         public string? ApiKey { get; init; }
         public string? ApiKeyHeaderName { get; init; } = "X-API-Key";
+        /// <inheritdoc cref="Password"/>
         public string? Token { get; init; }
+
         public string? SoapAction { get; init; }
         public int TimeoutSeconds { get; init; } = 30;
         public int MaxRetries { get; init; } = 3;
