@@ -59,15 +59,35 @@ public static class FoundryMongoServiceCollectionExtensions
         services.TryAddSingleton<IUnitOfWorkFactory, UnitOfWorkFactory>();
         services.TryAddSingleton<Foundry.Core.Tenant.ITenantContext, Foundry.Core.Tenant.TenantContext>();
 
-        // Register mock KMS client by default if not already registered (for local development/testing)
-        services.TryAddSingleton<IKmsClient, LocalMockKmsClient>();
-
-        // Bind AES or KMS Envelope encryption provider if keys are present
+        // No IKmsClient is registered here.
+        //
+        // This used to be `TryAddSingleton<IKmsClient, LocalMockKmsClient>()` — a development mock,
+        // registered by default, holding a master key written in this repository's source. An
+        // application that set EncryptedEncryptionKey (the production envelope path) and did not
+        // register a real KMS client got the mock and encrypted every [Encrypt] field under a
+        // publicly known key, with nothing said at startup or at rest. A caller who registered their
+        // own client with TryAddSingleton *after* this call was ignored outright, since one was
+        // already present — so whether the right key was used could turn on which of two equivalent
+        // registration helpers the application happened to reach for.
+        //
+        // Envelope encryption now requires the application to supply its own IKmsClient, and says so
+        // if it does not. LocalMockKmsClient still exists for local work and tests; registering it is
+        // a visible line of the caller's own code, which is where a decision like that belongs.
         if (!string.IsNullOrWhiteSpace(options.EncryptedEncryptionKey))
         {
             services.TryAddSingleton<IEncryptionProvider>(sp =>
             {
-                var kmsClient = sp.GetRequiredService<IKmsClient>();
+                var kmsClient = sp.GetService<IKmsClient>()
+                    ?? throw new InvalidOperationException(
+                        "FoundryMongoOptions.EncryptedEncryptionKey is set, which selects KMS envelope "
+                        + "encryption, but no IKmsClient is registered. Register the client for your key "
+                        + "management service before calling AddFoundryMongo, for example:\n\n"
+                        + "    services.AddSingleton<IKmsClient, MyKmsClient>();\n\n"
+                        + "For local development only, Foundry ships LocalMockKmsClient, which protects "
+                        + "keys with a master key published in Foundry's own source and must never be "
+                        + "used to encrypt real data:\n\n"
+                        + "    services.AddSingleton<IKmsClient>(new LocalMockKmsClient());");
+
                 return new KmsEnvelopeEncryptionProvider(kmsClient, options.EncryptedEncryptionKey);
             });
         }

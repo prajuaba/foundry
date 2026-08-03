@@ -173,7 +173,8 @@ public class TenantContextMiddlewareTests
         string? headerTenant = null,
         string? queryTenant = null,
         string? claimTenant = null,
-        bool authenticated = false)
+        bool authenticated = false,
+        bool trustCallerAsserted = false)
     {
         var context = new DefaultHttpContext();
 
@@ -190,8 +191,12 @@ public class TenantContextMiddlewareTests
             context.User = new ClaimsPrincipal(new ClaimsIdentity(claims, "Test"));
         }
 
+        var options = Microsoft.Extensions.Options.Options.Create(
+            new TenantContextOptions { TrustCallerAssertedTenant = trustCallerAsserted });
+
         var tenantContext = new RecordingTenantContext();
-        await new TenantContextMiddleware(_ => Task.CompletedTask).InvokeAsync(context, tenantContext);
+        await new TenantContextMiddleware(_ => Task.CompletedTask, options)
+            .InvokeAsync(context, tenantContext);
 
         return tenantContext.TenantId;
     }
@@ -207,25 +212,52 @@ public class TenantContextMiddlewareTests
     }
 
     [Fact]
-    public async Task TheHeaderIsUsedWhenTheTokenCarriesNoTenant()
+    public async Task ByDefaultTheHeaderCannotSetTheTenantEvenWhenTheTokenCarriesNone()
     {
-        // A gateway that has already authenticated the caller, or a token that simply does not
-        // describe tenancy.
+        // The hole this closes. A caller holding a valid token that simply does not describe
+        // tenancy could name any tenant they liked, and every filter downstream then applied
+        // faithfully to that one. Ranking the claim above the header was not enough, because a
+        // token with no claim left the header unopposed.
+        Assert.Null(await ResolveAsync(headerTenant: "globex", claimTenant: null, authenticated: true));
+    }
+
+    [Fact]
+    public async Task ByDefaultTheHeaderCannotSetTheTenantForAnAnonymousCaller()
+    {
+        Assert.Null(await ResolveAsync(headerTenant: "globex"));
+    }
+
+    [Fact]
+    public async Task ByDefaultTheQueryParameterCannotSetTheTenant()
+    {
+        Assert.Null(await ResolveAsync(queryTenant: "acme"));
+    }
+
+    [Fact]
+    public async Task TheHeaderIsHonouredOnlyWhenTheDeploymentOptsIn()
+    {
+        // The legitimate case: something in front has already established the tenant, and clients
+        // cannot reach this service directly.
         Assert.Equal("globex", await ResolveAsync(
-            headerTenant: "globex", claimTenant: null, authenticated: true));
+            headerTenant: "globex", claimTenant: null, authenticated: true, trustCallerAsserted: true));
+
+        Assert.Equal("globex", await ResolveAsync(headerTenant: "globex", trustCallerAsserted: true));
     }
 
     [Fact]
-    public async Task TheHeaderIsUsedWhenThereIsNoAuthenticatedCaller()
+    public async Task AQueryParameterIsTheLastResortWhenOptedIn()
     {
-        Assert.Equal("globex", await ResolveAsync(headerTenant: "globex"));
+        Assert.Equal("acme", await ResolveAsync(queryTenant: "acme", trustCallerAsserted: true));
+
+        Assert.Equal("globex", await ResolveAsync(
+            headerTenant: "globex", queryTenant: "acme", trustCallerAsserted: true));
     }
 
     [Fact]
-    public async Task AQueryParameterIsTheLastResort()
+    public async Task ATokensTenantStillOutranksTheHeaderWhenOptedIn()
     {
-        Assert.Equal("acme", await ResolveAsync(queryTenant: "acme"));
-        Assert.Equal("globex", await ResolveAsync(headerTenant: "globex", queryTenant: "acme"));
+        Assert.Equal("acme", await ResolveAsync(
+            headerTenant: "globex", claimTenant: "acme", authenticated: true, trustCallerAsserted: true));
     }
 
     [Fact]
@@ -239,16 +271,27 @@ public class TenantContextMiddlewareTests
     public async Task AnUnauthenticatedPrincipalsClaimIsIgnored()
     {
         // A ClaimsPrincipal with no authentication type is not authenticated, and its claims are
-        // whatever an unauthenticated request happened to carry.
-        var context = new DefaultHttpContext
-        {
-            User = new ClaimsPrincipal(new ClaimsIdentity(new[] { new Claim("tenant_id", "acme") }))
-        };
+        // whatever an unauthenticated request happened to carry. Opted in, the header is what is
+        // left; by default there is nothing.
+        Assert.Null(await ResolveAsync(
+            headerTenant: "globex", claimTenant: "acme", authenticated: false));
+
+        Assert.Equal("globex", await ResolveAsync(
+            headerTenant: "globex", claimTenant: "acme", authenticated: false, trustCallerAsserted: true));
+    }
+
+    /// <summary>A host that configures nothing must get the safe behaviour, not the convenient one.</summary>
+    [Fact]
+    public async Task TheSafeBehaviourIsWhatAHostGetsWithoutConfiguringAnything()
+    {
+        var context = new DefaultHttpContext();
         context.Request.Headers[TenantContextMiddleware.TenantIdHeaderName] = "globex";
 
         var tenantContext = new RecordingTenantContext();
+
+        // No options argument at all — the shape every existing host uses.
         await new TenantContextMiddleware(_ => Task.CompletedTask).InvokeAsync(context, tenantContext);
 
-        Assert.Equal("globex", tenantContext.TenantId);
+        Assert.Null(tenantContext.TenantId);
     }
 }

@@ -1795,9 +1795,12 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         {
             throw new InvalidOperationException(
                 $"'{typeof(T).Name}' is multi-tenant, but no tenant is set for this operation, so the "
-                + "row would belong to no tenant. Ensure the request pipeline resolves a tenant "
-                + "(app.UseMiddleware<TenantContextMiddleware>() sets it from the X-Tenant-ID header) "
-                + "or set one explicitly via ITenantContext.SetTenantId before writing.");
+                + "row would belong to no tenant. Ensure the request pipeline resolves a tenant: "
+                + "app.UseMiddleware<TenantContextMiddleware>() reads it from the caller's token "
+                + "(a 'tenant_id' or 'tenantId' claim), so issue tokens that carry one. Behind a "
+                + "gateway that establishes the tenant itself, opt in to the header with "
+                + "services.Configure<TenantContextOptions>(o => o.TrustCallerAssertedTenant = true). "
+                + "Outside a request, set one explicitly via ITenantContext.SetTenantId before writing.");
         }
 
         tenanted.TenantId = _tenantContext.TenantId!;

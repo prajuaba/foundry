@@ -237,11 +237,14 @@ What changed:
 | `AddFoundryAuthentication` | One entry point for an OIDC authority *or* a symmetric key, refusing to start on a missing, short, or ambiguous configuration |
 | Startup guard | Endpoints requiring authorization with no scheme registered fails at boot, naming the missing call, instead of a 500 on the first request |
 | Scaffold, template, sample | All three wire authentication, `UseAuthentication`/`UseAuthorization`, and `SecurityBehavior` identically |
-| `TenantContextMiddleware` | A signed `tenant_id` claim now outranks the `X-Tenant-ID` header, which it did not |
+| `TenantContextMiddleware` | The signed token is the only source of the tenant; caller-supplied header and query values are ignored unless a deployment opts in |
+| `AddFoundryMongo` | No longer registers a development KMS mock as the default `IKmsClient`; selecting envelope encryption without a real one throws instead of encrypting under a key published in this repository |
 
-That last row was its own hole: the header was read first, so an authenticated caller could override the
-tenant their own token asserted just by setting one, and every tenant filter downstream then applied
-faithfully to the wrong tenant.
+That penultimate row took two passes, and the first was not enough. The header was read *before* the
+token, so an authenticated caller could override the tenant their own token asserted just by setting
+one. Ranking the claim first fixed that — but the header still applied whenever the token carried no
+tenant, so a caller with a valid tenantless token could name any tenant at all. Only the second pass
+made the token the sole source.
 
 The smoke test drives this with genuine HS256 tokens it mints itself — anonymous requests get 401, a
 token signed with a different key gets 401, a `Clerk` gets 403 where the schema requires `Admin`, and an
@@ -1373,11 +1376,18 @@ to nobody. The caller is authenticated and their token simply carries no tenant 
 rather than a bad request. The smoke test asserts the exact status, so making it a 4xx later has to be
 a decision rather than a drift.
 
-**`TenantContextMiddleware` still falls back to the `X-Tenant-ID` header and a query parameter.** The
-signed claim now wins whenever the caller is authenticated, which closes the override. The fallback
-remains for callers a token cannot describe — a gateway that has already terminated authentication, a
-background job, local development — and in those deployments the tenant is caller-asserted. Issue
-tenants in the token where clients reach the service directly.
+**`TenantContextMiddleware` no longer trusts the `X-Tenant-ID` header by default.** Ranking the signed
+claim above the header closed the override but not the hole: the header only ever lost to a claim that
+*existed*, so a caller holding a valid token that simply did not describe tenancy met no claim to lose
+to and could name any tenant they liked. The paragraph that used to sit here described that as an
+acceptable residual risk. It was not — it was a tenant-isolation bypass reachable by anyone the
+deployment had authenticated, in the feature the framework leads with.
+
+The token is now the only source. Deployments where something in front genuinely establishes the
+tenant opt in with `services.Configure<TenantContextOptions>(o => o.TrustCallerAssertedTenant = true)`,
+which names the trust boundary instead of assuming it. The smoke test asserts the closed case against
+a live application: a tenantless token that sends `X-Tenant-ID: globex` is refused, and no row appears
+in globex.
 
 **Studio needs the backend running to show a route.** Removing the last mirror means the designer and
 playground read routes from a derived manifest, so with the backend down a route is *unknown* rather

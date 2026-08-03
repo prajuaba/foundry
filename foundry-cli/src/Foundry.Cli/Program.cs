@@ -1184,12 +1184,17 @@ app.UseExceptionHandler();
 app.UseAuthentication();
 app.UseAuthorization();
 
-// Resolves the ambient tenant before any endpoint runs, preferring the caller's token claim over
-// the X-Tenant-ID header. Without it ITenantContext.HasTenant is false for every request and the
-// repository's tenant filter -- written as `if (HasTenant)` -- never applies, so a multi-tenant
-// application serves every tenant's rows to every caller.
+// Resolves the ambient tenant before any endpoint runs, from the caller's token claim. Without it
+// ITenantContext.HasTenant is false for every request and the repository's tenant filter -- written
+// as `if (HasTenant)` -- never applies, so a multi-tenant application serves every tenant's rows to
+// every caller.
 //
-// After UseAuthentication, so the claim is available to be preferred.
+// The X-Tenant-ID header is NOT trusted by default: it is chosen by whoever sent the request, so a
+// caller whose token carries no tenant could otherwise name any tenant they liked. Behind a gateway
+// that establishes the tenant itself, opt in with
+// services.Configure<TenantContextOptions>(o => o.TrustCallerAssertedTenant = true).
+//
+// After UseAuthentication, so the claim is available.
 app.UseMiddleware<Foundry.Api.Middleware.TenantContextMiddleware>();
 
 // Generated REST endpoints for every entity in the manifest.

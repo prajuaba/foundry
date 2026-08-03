@@ -930,9 +930,13 @@ public sealed class FoundryMongoOptions
 }
 ```
 
-Registers `IMongoClient`, `IMongoDatabase`, `IUnitOfWorkFactory`, `ITenantContext`, `IKmsClient`
-(mock by default), the encryption provider, and `IRepository<>` — wrapped in `CachedRepository<T>`
-when `EnableCaching` is set. Also calls `MongoDbConventions.Register()`.
+Registers `IMongoClient`, `IMongoDatabase`, `IUnitOfWorkFactory`, `ITenantContext`, the encryption
+provider, and `IRepository<>` — wrapped in `CachedRepository<T>` when `EnableCaching` is set. Also
+calls `MongoDbConventions.Register()`.
+
+**It does not register an `IKmsClient`.** Setting `EncryptedEncryptionKey` selects envelope
+encryption and requires you to register the client for your key management service; resolving
+`IEncryptionProvider` without one throws with instructions. See [6.6](#66-encryption).
 
 ### 6.2 `IRepository<T> where T : class, IEntity<ObjectId>`
 
@@ -1034,10 +1038,32 @@ every later year silently; the worker now logs each failure, continues, and thro
 public sealed class AesEncryptionProvider : IEncryptionProvider { AesEncryptionProvider(string base64Key); }
 
 public interface IKmsClient { string DecryptKey(string encryptedDekBase64); string EncryptKey(string plaintextDekBase64); }
-public class LocalMockKmsClient : IKmsClient      // development only
+public class LocalMockKmsClient : IKmsClient      // NOT registered by default; see below
 public class KmsEnvelopeEncryptionProvider : IEncryptionProvider
 { KmsEnvelopeEncryptionProvider(IKmsClient kmsClient, string encryptedDekBase64); }
 ```
+
+Two mutually exclusive paths, chosen by which option you set:
+
+| Option | Provider | Needs an `IKmsClient` |
+| :--- | :--- | :--- |
+| `EncryptionKey` (base64 AES-256) | `AesEncryptionProvider` | no |
+| `EncryptedEncryptionKey` (KMS-wrapped DEK) | `KmsEnvelopeEncryptionProvider` | **yes — you register it** |
+
+```csharp
+services.AddSingleton<IKmsClient, MyKmsClient>();     // your KMS
+services.AddFoundryMongo(o => { o.EncryptedEncryptionKey = wrappedDek; … });
+```
+
+`LocalMockKmsClient` protects keys with a master key that is a **constant in Foundry's published
+source**. It exists so the envelope path can be exercised without a cloud dependency, and it secures
+nothing.
+
+`AddFoundryMongo` used to register it as a default. An application that selected envelope encryption
+and forgot its own client got the mock, and every `[Encrypt]` field was protected by a publicly known
+key with nothing said at startup or visible at rest. Registering it is now a line of your own code —
+which is where a choice like that belongs — and selecting envelope encryption without any client
+throws at resolution with instructions rather than falling back.
 
 ### 6.7 Infrastructure helpers
 
@@ -1102,12 +1128,31 @@ public static IApplicationBuilder UseFoundrySecurityHeaders(this IApplicationBui
 ```csharp
 public class CorrelationIdMiddleware { public const string CorrelationIdHeaderName = "X-Correlation-ID"; }
 public class TenantContextMiddleware  { public const string TenantIdHeaderName = "X-Tenant-ID"; }
+public sealed class TenantContextOptions { bool TrustCallerAssertedTenant { get; set; } }  // default false
 public class GlobalExceptionHandler : IExceptionHandler
 public class IdempotencyException : Exception { string IdempotencyKey { get; } }
 ```
 
-`TenantContextMiddleware` prefers the token claim over the `X-Tenant-ID` header. It must run before
-any endpoint, or multi-tenant entities never get their filter.
+`TenantContextMiddleware` resolves the tenant from the caller's authenticated token — a `tenant_id`
+or `tenantId` claim — and **from nothing else by default**. It must run after `UseAuthentication`
+and before any endpoint, or multi-tenant entities never get their filter.
+
+The `X-Tenant-ID` header and the `?tenantId=` query parameter are chosen by whoever sent the
+request. They are honoured only when a deployment opts in:
+
+```csharp
+services.Configure<TenantContextOptions>(o => o.TrustCallerAssertedTenant = true);
+```
+
+Enable that only where something in front has already established the tenant and clients cannot
+reach the service directly — a gateway, a service mesh, a local development host — and make that
+component strip both from inbound requests before setting its own.
+
+The claim outranked the header once the ordering was corrected, but the header was still consulted
+whenever the token carried no tenant, so a caller holding a valid token that simply did not describe
+tenancy could name any tenant they liked and every filter downstream applied faithfully to it. When
+no tenant can be established none is set, and a multi-tenant write then fails rather than landing
+somewhere arbitrary.
 
 ### 7.3 MediatR contracts
 

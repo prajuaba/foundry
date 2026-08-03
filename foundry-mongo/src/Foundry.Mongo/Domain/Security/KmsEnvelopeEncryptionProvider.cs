@@ -26,6 +26,21 @@ namespace Foundry.Core.Security
     /// <summary>
     /// Mock KMS client for local development and testing.
     /// </summary>
+    /// <summary>
+    /// A stand-in for a key management service, for local development and tests only.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This provides no security.</b> Its default master key is a constant in Foundry's published
+    /// source, so anything it protects is readable by anyone who has read this file. It exists so the
+    /// envelope-encryption path can be exercised without a cloud dependency.
+    /// </para>
+    /// <para>
+    /// <c>AddFoundryMongo</c> deliberately does not register it. It did once, as a default that
+    /// applied whenever the caller had not registered anything else, which meant an application could
+    /// select production envelope encryption and get this instead without a word being said.
+    /// </para>
+    /// </remarks>
     public class LocalMockKmsClient : IKmsClient
     {
         private readonly string _masterKey;
@@ -33,7 +48,10 @@ namespace Foundry.Core.Security
         /// <summary>
         /// Initializes a new instance of the <see cref="LocalMockKmsClient"/> class.
         /// </summary>
-        /// <param name="masterKey">The master key to use for encryption/decryption. Defaults to a static mock key.</param>
+        /// <param name="masterKey">
+        /// The master key to use. Defaults to a value published in Foundry's source, which protects
+        /// nothing; supply your own only to make tests deterministic, never to secure real data.
+        /// </param>
         public LocalMockKmsClient(string masterKey = "mock-master-key-for-local-testing")
         {
             _masterKey = masterKey;

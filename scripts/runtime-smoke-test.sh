@@ -1166,6 +1166,26 @@ authenticate_as "$(mint_token tenantless Admin)"
 expect_status 500 "POST with a token carrying no tenant" \
   -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' -d '{"reference":"NO-TENANT"}'
 
+# The hole that ranking the claim above the header did not close.
+#
+# The header only ever lost to a claim that existed. A caller holding a perfectly valid token that
+# simply did not describe tenancy met no claim to lose to, so the header stood unopposed and they
+# could name any tenant they liked -- after which every filter downstream applied faithfully to that
+# tenant's rows. The token is now the only source unless a deployment opts in to trusting the header,
+# so this request has no tenant at all and is refused exactly as the one above is.
+log "A tenantless token cannot claim a tenant with the header"
+expect_status 500 "POST with a tenantless token sending X-Tenant-ID: globex" \
+  -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' \
+  -H 'X-Tenant-ID: globex' -d '{"reference":"HEADER-ASSERTED"}'
+
+# And nothing was written under globex's name. The status above says the write failed; this says it
+# failed *before* reaching the tenant, which is the part that matters.
+authenticate_as "$GLOBEX_ADMIN"
+expect_status 200 "GET as globex after the header-asserted write" "$BASE/api/invoices"
+grep -q 'HEADER-ASSERTED' "$WORK_DIR/body.json" \
+  && fail "a tenantless caller wrote into globex by setting X-Tenant-ID"
+pass "the header did not place a row in another tenant"
+
 # ── GraphQL, in a scaffolded application ────────────────────────────────────
 #
 # A scaffolded application had no GraphQL endpoint at all, while the README listed GraphQL as a

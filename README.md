@@ -215,8 +215,14 @@ export Authentication__Jwt__SigningKey="$(openssl rand -base64 48)"
 ```
 
 Roles are read from the `role` claim and the tenant from `tenant_id`; both claim names are
-configurable under `Authentication:Jwt`. A signed `tenant_id` always outranks the
-`X-Tenant-ID` header, which remains only for callers a token cannot describe.
+configurable under `Authentication:Jwt`. **The signed token is the only source of the tenant.** The
+`X-Tenant-ID` header and a `tenantId` query parameter are values the caller chooses, so they are
+ignored unless a deployment opts in:
+
+```csharp
+// Only where a gateway has already established the tenant and clients cannot reach the service.
+services.Configure<TenantContextOptions>(o => o.TrustCallerAssertedTenant = true);
+```
 
 Roles decide whether a caller may use an endpoint. To decide which **rows** they see through it,
 mark an entity owner-scoped:
