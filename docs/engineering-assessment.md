@@ -57,6 +57,11 @@ because it turned out to be the problem in miniature: hot/cold partitioning is i
 read as careful work, and **it had never archived a single record**. Inspection was exactly what it
 held up under.
 
+Since then the framework has been through five security reviews of that same "real senior-level work",
+and each one found something. That does not contradict the assessment above — it sharpens it. The code
+is competent and the defects were never incompetence; they were the difference between code that works
+and code that permits only what it should. Section 2 separates the two.
+
 The AI thesis is **validated rather than aspirational**. The local model never writes C#; it writes IR,
 and the compiler writes C#. Measured with `qwen3-coder:30b`:
 
@@ -94,6 +99,35 @@ and the failure surfaces in production.
 
 **Treat "returns success without doing the thing" as a bug class, not a list of individual defects.**
 Fixes should change the default, not patch instances.
+
+### The second pattern: works exactly as written, and permits too much
+
+The first pattern is exhausted as a search strategy — everything that had never run has been run. What
+five consecutive security reviews then found was a different shape, and it needs its own name because
+the method that catches it is different.
+
+- A guard meaning *the order's total is over 10000* was equally satisfied by a number the caller sent.
+- The tenant came from a header any caller could set, whenever their token did not carry one.
+- A masked card number could be recovered a character at a time by filtering on it.
+- Revision history was readable by anyone who knew an id, and ids are handed out in every response.
+- Envelope encryption fell back to a mock whose key is published in this repository.
+
+None of these failed. Every one behaved exactly as its author intended, returned the right status
+code, and passed its tests. **The intent was the defect.** No test catches that, because a test asks
+whether behaviour matches intent; no CI job catches it, for the same reason. Running the feature finds
+nothing, because the feature works.
+
+What found all five was reading the code and asking **what does this permit**, rather than whether it
+looks right or whether it works. Three surfaces were reviewed that way — the repository's filter
+composition, the search `criteria` parameter, and the connectors — and all three yielded defects in
+code that was already tested and already green. Three for three, on top of ten for ten for the first
+pattern.
+
+The two patterns also fail differently, which matters for where to look. Silent success is found by
+*execution* and hides where nothing runs. Excess permission is found by *reading* and hides in the
+code that runs most. The archival sweep and the test generator were the first kind; `Repository<T>` —
+reviewed twice and fixed twice before this cycle — was the second, and still held three read paths
+that composed no isolation at all.
 
 ### The pattern at its largest scale: the repository could not be built
 
@@ -1635,6 +1669,14 @@ The base rate also argues against treating the empty list as a finish. What it m
 cheapest question — "has this ever run?" — no longer has an obvious target, so the next cycle has to
 ask a more expensive one.
 
+It did, and the more expensive question has its own number now. Three surfaces were reviewed by
+reading them and asking what they permit rather than whether they work:
+
+> **Three for three. Every surface reviewed for what it permits was permitting too much.**
+
+Two numbers, two methods, and neither one substitutes for the other. Ten for ten came from running
+things; three for three came from reading them, on code that running had already declared fine.
+
 **Nothing is knowably unexercised any more.** Every feature that had never run has been run, and every
 path recorded as "run once, never under stress" has been driven under it. What follows is design work
 rather than verification, which is a different kind of list and a more expensive one.
@@ -1731,3 +1773,13 @@ case. Those are in section 5, and none of them is damage.
 
 The honest one-line version: **what changed is not that the code is now correct, but that it can now
 tell you when it is not.** Everything else depends on that, and it was the thing most missing.
+
+One qualification, earned the hard way over five security reviews. Telling you when it *fails* and
+telling you when it *permits too much* are different capabilities, and only the first has been built.
+A gate reports a broken thing; nothing reports a thing that works precisely as written and allows more
+than it should. Five such defects were found here — a caller-answerable guard, a caller-assertable
+tenant, a filter oracle over masked values, revision history readable by id, and envelope encryption
+falling back to a published key — and not one of them was found by anything automated, because each
+was behaving correctly by its own definition. That gap is not closed and probably cannot be closed by
+tooling. It is closed by someone reading the code with the right question, which is now the first item
+in section 6 rather than an afterthought.
