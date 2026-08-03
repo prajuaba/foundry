@@ -129,7 +129,7 @@ Three defects stacked, each masked by the one above. The two generalisable lesso
 | Gate | What it proves |
 | ---- | -------------- |
 | Clean clone builds | The repository is usable by someone other than its author |
-| `Build and test` | 1,000 C# tests across 14 suites, against a replica set **and** a standalone MongoDB; also type-checks the generated TypeScript SDK with `tsc --strict` and byte-compiles the Python one |
+| `Build and test` | 1,046 C# tests across 14 suites, against a replica set **and** a standalone MongoDB; also type-checks the generated TypeScript SDK with `tsc --strict` and byte-compiles the Python one |
 | `Outbox round trip` | 6 tests driving a mutation through MongoDB and a **real Kafka broker** |
 | `Studio tests and typecheck` | 33 TypeScript tests, plus the bundle builds |
 | `VS Code extension` | 17 TypeScript tests, plus typecheck and bundle |
@@ -1217,19 +1217,65 @@ which is what made deleting the mirror affordable. Two behaviours changed, and b
 The pluralisation contract did not move to a weaker place: `ApiManifestGeneratorTests` still owns it,
 and is now its only home rather than one of two copies. Studio's suite went from 28 tests to 33.
 
+### A guard could be answered by the caller
+
+The workflow engine was reviewed deliberately rather than found broken by running it — it was the
+largest surface nothing had audited, and the one that executes templated HTTP requests against
+external systems on a caller's initiative.
+
+**What was expected to be wrong was not.** Token substitution escapes each value for the grammar it
+lands in: `JsonEncodedText` inside a JSON string, `Uri.EscapeDataString` inside a URL, and a header
+value containing CRLF is rejected rather than stripped. A caller cannot change an action's host, add
+a path segment, open a query, or inject a header. That work was done in an earlier cycle and it
+holds. The findings were all in the code around it.
+
+**A guard passed if either the entity or the caller's command satisfied it.** The engine evaluated
+both and took the first that held. So a guard meaning *the order's total is over 10000* was equally
+satisfied by a command carrying its own `TotalAmount` — a value the caller sets. Transition commands
+are `partial` records and guards on request payloads are a supported feature, so the collision is an
+ordinary design rather than a contrived one. The same fallback decided choice-node routing, which let
+a caller pick which state they landed in. Conditions now carry `source` (`entity` by default) and
+read the one object they name; an unrecognised value falls back to the entity, never to the caller.
+
+**A failed transition still moved the record.** The entity was saved in its new state before the
+handler ran, so a handler that threw left the record advanced while its own history correctly
+recorded the failure: an order sitting in `Approved` whose log says approving it failed. The order is
+now handler, then actions, then state, then log.
+
+**A test was asserting the defect.** `TheHandlerRunsAfterTheStateIsPersisted` passed for as long as
+the bug existed, because it asserted exactly what the buggy code did. It failed only on contact with
+the fix. This is the second instance in two cycles of a green test documenting a defect as intent —
+the tenant fallback was the first, recorded in prose rather than a test. **A passing test is evidence
+that the code does what the test says, and nothing about whether that is what it should do.**
+
+**Four limits an external action did not have.** It ran before the handler, so a transition the
+handler went on to reject had already charged a card or sent a notification. It followed redirects,
+so any service a workflow calls could answer 302 and send the request to an address of its choosing —
+a metadata endpoint, or something reachable only from inside the network — with the response captured
+into the log. It was retried on any method, so a `POST` that timed out could be delivered twice. And
+its response body was unbounded both into memory and into a MongoDB document. All four are now
+bounded; see the developer reference for the table.
+
+**The activity log kept what the entity protects.** `PayloadDetails` stored the command as sent, so a
+card number travelling through a transition was written in clear text to a second collection with
+none of the entity's encryption or masking. Values declared `[SensitiveData]` or `[PiiData]` are now
+redacted.
+
+Twenty-six tests. Reverting the guard and the redaction fails five of them.
+
 ## 4. Coverage and what covering it found
 
-Every module has tests. **1,000 C# tests in total**, from 258 at the start, plus 50 TypeScript across
+Every module has tests. **1,046 C# tests in total**, from 258 at the start, plus 50 TypeScript across
 Studio and the VS Code extension. Counts below are read off a solution-wide run rather than carried forward — the figures in
 this table had drifted from the suites they describe, which is the same defect the document is about:
 
 | Suite | Tests | Needs |
 | ----- | ----: | ----- |
 | `foundry-schema` | 271 | — |
-| `foundry-mongo` | 126 | MongoDB, **both** a replica set and a standalone |
-| `foundry-rules` | 92 | — |
+| `foundry-mongo` | 131 | MongoDB, **both** a replica set and a standalone |
+| `foundry-rules` | 118 | — |
 | `foundry-integration-tests` | 90 | MongoDB |
-| `foundry-api` | 77 | MongoDB |
+| `foundry-api` | 81 | MongoDB |
 | `foundry-file-io` | 75 | — |
 | `foundry-core` | 52 | — |
 | `foundry-connectors` | 52 | — |
@@ -1239,7 +1285,7 @@ this table had drifted from the suites they describe, which is the same defect t
 | `foundry-vscode` | 17 | — (TypeScript) |
 | `foundry-realtime` | 40 | — |
 | `foundry-testing` | 37 | — |
-| `foundry-cli` | 30 | — |
+| `foundry-cli` | 41 | — |
 | `foundry-kafka-integration` | 6 | MongoDB **and** a Kafka broker |
 
 The suites that need infrastructure **fail rather than skip** without it. That is the house rule, and
@@ -1411,7 +1457,12 @@ its whole surface area. Everything previously named here has now been run, and t
 the first time — which is a milestone about the *list*, not about the surface area, and the base rate
 below is the reason to keep looking rather than to stop.
 
-**Nothing else known.** The real-time gating that stood here is fixed; see section 3.
+**The workflow engine has now been read rather than only run.** The real-time gating that stood here
+is fixed; see section 3. The workflow review that followed produced seven findings, four of which
+were reachable defects and three of which remain below as stated limits. It is worth noting *how*
+they were found: not by a failing test, and not by exercising the feature — the feature worked — but
+by reading the code asking what it permits rather than whether it looks right. Tests and CI cannot
+ask that question, and neither had. The rest of the framework has had far more running than reading.
 
 
 **An archival sweep loads a whole entity type into memory before moving anything.** Both branches
@@ -1425,6 +1476,34 @@ both, and would change the branch that currently works, so it is not a change to
 publishing and marking the message will re-send it when its lease expires. That is what at-least-once
 means and the reason consumers must be idempotent; the claim removes duplication as the *normal*
 result of running two replicas, not as a possibility.
+
+**A workflow action that fails after an earlier one succeeded leaves that effect in place.** Actions
+now run after the handler, which removes the common case — a transition rejected by its own handler
+after it had already called out. What remains is a partial sequence: the second action fails, the
+first has already happened, and nothing compensates. Every executed action is recorded in the
+activity log including on the failure path, so the state is knowable rather than hidden. A saga is
+the real answer to this and is a larger thing than the engine currently is.
+
+**Payload redaction covers top-level properties only.** A value declared `[SensitiveData]` or
+`[PiiData]` inside a nested object is serialised whole and reaches the activity log. Transition
+commands are flat records by construction, so this is a limit rather than a live exposure — but it is
+a limit that a future command shape could quietly walk into. A recursive walk with cycle detection
+over arbitrary caller types is the fix, and was judged larger than this needed to be.
+
+**`InternalApi` resolves a command type by simple name across every loaded assembly.** The engine
+takes the schema's `requestType`, searches `AppDomain.CurrentDomain.GetAssemblies()` for the first
+type whose `Name` matches case-insensitively, deserialises the payload into it and `Send`s it. The
+name comes from the schema rather than from a caller, so this is not reachable from outside — but two
+types sharing a simple name resolve by assembly load order, which means the command that runs can
+depend on something no one is thinking about. `WorkflowEntityTypeRegistry` already exists as the
+pattern for solving exactly this for entity types, and the same treatment would fit here. **Not
+fixed**, and named because a reviewer should not have to rediscover it.
+
+**A transition with no roles and a state with no roles is open to any authenticated caller.** That is
+consistent with how the rest of the framework treats an absent policy, and it is stated here because
+"no roles declared" reads as *restrictive* to most people and means the opposite. For a state machine
+whose transitions are the privileged operations, it is worth an explicit decision per workflow rather
+than a default nobody looked at.
 
 ### Unexplained
 
@@ -1465,6 +1544,33 @@ rather than verification, which is a different kind of list and a more expensive
 descoped rather than deferred — see section 5. There is no recorded work outstanding, which is a
 statement about this document rather than about the software: the next thing worth doing has to be
 chosen from the product, not read off a list.
+
+### The next question is not "has this run?"
+
+The workflow review changed what this section should say. That engine had been run — its transitions,
+its decision gates and its history endpoint all have tests, and they passed. Running it again would
+have found nothing. Reading it with a different question, *what does this permit?*, found a guard a
+caller could answer, a failed transition that still moved the record, and four missing limits on an
+outbound HTTP call.
+
+So the cheap question is exhausted and the replacement is now known: **read the security-relevant
+paths asking what they allow, not whether they work.** Two of the last three genuine findings —
+the tenant header fallback and the workflow guard — were features working exactly as written, where
+what was written was wrong. Neither a test nor a CI job can catch that class, because both ask
+whether behaviour matches intent and the intent was the defect.
+
+The surfaces that deserve that treatment next, in order:
+
+1. **`Repository<T>`'s filter composition.** 1,700 lines carrying tenancy, ownership, soft delete and
+   search. Every read path assembles those filters, and the review question is whether any path
+   assembles them incompletely — which is precisely the shape of the two defects already found there.
+2. **The generated GET endpoint's `criteria` parameter.** Caller-supplied JSON deserialised into a
+   filter expression. It has been run and it works; nobody has asked what it permits.
+3. **`Foundry.Connectors`.** Outbound REST, SOAP and GraphQL with credentials in configuration,
+   reviewed for correctness and never for what a hostile endpoint can do back.
+
+The three workflow items left unfixed above are smaller than any of these, and are recorded so they
+are not rediscovered rather than because they should come first.
 
 ---
 
