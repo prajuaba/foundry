@@ -20,6 +20,7 @@ Welcome to the centralized documentation hub for the **Foundry Framework**. This
 * [Foundry API Engine](modules/foundry-api.md) — Endpoint generation, MediatR pipeline, RBAC, caching, and health checks.
 
 ### 📖 [4. API Reference](reference/developer-reference.md)
+* [Repository Decomposition Plan](reference/repository-decomposition.md) — the four-step plan for `Repository<T>`, with step 1 stage one done and the exact seam for stage two.
 * [Developer Reference](reference/developer-reference.md) — Every public function, type and CLI command in one place: the IR schema language and its attribute vocabulary, the compiler API, the generated HTTP contract, and the full surface of all nine runtime libraries.
 
 ### 🔎 [5. Project Status](engineering-assessment.md)
