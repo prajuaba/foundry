@@ -22,13 +22,20 @@ namespace Foundry.Mongo.Repositories;
 /// Default repository implementation providing full CRUD operations with soft-delete via ISoftDelete, cursor/offset pagination, dynamic expression search, and audit trail.
 /// Uses MongoDB.Driver v3 native async APIs exclusively — zero blocking calls or synchronous overloads.
 /// </summary>
-public sealed partial class Repository<T> : IRepository<T> where T : class, IEntity<ObjectId>
+public sealed class Repository<T> : IRepository<T> where T : class, IEntity<ObjectId>
 {
     private readonly IMongoCollection<T> _collection;
     private readonly IAuditSink? _auditSink;
     private readonly ICurrentUserContext? _userContext;
     private readonly IEncryptionProvider? _encryptionProvider;
     private readonly Foundry.Core.Tenant.ITenantContext? _tenantContext;
+
+    /// <summary>
+    /// What this caller may see and change. Every isolation decision this repository makes is asked
+    /// of this object rather than computed here, so there is one place to read the rule and one place
+    /// to test it — and it can be tested without a database, which the rule never could before.
+    /// </summary>
+    private readonly EntityAccessPolicy<T> _accessPolicy;
 
     private readonly EntityEncryptionService<T> _encryptionService;
     private readonly EntityAuditService<T> _auditService;
@@ -42,7 +49,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
     public IMongoCollection<T> Collection => _collection;
 
     /// <inheritdoc />
-    public IQueryable<T> Query() => _collection.AsQueryable().Where(ApplyReadFilters(null));
+    public IQueryable<T> Query() => _collection.AsQueryable().Where(_accessPolicy.ApplyReadFilters(null));
 
     public Repository(
         IMongoDatabase db,
@@ -56,6 +63,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         _auditSink = auditSink;
         _userContext = userContext;
         _tenantContext = tenantContext;
+        _accessPolicy = new EntityAccessPolicy<T>(tenantContext, userContext);
 
         // Validate: if entity has properties requiring encryption, an IEncryptionProvider must be registered
         var hasEncryptedProperties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -84,7 +92,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
     {
         var objectId = ConvertToObjectId(id);
         var filter = Builders<T>.Filter.Eq(e => e.Id, objectId);
-        filter = ApplyReadFilters(filter);
+        filter = _accessPolicy.ApplyReadFilters(filter);
         
         var findOptions = new FindOptions<T> { Limit = 1 };
         var cursor = session != null
@@ -109,7 +117,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         ArgumentNullException.ThrowIfNull(entity);
 
         StampTenant(entity);
-        StampOwner(entity);
+        _accessPolicy.StampOwner(entity);
 
         var now = DateTime.UtcNow;
         entity.CreatedAtUtc = now;
@@ -169,7 +177,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         foreach (var entity in list)
         {
             StampTenant(entity);
-            StampOwner(entity);
+            _accessPolicy.StampOwner(entity);
             entity.CreatedAtUtc = now;
             entity.UpdatedAtUtc = now;
             entity.Version = 1;
@@ -230,7 +238,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         IClientSessionHandle? session = null,
         CancellationToken ct = default)
     {
-        var finalFilter = ApplyReadFilters(filter);
+        var finalFilter = _accessPolicy.ApplyReadFilters(filter);
         var findOptions = new FindOptions<T> { Limit = limit };
 
         if (!string.IsNullOrWhiteSpace(sortBy))
@@ -256,7 +264,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
 
     public async Task<long> CountAsync(Expression<Func<T, bool>>? filter = null, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        var finalFilter = ApplyReadFilters(filter);
+        var finalFilter = _accessPolicy.ApplyReadFilters(filter);
         return session != null
             ? await _collection.CountDocumentsAsync(session, finalFilter, cancellationToken: ct)
             : await _collection.CountDocumentsAsync(finalFilter, cancellationToken: ct);
@@ -280,7 +288,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
                 request.CursorInfo.Order == SortOrder.Ascending);
 
             var mongoFilter = filter != null ? Builders<T>.Filter.Where(filter) : Builders<T>.Filter.Empty;
-            mongoFilter = ApplyReadFilters(mongoFilter);
+            mongoFilter = _accessPolicy.ApplyReadFilters(mongoFilter);
             mongoFilter = Builders<T>.Filter.And(mongoFilter, Builders<T>.Filter.Where(seekFilter));
 
             var sortDef = BuildSortDefinition(request);
@@ -343,7 +351,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
             }
 
             var mongoFilter = filter != null ? Builders<T>.Filter.Where(filter) : Builders<T>.Filter.Empty;
-            mongoFilter = ApplyReadFilters(mongoFilter);
+            mongoFilter = _accessPolicy.ApplyReadFilters(mongoFilter);
 
             var totalRecords = session != null
                 ? await _collection.CountDocumentsAsync(session, mongoFilter, cancellationToken: ct)
@@ -380,7 +388,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         ArgumentNullException.ThrowIfNull(request);
 
         var mongoFilter = filter != null ? Builders<T>.Filter.Where(filter) : Builders<T>.Filter.Empty;
-        mongoFilter = ApplyReadFilters(mongoFilter);
+        mongoFilter = _accessPolicy.ApplyReadFilters(mongoFilter);
 
         var sortDef = BuildSortDefinition(request);
 
@@ -450,7 +458,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         ArgumentNullException.ThrowIfNull(updateSelector);
 
         var objectId = ConvertToObjectId(id);
-        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId)));
+        var filter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId)));
 
         var existingCursor = session != null
             ? await _collection.FindAsync(session, filter, new FindOptions<T> { Limit = 1 }, ct)
@@ -494,7 +502,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         }
 
         // Optimistic Concurrency Control
-        var occFilter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.And(
+        var occFilter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.And(
             Builders<T>.Filter.Eq(e => e.Id, objectId),
             Builders<T>.Filter.Eq(e => e.Version, oldVersion)
         )));
@@ -597,10 +605,10 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         // The update is a whole-document replace, so an unstamped tenant in the request body would
         // be written verbatim -- letting a PUT move a row into another tenant.
         StampTenant(entity);
-        StampOwner(entity);
+        _accessPolicy.StampOwner(entity);
 
         var oldVersion = entity.Version;
-        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, entity.Id)));
+        var filter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, entity.Id)));
 
         var existingCursor = session != null
             ? await _collection.FindAsync(session, filter, new FindOptions<T> { Limit = 1 }, ct)
@@ -639,7 +647,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         }
 
         // Optimistic Concurrency Control
-        var occFilter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.And(
+        var occFilter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.And(
             Builders<T>.Filter.Eq(e => e.Id, entity.Id),
             Builders<T>.Filter.Eq(e => e.Version, oldVersion)
         )));
@@ -743,7 +751,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         ArgumentNullException.ThrowIfNull(filter);
         ArgumentNullException.ThrowIfNull(updateSelector);
 
-        var finalFilter = ApplyReadFilters(filter);
+        var finalFilter = _accessPolicy.ApplyReadFilters(filter);
         
         var findOptions = new FindOptions<T>();
         var entitiesCursor = session != null
@@ -908,8 +916,8 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         foreach (var entity in list)
         {
             StampTenant(entity);
-            StampOwner(entity);
-            var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, entity.Id)));
+            _accessPolicy.StampOwner(entity);
+            var filter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, entity.Id)));
             var findOptions = new FindOptions<T> { Limit = 1 };
             var existingCursor = session != null
                 ? await _collection.FindAsync(session, filter, findOptions, ct)
@@ -1048,7 +1056,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         CancellationToken ct = default)
     {
         var objectId = ConvertToObjectId(id);
-        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId)));
+        var filter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId)));
 
         var findOptions = new FindOptions<T> { Limit = 1 };
         var existingCursor = session != null
@@ -1167,7 +1175,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
     {
         ArgumentNullException.ThrowIfNull(criteria);
         var expression = BuildExpression(criteria);
-        var finalFilter = ApplyReadFilters(expression);
+        var finalFilter = _accessPolicy.ApplyReadFilters(expression);
 
         var cursor = session != null
             ? await _collection.FindAsync(session, finalFilter, null, ct)
@@ -1225,7 +1233,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
 
         var first = list[0];
         var firstMatchDoc = BuildBsonFilter(request.Criteria, first.EntityType);
-        ApplyIsolationTo(firstMatchDoc, first.EntityType);
+        _accessPolicy.ApplyIsolationTo(firstMatchDoc, first.EntityType);
 
         var firstProjectDoc = new BsonDocument
         {
@@ -1241,7 +1249,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         {
             var other = list[i];
             var otherMatchDoc = BuildBsonFilter(request.Criteria, other.EntityType);
-            ApplyIsolationTo(otherMatchDoc, other.EntityType);
+            _accessPolicy.ApplyIsolationTo(otherMatchDoc, other.EntityType);
 
             var otherProjectDoc = new BsonDocument
             {
@@ -1409,7 +1417,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
     /// <remarks>
     /// <para>
     /// Revision history lives in a second collection keyed only by entity id, and was read with that
-    /// id and nothing else. An id is not a secret — this repository's own <see cref="ScopeToTenant"/>
+    /// id and nothing else. An id is not a secret — the access policy's own <c>ScopeToTenant</c>
     /// says so, and applies the tenant filter to writes for exactly that reason — so a caller could
     /// name another tenant's record and read its full history. <c>[Encrypt]</c> fields stay ciphertext
     /// in a revision, but <c>[Mask]</c> and <c>[SensitiveData]</c> ones do not: masking happens on the
@@ -1425,7 +1433,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
     /// </remarks>
     private async Task<bool> CallerMaySeeRecordAsync(ObjectId id, IClientSessionHandle? session, CancellationToken ct)
     {
-        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, id)));
+        var filter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, id)));
         var options = new FindOptions<T> { Limit = 1, Projection = Builders<T>.Projection.Include(e => e.Id) };
 
         var cursor = session != null
@@ -1520,7 +1528,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         DecryptEntity(entity); // Decrypt to plaintext for application-side restore logic
 
         var objectId = ConvertToObjectId(id);
-        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId)));
+        var filter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, objectId)));
 
         var existingCursor = session != null
             ? await _collection.FindAsync(session, filter, new FindOptions<T> { Limit = 1 }, ct)
@@ -1571,23 +1579,8 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         if (entity == null) return null!;
         if (!HasMaskedProperties) return entity;
 
-        return _encryptionService.MaskSensitiveFields(entity, ShouldMask);
+        return _encryptionService.MaskSensitiveFields(entity, _accessPolicy.ShouldMask);
     }
-
-    /// <summary>
-    /// Whether this caller must see a masked form of a property in the given category.
-    /// </summary>
-    /// <remarks>
-    /// Masking used to be one switch: <c>view:pii</c> unmasked every masked property on every entity,
-    /// so "a claims handler may see a policy number but not a card number" could not be expressed and
-    /// letting someone read one field meant letting them read all of them. A property's category
-    /// names the scope that unmasks it, and a property naming no category is <c>pii</c> — so
-    /// <c>view:pii</c> still means exactly what it meant.
-    /// </remarks>
-    private bool ShouldMask(Foundry.Core.Entities.SensitiveDataAttribute attribute)
-        => _userContext?.User?.HasClaim(
-               ViewSensitiveDataScope.ClaimType,
-               ViewSensitiveDataScope.For(attribute.Category)) != true;
 
     /// <summary>Whether this caller may see every masked property on this entity in full.</summary>
     private bool MayViewEverySensitiveCategory
@@ -1689,7 +1682,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         if (!typeof(ISoftDelete).IsAssignableFrom(typeof(T)))
             throw new NotSupportedException($"Entity type '{typeof(T).Name}' does not support soft delete.");
 
-        var filter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, id)));
+        var filter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, id)));
 
         // Bypass soft delete filter to fetch the soft-deleted record
         var findOptions = new FindOptions<T> { Limit = 1 };
@@ -1719,7 +1712,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         var oldVersion = entity.Version;
         entity.Version = oldVersion + 1;
 
-        var occFilter = ScopeToOwner(ScopeToTenant(Builders<T>.Filter.And(
+        var occFilter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.And(
             Builders<T>.Filter.Eq(e => e.Id, id),
             Builders<T>.Filter.Eq(e => e.Version, oldVersion)
         )));
@@ -1795,7 +1788,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         // grouping has already discarded, and would have read every tenant's rows to build the groups
         // in the first place.
         var scoped = new PrependedStagePipelineDefinition<T, T, TResult>(
-            PipelineStageDefinitionBuilder.Match(ApplyReadFilters(Builders<T>.Filter.Empty)),
+            PipelineStageDefinitionBuilder.Match(_accessPolicy.ApplyReadFilters(Builders<T>.Filter.Empty)),
             pipeline);
 
         var collection = _collection.WithReadPreference(ReadPreference.SecondaryPreferred);
@@ -1881,7 +1874,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
 
     private Expression<Func<T, bool>> BuildExpression(SearchCriterion[] criteria)
     {
-        EnsureCriteriaAreFilterable(criteria);
+        _accessPolicy.EnsureCriteriaAreFilterable(criteria);
         return DynamicExpressionBuilder.BuildExpression<T>(criteria);
     }
 
@@ -1921,7 +1914,7 @@ public sealed partial class Repository<T> : IRepository<T> where T : class, IEnt
         var filterDoc = new BsonDocument();
         foreach (var criterion in criteria)
         {
-            var field = ElementName(entityType, criterion.Field);
+            var field = EntityAccessPolicy<T>.ElementName(entityType, criterion.Field);
             var valueDoc = ConvertToBsonValue(criterion.Value);
             BsonValue operatorValue = criterion.Operator switch
             {

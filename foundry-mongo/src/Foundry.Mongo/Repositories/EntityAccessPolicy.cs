@@ -1,17 +1,9 @@
-using System.Globalization;
 using System.Linq.Expressions;
 using System.Reflection;
-using Foundry.Core.Attributes;
-using Foundry.Core.Audit;
-using Foundry.Core.User;
-using Foundry.Mongo.Infrastructure;
 using Foundry.Core.Entities;
-using Foundry.Core.Paging;
 using Foundry.Core.Search;
 using Foundry.Core.Security;
-using Humanizer;
-using Foundry.Mongo.Infrastructure.Search;
-using Foundry.Mongo.Services;
+using Foundry.Core.User;
 using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
@@ -19,27 +11,41 @@ using MongoDB.Driver;
 namespace Foundry.Mongo.Repositories;
 
 /// <summary>
-/// What this caller is allowed to see and change — the access-policy half of <see cref="Repository{T}"/>.
+/// What a caller is allowed to see and change — the access-policy half of <see cref="Repository{T}"/>,
+/// as a collaborator rather than a region of a file.
 /// </summary>
 /// <remarks>
 /// <para>
-/// A physical move, not a redesign: the members below are unchanged and still part of the same class.
-/// The point is that they are now findable together. This cluster has needed three separate security
-/// passes — the two <c>ApplyReadFilters</c> overloads drifting apart, three read paths that composed
-/// no isolation at all, and a filter oracle over masked values — and every one of those was the same
-/// underlying problem: one rule, spread through a 2,500-line file, where nobody could see all of it at
-/// once to notice a copy was missing.
+/// Every member here is a pure function of two contexts and the entity type. There is no collection,
+/// no session and no database, which is the whole point: this cluster decides tenant isolation and
+/// ownership, and until now it could only be exercised through a live MongoDB. A rule that needs a
+/// database to test is a rule that gets tested at the coarse end, through whatever endpoint happens
+/// to reach it, and the three defects already found here were each caught by a different kind of test
+/// and none by the obvious one.
 /// </para>
 /// <para>
-/// This is step one of four. Steps two through four turn these into a collaborator with its own tests,
-/// then do the same for the search translator and the write guard. Splitting the file first means each
-/// later step is a small, reviewable diff against a named thing rather than an archaeology exercise —
-/// and it means this step carries no behavioural risk at all, which matters for the one cluster in
-/// this codebase where a mistake is a tenant-isolation failure.
+/// The members are unchanged from when they lived on <c>Repository&lt;T&gt;</c>. This is the second
+/// stage of a move, not a redesign — the one cluster in this codebase where a mistake is a
+/// tenant-isolation failure is the worst place to combine a structural change with a semantic one.
+/// </para>
+/// <para>
+/// <c>CallerMaySeeRecordAsync</c> stays on the repository because it queries the collection; it asks
+/// this class for the filter and runs it itself.
 /// </para>
 /// </remarks>
-public sealed partial class Repository<T>
+internal sealed class EntityAccessPolicy<T> where T : class, IEntity<ObjectId>
 {
+    private readonly Foundry.Core.Tenant.ITenantContext? _tenantContext;
+    private readonly ICurrentUserContext? _userContext;
+
+    public EntityAccessPolicy(
+        Foundry.Core.Tenant.ITenantContext? tenantContext,
+        ICurrentUserContext? userContext)
+    {
+        _tenantContext = tenantContext;
+        _userContext = userContext;
+    }
+
     /// <summary>
     /// Roles for <typeparamref name="T"/> that see every row in the tenant rather than only their own.
     /// </summary>
@@ -227,7 +233,7 @@ public sealed partial class Repository<T>
     /// document — for each. Every other search entry point on this repository is filtered; this one
     /// was not, and being the only unfiltered one made it the least likely to be noticed.
     /// </remarks>
-    private void ApplyIsolationTo(BsonDocument match, Type entityType)
+    public void ApplyIsolationTo(BsonDocument match, Type entityType)
     {
         if (typeof(ISoftDelete).IsAssignableFrom(entityType))
         {
@@ -279,7 +285,7 @@ public sealed partial class Repository<T>
     /// same way, in a test that expected rows and got none.
     /// </para>
     /// </remarks>
-    private static string ElementName(Type entityType, string propertyName)
+    public static string ElementName(Type entityType, string propertyName)
     {
         try
         {
@@ -330,7 +336,7 @@ public sealed partial class Repository<T>
     /// with no authenticated caller is refused rather than left blank, because a row owned by nobody
     /// is unreachable to every non-exempt caller and silently accumulates.
     /// </remarks>
-    private void StampOwner(T entity)
+    public void StampOwner(T entity)
     {
         if (entity is not Foundry.Core.Security.IOwnedResource owned) return;
         if (_userContext is null) return;
@@ -365,7 +371,7 @@ public sealed partial class Repository<T>
     /// call ignores what the read filter takes into account.
     /// </para>
     /// </remarks>
-    private FilterDefinition<T> ScopeToOwner(FilterDefinition<T> filter)
+    public FilterDefinition<T> ScopeToOwner(FilterDefinition<T> filter)
     {
         if (!TryGetOwnerScope(forWrite: true, out var ownerId, out _)) return filter;
 
@@ -382,7 +388,7 @@ public sealed partial class Repository<T>
     /// With the filter applied the row is simply not found, which is also the right answer to give:
     /// a 404 does not confirm that the id exists somewhere else.
     /// </remarks>
-    private FilterDefinition<T> ScopeToTenant(FilterDefinition<T> filter)
+    public FilterDefinition<T> ScopeToTenant(FilterDefinition<T> filter)
     {
         if (!typeof(Foundry.Core.Tenant.IMultiTenant).IsAssignableFrom(typeof(T))
             || _tenantContext?.HasTenant != true)
@@ -405,7 +411,7 @@ public sealed partial class Repository<T>
     /// filter came to be missing from the expression overload for as long as it existed: the call
     /// sites read as if soft delete were the only concern, so nothing looked wrong.
     /// </remarks>
-    private FilterDefinition<T> ApplyReadFilters(FilterDefinition<T> filter)
+    public FilterDefinition<T> ApplyReadFilters(FilterDefinition<T> filter)
     {
         if (typeof(ISoftDelete).IsAssignableFrom(typeof(T)))
         {
@@ -446,7 +452,7 @@ public sealed partial class Repository<T>
     /// isolation had not been applied. It could not have been noticed in passing: it was `static`,
     /// which put <c>_tenantContext</c> out of reach and made the omission look deliberate.
     /// </remarks>
-    private Expression<Func<T, bool>> ApplyReadFilters(Expression<Func<T, bool>>? filter)
+    public Expression<Func<T, bool>> ApplyReadFilters(Expression<Func<T, bool>>? filter)
     {
         var parameter = filter?.Parameters[0] ?? Expression.Parameter(typeof(T), "x");
         Expression? body = filter?.Body;
@@ -498,6 +504,20 @@ public sealed partial class Repository<T>
         return Expression.Lambda<Func<T, bool>>(body, parameter);
     }
 
+    /// <summary>
+    /// Whether this caller must see a masked form of a property in the given category.
+    /// </summary>
+    /// <remarks>
+    /// Masking used to be one switch: <c>view:pii</c> unmasked every masked property on every entity,
+    /// so "a claims handler may see a policy number but not a card number" could not be expressed and
+    /// letting someone read one field meant letting them read all of them. A property's category
+    /// names the scope that unmasks it, and a property naming no category is <c>pii</c> — so
+    /// <c>view:pii</c> still means exactly what it meant.
+    /// </remarks>
+    public bool ShouldMask(Foundry.Core.Entities.SensitiveDataAttribute attribute)
+        => _userContext?.User?.HasClaim(
+               ViewSensitiveDataScope.ClaimType,
+               ViewSensitiveDataScope.For(attribute.Category)) != true;
 
     /// <summary>
     /// Refuses to filter on a property this caller is not entitled to read.
@@ -522,7 +542,7 @@ public sealed partial class Repository<T>
     /// which is the wrong direction to fail.
     /// </para>
     /// </remarks>
-    private void EnsureCriteriaAreFilterable(SearchCriterion[] criteria)
+    public void EnsureCriteriaAreFilterable(SearchCriterion[] criteria)
     {
         if (criteria is null || criteria.Length == 0) return;
 
@@ -569,5 +589,5 @@ public sealed partial class Repository<T>
     /// Not a security boundary — the criteria are ANDed into a filter the caller could not widen
     /// anyway. It bounds the expression tree and the query document a single request can build.
     /// </remarks>
-    private const int MaxCriteriaCount = 32;
+    public const int MaxCriteriaCount = 32;
 }
