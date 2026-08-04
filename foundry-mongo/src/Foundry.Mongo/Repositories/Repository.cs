@@ -10,7 +10,6 @@ using Foundry.Core.Paging;
 using Foundry.Core.Search;
 using Foundry.Core.Security;
 using Humanizer;
-using Foundry.Mongo.Infrastructure.Search;
 using Foundry.Mongo.Services;
 using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
@@ -36,6 +35,13 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     /// to test it — and it can be tested without a database, which the rule never could before.
     /// </summary>
     private readonly EntityAccessPolicy<T> _accessPolicy;
+
+    /// <summary>
+    /// How a caller's search request becomes a MongoDB query. Kept beside the access policy because
+    /// it needs one: a pipeline is isolated as it is assembled, and criteria are entitled before they
+    /// are compiled.
+    /// </summary>
+    private readonly EntitySearchTranslator<T> _searchTranslator;
 
     private readonly EntityEncryptionService<T> _encryptionService;
     private readonly EntityAuditService<T> _auditService;
@@ -64,6 +70,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         _userContext = userContext;
         _tenantContext = tenantContext;
         _accessPolicy = new EntityAccessPolicy<T>(tenantContext, userContext);
+        _searchTranslator = new EntitySearchTranslator<T>(_accessPolicy);
 
         // Validate: if entity has properties requiring encryption, an IEncryptionProvider must be registered
         var hasEncryptedProperties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance)
@@ -291,7 +298,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             mongoFilter = _accessPolicy.ApplyReadFilters(mongoFilter);
             mongoFilter = Builders<T>.Filter.And(mongoFilter, Builders<T>.Filter.Where(seekFilter));
 
-            var sortDef = BuildSortDefinition(request);
+            var sortDef = EntitySearchTranslator<T>.BuildSortDefinition(request);
             var findOptions = new FindOptions<T>
             {
                 Limit = request.PageSize + 1,
@@ -358,7 +365,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                 : await _collection.CountDocumentsAsync(mongoFilter, cancellationToken: ct);
 
             var (skip, take) = OffsetPaginationHelper.GetSkipTakeValues(request);
-            var sortDef = BuildSortDefinition(request);
+            var sortDef = EntitySearchTranslator<T>.BuildSortDefinition(request);
             var findOptions = new FindOptions<T>
             {
                 Skip = (int)skip,
@@ -390,7 +397,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         var mongoFilter = filter != null ? Builders<T>.Filter.Where(filter) : Builders<T>.Filter.Empty;
         mongoFilter = _accessPolicy.ApplyReadFilters(mongoFilter);
 
-        var sortDef = BuildSortDefinition(request);
+        var sortDef = EntitySearchTranslator<T>.BuildSortDefinition(request);
 
         if (request.CursorInfo != null)
         {
@@ -1174,7 +1181,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     public async Task<IReadOnlyList<T>> FindByCriteriaAsync(SearchCriterion[] criteria, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(criteria);
-        var expression = BuildExpression(criteria);
+        var expression = _searchTranslator.BuildExpression(criteria);
         var finalFilter = _accessPolicy.ApplyReadFilters(expression);
 
         var cursor = session != null
@@ -1198,7 +1205,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ArgumentNullException.ThrowIfNull(criteria);
         ArgumentNullException.ThrowIfNull(pageRequest);
 
-        var expression = BuildExpression(criteria);
+        var expression = _searchTranslator.BuildExpression(criteria);
         return await GetPagedAsync(pageRequest, expression, session, ct);
     }
 
@@ -1232,94 +1239,11 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         }
 
         var first = list[0];
-        var firstMatchDoc = BuildBsonFilter(request.Criteria, first.EntityType);
-        _accessPolicy.ApplyIsolationTo(firstMatchDoc, first.EntityType);
-
-        var firstProjectDoc = new BsonDocument
-        {
-            { "_id", 0 },
-            { "EntityId", new BsonDocument("$toString", "$_id") },
-            { "CollectionsName", first.CollectionName },
-            { "EntityType", first.EntityType.FullName ?? first.EntityType.Name },
-            { "Properties", "$$ROOT" }
-        };
-
-        var unionStages = new List<BsonDocument>();
-        for (int i = 1; i < list.Count; i++)
-        {
-            var other = list[i];
-            var otherMatchDoc = BuildBsonFilter(request.Criteria, other.EntityType);
-            _accessPolicy.ApplyIsolationTo(otherMatchDoc, other.EntityType);
-
-            var otherProjectDoc = new BsonDocument
-            {
-                { "_id", 0 },
-                { "EntityId", new BsonDocument("$toString", "$_id") },
-                { "CollectionsName", other.CollectionName },
-                { "EntityType", other.EntityType.FullName ?? other.EntityType.Name },
-                { "Properties", "$$ROOT" }
-            };
-
-            var unionStage = new BsonDocument("$unionWith", new BsonDocument
-            {
-                { "coll", other.CollectionName },
-                { "pipeline", new BsonArray
-                    {
-                        new BsonDocument("$match", otherMatchDoc),
-                        new BsonDocument("$project", otherProjectDoc)
-                    }
-                }
-            });
-
-            unionStages.Add(unionStage);
-        }
-
-        BsonDocument sortStage;
-        if (request.Pagination?.SortBy != null)
-        {
-            var sortField = request.Pagination.SortBy.FieldName;
-            if (!sortField.Equals("EntityId", StringComparison.OrdinalIgnoreCase) &&
-                !sortField.Equals("CollectionsName", StringComparison.OrdinalIgnoreCase) &&
-                !sortField.Equals("EntityType", StringComparison.OrdinalIgnoreCase))
-            {
-                sortField = "Properties." + sortField;
-            }
-            var sortOrder = request.Pagination.SortBy.Order == SortOrder.Ascending ? 1 : -1;
-            sortStage = new BsonDocument("$sort", new BsonDocument(sortField, sortOrder));
-        }
-        else
-        {
-            sortStage = new BsonDocument("$sort", new BsonDocument("EntityId", -1));
-        }
 
         var pageNumber = request.Pagination?.PageNumber ?? 1;
         var pageSize = request.Pagination?.PageSize ?? 20;
-        var skip = Math.Max(0, (pageNumber - 1) * pageSize);
 
-        var facetStage = new BsonDocument("$facet", new BsonDocument
-        {
-            { "metadata", new BsonArray { new BsonDocument("$count", "total") } },
-            { "data", new BsonArray
-                {
-                    sortStage,
-                    new BsonDocument("$skip", skip),
-                    new BsonDocument("$limit", pageSize)
-                }
-            }
-        });
-
-        var mainPipeline = new List<BsonDocument>
-        {
-            new BsonDocument("$match", firstMatchDoc),
-            new BsonDocument("$project", firstProjectDoc)
-        };
-
-        foreach (var unionStage in unionStages)
-        {
-            mainPipeline.Add(unionStage);
-        }
-
-        mainPipeline.Add(facetStage);
+        var mainPipeline = _searchTranslator.BuildCrossCollectionPipeline(request, list, pageNumber, pageSize);
 
         var firstCollection = db.GetCollection<BsonDocument>(first.CollectionName);
         var pipelineDef = PipelineDefinition<BsonDocument, BsonDocument>.Create(mainPipeline);
@@ -1870,118 +1794,6 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     private static void SetProperty(object obj, string propertyName, object? value)
     {
         EntityEncryptionService<T>.SetProperty(obj, propertyName, value);
-    }
-
-    private Expression<Func<T, bool>> BuildExpression(SearchCriterion[] criteria)
-    {
-        _accessPolicy.EnsureCriteriaAreFilterable(criteria);
-        return DynamicExpressionBuilder.BuildExpression<T>(criteria);
-    }
-
-
-    private static SortDefinition<T>? BuildSortDefinition(PagedRequest request)
-    {
-        if (request.CursorInfo != null)
-        {
-            return request.CursorInfo.Order == SortOrder.Ascending
-                ? Builders<T>.Sort.Ascending(request.CursorInfo.FieldName)
-                : Builders<T>.Sort.Descending(request.CursorInfo.FieldName);
-        }
-
-        if (request.SortBy != null)
-        {
-            return request.SortBy.Order == SortOrder.Ascending
-                ? Builders<T>.Sort.Ascending(request.SortBy.FieldName)
-                : Builders<T>.Sort.Descending(request.SortBy.FieldName);
-        }
-
-        return Builders<T>.Sort.Descending(e => e.Id);
-    }
-
-    /// <summary>
-    /// Builds an aggregation <c>$match</c> from search criteria, for <paramref name="entityType"/>.
-    /// </summary>
-    /// <remarks>
-    /// The type is a parameter because the field names are not. A criterion names a property —
-    /// <c>Price</c> — and the document stores an element — <c>price</c>, because
-    /// <c>MongoDbConventions</c> registers <c>CamelCaseElementNameConvention</c>. This built the match
-    /// from the property name, so every criterion matched no field and the search returned nothing,
-    /// silently and without error. It is the same defect as the soft-delete predicate beside it, found
-    /// the same way and left in place a cycle longer because it costs results rather than isolation.
-    /// </remarks>
-    private static BsonDocument BuildBsonFilter(SearchCriterion[] criteria, Type entityType)
-    {
-        var filterDoc = new BsonDocument();
-        foreach (var criterion in criteria)
-        {
-            var field = EntityAccessPolicy<T>.ElementName(entityType, criterion.Field);
-            var valueDoc = ConvertToBsonValue(criterion.Value);
-            BsonValue operatorValue = criterion.Operator switch
-            {
-                SearchOperator.Equals => new BsonDocument("$eq", valueDoc),
-                SearchOperator.NotEquals => new BsonDocument("$ne", valueDoc),
-                SearchOperator.GreaterThan => new BsonDocument("$gt", valueDoc),
-                SearchOperator.LessThan => new BsonDocument("$lt", valueDoc),
-                SearchOperator.GreaterThanOrEqual => new BsonDocument("$gte", valueDoc),
-                SearchOperator.LessThanOrEqual => new BsonDocument("$lte", valueDoc),
-                SearchOperator.Contains => new BsonRegularExpression(EscapeRegex(criterion.Value?.ToString()), "i"),
-                SearchOperator.StartsWith => new BsonRegularExpression("^" + EscapeRegex(criterion.Value?.ToString()), "i"),
-                SearchOperator.EndsWith => new BsonRegularExpression(EscapeRegex(criterion.Value?.ToString()) + "$", "i"),
-                SearchOperator.In => new BsonDocument("$in", new BsonArray(BuildBsonArray(criterion.Value))),
-                _ => throw new NotSupportedException($"Operator '{criterion.Operator}' is not supported in Bson filters.")
-            };
-
-            if (operatorValue is BsonRegularExpression)
-            {
-                filterDoc[field] = operatorValue;
-            }
-            else
-            {
-                if (filterDoc.Contains(field) && filterDoc[field].IsBsonDocument)
-                {
-                    filterDoc[field].AsBsonDocument.Merge(operatorValue.AsBsonDocument);
-                }
-                else
-                {
-                    filterDoc[field] = operatorValue;
-                }
-            }
-        }
-        return filterDoc;
-    }
-
-    private static BsonValue ConvertToBsonValue(object? value) => value switch
-    {
-        null => BsonNull.Value,
-        ObjectId oid => oid,
-        DateTime dt => dt,
-        string s => s,
-        int i => i,
-        long l => l,
-        double d => d,
-        bool b => b,
-        _ => value.ToString() ?? string.Empty
-    };
-
-    private static IEnumerable<BsonValue> BuildBsonArray(object? value)
-    {
-        if (value is System.Collections.IEnumerable enumerable)
-        {
-            foreach (var item in enumerable)
-            {
-                yield return ConvertToBsonValue(item);
-            }
-        }
-        else if (value != null)
-        {
-            yield return ConvertToBsonValue(value);
-        }
-    }
-
-    private static string EscapeRegex(string? pattern)
-    {
-        if (string.IsNullOrEmpty(pattern)) return string.Empty;
-        return System.Text.RegularExpressions.Regex.Escape(pattern);
     }
 
     private static object? GetUnifiedPropertyValue(UnifiedSearchResult result, string fieldName)
