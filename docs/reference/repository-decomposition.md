@@ -12,18 +12,29 @@ diff is how the fourth gets in.
 
 ## Where it stands
 
+**Step 1 is done.** The access policy is a real collaborator with tests that need no database.
+
 | | Lines |
 | :--- | ---: |
-| `Repository.cs` | 2,035 |
-| `Repository.AccessPolicy.cs` | 530 |
+| `Repository.cs` | 2,027 |
+| `EntityAccessPolicy.cs` | 593 |
 
-Stage one moved the access-policy cluster into a `partial class` file — verified as a pure move:
-comparing every non-comment line across the old file and the two new ones, nothing was lost or added
-except the class declaration gaining `partial` and the new file's namespace and braces.
+Stage one moved the cluster into a `partial class` file; stage two turned it into
+`EntityAccessPolicy<T>`, constructed as `(ITenantContext?, ICurrentUserContext?)`, with
+`Repository<T>` delegating at 39 call sites. `Repository.AccessPolicy.cs` is gone and `Repository<T>`
+is no longer `partial`. `Repository.cs` went from 2,563 lines before step 1 to 2,027.
 
----
+Both stages were verified as pure moves by comparing every non-comment, non-blank line before and
+after — nothing lost, the only additions being the new type's scaffolding and the delegation.
 
-## Step 1, stage two — `EntityAccessPolicy<T>`
+Five unit tests now cover the policy in **~61 ms with no MongoDB**, which was the point: this cluster
+produced three separate security defects and every one had to be caught through a live database.
+
+**Measure before you trust this table.** The figures above were wrong by the time stage two ran —
+the spec said 2,035/530 and 36 call sites; the truth was 2,034/573 and 39. The agent doing the work
+reported what it measured rather than matching the doc, which is the correct instinct. Do the same.
+
+## Step 1, stage two — `EntityAccessPolicy<T>` — DONE
 
 The seam is cleaner than it looks. **The moved cluster touches exactly two pieces of private state:**
 `_tenantContext` (9 references) and `_userContext` (7). No `_collection`, no database, no session.
@@ -82,7 +93,7 @@ a test that reconstructs the code's own assumptions can only confirm them. Asser
 
 | Step | Extract | Why |
 | :--- | :--- | :--- |
-| 2 | `EntitySearchTranslator<T>` — `BuildBsonFilter`, `BuildExpression`, `ConvertToBsonValue`, `EscapeRegex`, cross-collection pipeline assembly | The camelCase class of defect lives entirely here, and it has produced two bugs already |
+| 2 | `EntitySearchTranslator<T>` — see below | The camelCase class of defect lives entirely here, and it has produced two bugs already |
 | 3 | `EntityWriteGuard<T>` — OCC on `Version`, `StampTenant`, concurrency-exception paths | Write-side invariants, currently interleaved with read-side ones |
 | 4 | — | What remains is a real repository: collection access, paging, delegation |
 
@@ -97,3 +108,32 @@ all. Criteria filtering was never entitled.
 
 None of those was a hard problem once seen. Seeing them was the hard part, and that is a property of
 the file's shape rather than of anyone's attention.
+
+---
+
+## Step 2 — `EntitySearchTranslator<T>`
+
+Same shape as step 1: a pure move first, then the collaborator, then tests — separate commits.
+
+**Members:** `BuildBsonFilter`, `BuildExpression`, `ConvertToBsonValue`, `BuildBsonArray`,
+`EscapeRegex`, `BuildSortDefinition`, and the cross-collection pipeline assembly inside
+`CrossCollectionSearchAsync`.
+
+**Dependency to check first.** `BuildBsonFilter` is `static` and calls
+`EntityAccessPolicy<T>.ElementName`, so the translator needs the entity type — probably the same
+per-type parameter that method already takes, rather than a constructor dependency. `BuildExpression`
+calls `EnsureCriteriaAreFilterable` on the policy, so the translator holds a reference to it or the
+repository sequences the two. Measure the actual references before designing the constructor; that
+measurement is what made step 1 straightforward.
+
+**Why this one earns its own type.** Two defects have come out of it, both the same root cause and
+both silent: a hand-built `BsonDocument` does not resolve names through the class map, so a
+PascalCase field name matches nothing and errors nowhere. The soft-delete predicate in
+cross-collection search never excluded a row; the criteria never matched a field. A filter that
+matches nothing returns nothing, and for a *search* "no results" is a plausible answer every time.
+
+**What the tests must assert.** That a criterion **matches a row**, not that a stage was built.
+`CrossCollectionSearchAsync_BuildsCorrectPipelineDefinition` asserted stage shape, passed for years,
+and has been corrected twice for exactly these two defects — it checks the document the code builds
+and never the one MongoDB matches against. Prefer assertions that would fail if the element name were
+wrong.
