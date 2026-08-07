@@ -21,6 +21,17 @@ namespace Foundry.Mongo.Repositories;
 /// Default repository implementation providing full CRUD operations with soft-delete via ISoftDelete, cursor/offset pagination, dynamic expression search, and audit trail.
 /// Uses MongoDB.Driver v3 native async APIs exclusively — zero blocking calls or synchronous overloads.
 /// </summary>
+/// <remarks>
+/// The rules this class used to spell out inline are now collaborators, and it orchestrates them:
+/// <see cref="EntityAccessPolicy{T}"/> decides what a caller may see and change,
+/// <see cref="EntitySearchTranslator{T}"/> turns a search request into a query,
+/// <see cref="EntityWriteGuard{T}"/> says what has to be true for a write to land, and
+/// <see cref="Foundry.Mongo.Services.EntityVersioningService{T}"/> owns the revision history.
+/// What is left here is collection access, paging, and the order the steps happen in — which is the
+/// part that genuinely differs per operation and is the reason a fused write method was never worth
+/// building. Add a rule to a collaborator, not to this file: one rule copied across a 2,500-line
+/// class is how three separate isolation defects got in.
+/// </remarks>
 public sealed class Repository<T> : IRepository<T> where T : class, IEntity<ObjectId>
 {
     private readonly IMongoCollection<T> _collection;
@@ -51,7 +62,14 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
     private readonly EntityEncryptionService<T> _encryptionService;
     private readonly EntityAuditService<T> _auditService;
+
+    /// <summary>
+    /// Where a revision snapshot goes and how it is read back. The shadow collection's name was
+    /// derived at all twelve sites that touched history, so writer and reader agreed by coincidence
+    /// rather than by construction; now one method derives it and both sides call that.
+    /// </summary>
     private readonly EntityVersioningService<T> _versioningService;
+
     private readonly EntityIndexManager<T> _indexManager;
 
     public string CollectionName => _collection.CollectionNamespace.CollectionName;
@@ -153,20 +171,9 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         // Historical Revision snapshot (stores encrypted state for security)
         if (entity is IVersionable)
         {
-            var historyCollectionName = CollectionName + "_History";
-            var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
-            var revision = new EntityRevision
-            {
-                EntityId = entity.Id.ToString(),
-                Version = entity.Version,
-                Data = encrypted.ToBsonDocument(),
-                ChangedBy = operatorId,
-                Action = "Insert"
-            };
-            if (session != null)
-                await historyCollection.InsertOneAsync(session, revision, null, ct);
-            else
-                await historyCollection.InsertOneAsync(revision, null, ct);
+            await _versioningService.SaveRevisionAsync(
+                CollectionName, entity.Id.ToString(), entity.Version, encrypted.ToBsonDocument(),
+                operatorId, "Insert", session, ct);
         }
 
         if (_auditSink != null)
@@ -212,8 +219,6 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         // Historical Revision snapshot (stores encrypted state)
         if (typeof(IVersionable).IsAssignableFrom(typeof(T)))
         {
-            var historyCollectionName = CollectionName + "_History";
-            var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
             var revisions = encryptedList.Select(entity => new EntityRevision
             {
                 EntityId = entity.Id.ToString(),
@@ -223,10 +228,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                 Action = "Insert"
             }).ToList();
 
-            if (session != null)
-                await historyCollection.InsertManyAsync(session, revisions, null, ct);
-            else
-                await historyCollection.InsertManyAsync(revisions, null, ct);
+            await _versioningService.SaveRevisionsAsync(CollectionName, revisions, session, ct);
         }
 
         if (_auditSink != null)
@@ -535,20 +537,9 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         // Historical Revision snapshot (stores encrypted state)
         if (entityAfter is IVersionable)
         {
-            var historyCollectionName = CollectionName + "_History";
-            var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
-            var revision = new EntityRevision
-            {
-                EntityId = entityAfter.Id.ToString(),
-                Version = entityAfter.Version,
-                Data = encrypted.ToBsonDocument(),
-                ChangedBy = operatorId,
-                Action = isSoftDeletedNow ? "SoftDelete" : "Update"
-            };
-            if (session != null)
-                await historyCollection.InsertOneAsync(session, revision, null, ct);
-            else
-                await historyCollection.InsertOneAsync(revision, null, ct);
+            await _versioningService.SaveRevisionAsync(
+                CollectionName, entityAfter.Id.ToString(), entityAfter.Version, encrypted.ToBsonDocument(),
+                operatorId, isSoftDeletedNow ? "SoftDelete" : "Update", session, ct);
         }
 
         if (_auditSink != null)
@@ -665,20 +656,9 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         // Historical Revision snapshot (stores encrypted state)
         if (entity is IVersionable)
         {
-            var historyCollectionName = CollectionName + "_History";
-            var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
-            var revision = new EntityRevision
-            {
-                EntityId = entity.Id.ToString(),
-                Version = entity.Version,
-                Data = encrypted.ToBsonDocument(),
-                ChangedBy = operatorId,
-                Action = isSoftDeletedNow ? "SoftDelete" : "Update"
-            };
-            if (session != null)
-                await historyCollection.InsertOneAsync(session, revision, null, ct);
-            else
-                await historyCollection.InsertOneAsync(revision, null, ct);
+            await _versioningService.SaveRevisionAsync(
+                CollectionName, entity.Id.ToString(), entity.Version, encrypted.ToBsonDocument(),
+                operatorId, isSoftDeletedNow ? "SoftDelete" : "Update", session, ct);
         }
 
         if (_auditSink != null)
@@ -859,15 +839,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             var updateResult = new UpdateResult.Acknowledged(bulkResult.MatchedCount, bulkResult.ModifiedCount, null);
             results.Add(updateResult);
 
-            if (revisions.Count > 0)
-            {
-                var historyCollectionName = CollectionName + "_History";
-                var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
-                if (session != null)
-                    await historyCollection.InsertManyAsync(session, revisions, null, ct);
-                else
-                    await historyCollection.InsertManyAsync(revisions, null, ct);
-            }
+            await _versioningService.SaveRevisionsAsync(CollectionName, revisions, session, ct);
 
             if (_auditSink != null && auditEntries.Count > 0)
             {
@@ -999,15 +971,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
             _writeGuard.ThrowOnBulkConcurrencyConflict(bulkResult, writeModels.Count);
 
-            if (revisions.Count > 0)
-            {
-                var historyCollectionName = CollectionName + "_History";
-                var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
-                if (session != null)
-                    await historyCollection.InsertManyAsync(session, revisions, null, ct);
-                else
-                    await historyCollection.InsertManyAsync(revisions, null, ct);
-            }
+            await _versioningService.SaveRevisionsAsync(CollectionName, revisions, session, ct);
 
             if (_auditSink != null && auditEntries.Count > 0)
             {
@@ -1062,20 +1026,10 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
             if (updatedEntity != null && updatedEntity is IVersionable)
             {
-                var historyCollectionName = CollectionName + "_History";
-                var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
-                var revision = new EntityRevision
-                {
-                    EntityId = updatedEntity.Id.ToString(),
-                    Version = updatedEntity.Version,
-                    Data = updatedEntity.ToBsonDocument(), // stores encrypted database state
-                    ChangedBy = operatorId,
-                    Action = "SoftDelete"
-                };
-                if (session != null)
-                    await historyCollection.InsertOneAsync(session, revision, null, ct);
-                else
-                    await historyCollection.InsertOneAsync(revision, null, ct);
+                await _versioningService.SaveRevisionAsync(
+                    CollectionName, updatedEntity.Id.ToString(), updatedEntity.Version,
+                    updatedEntity.ToBsonDocument(), // stores encrypted database state
+                    operatorId, "SoftDelete", session, ct);
             }
 
             if (_auditSink != null)
@@ -1101,23 +1055,11 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
             if (entity is IVersionable)
             {
-                var historyCollectionName = CollectionName + "_History";
-                var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
-                
                 // For hard deletes, we preserve the last database-side (encrypted) BSON representation in history
                 var encrypted = EncryptEntityForWrite(entity);
-                var revision = new EntityRevision
-                {
-                    EntityId = entity.Id.ToString(),
-                    Version = entity.Version + 1,
-                    Data = encrypted.ToBsonDocument(),
-                    ChangedBy = operatorId,
-                    Action = "HardDelete"
-                };
-                if (session != null)
-                    await historyCollection.InsertOneAsync(session, revision, null, ct);
-                else
-                    await historyCollection.InsertOneAsync(revision, null, ct);
+                await _versioningService.SaveRevisionAsync(
+                    CollectionName, entity.Id.ToString(), entity.Version + 1, encrypted.ToBsonDocument(),
+                    operatorId, "HardDelete", session, ct);
             }
 
             if (_auditSink != null)
@@ -1338,18 +1280,8 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         if (!await CallerMaySeeRecordAsync(objectId, session, ct)) return Array.Empty<EntityRevision>();
 
         var objectIdStr = objectId.ToString();
-        var historyCollectionName = CollectionName + "_History";
-        var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
 
-        var filter = Builders<EntityRevision>.Filter.Eq(r => r.EntityId, objectIdStr);
-        var sort = Builders<EntityRevision>.Sort.Descending(r => r.Version);
-
-        var findOptions = new FindOptions<EntityRevision> { Sort = sort };
-        var cursor = session != null
-            ? await historyCollection.FindAsync(session, filter, findOptions, ct)
-            : await historyCollection.FindAsync(filter, findOptions, ct);
-
-        var revisions = await cursor.ToListAsync(ct);
+        var revisions = await _versioningService.GetRevisionsAsync(CollectionName, objectIdStr, session, ct);
         if (revisions.Any())
         {
             await AuditReadAsync(objectIdStr, ct);
@@ -1378,20 +1310,9 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ObjectId objectId, int version, IClientSessionHandle? session, CancellationToken ct)
     {
         var objectIdStr = objectId.ToString();
-        var historyCollectionName = CollectionName + "_History";
-        var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
 
-        var filter = Builders<EntityRevision>.Filter.And(
-            Builders<EntityRevision>.Filter.Eq(r => r.EntityId, objectIdStr),
-            Builders<EntityRevision>.Filter.Eq(r => r.Version, version)
-        );
-
-        var findOptions = new FindOptions<EntityRevision> { Limit = 1 };
-        var cursor = session != null
-            ? await historyCollection.FindAsync(session, filter, findOptions, ct)
-            : await historyCollection.FindAsync(filter, findOptions, ct);
-
-        var revision = await cursor.FirstOrDefaultAsync(ct);
+        var revision = await _versioningService.GetRevisionByVersionAsync(
+            CollectionName, objectIdStr, version, session, ct);
         if (revision != null)
         {
             await AuditReadAsync(objectIdStr, ct);
@@ -1437,23 +1358,11 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         }
 
         var operatorId = GetCurrentOperatorId();
-        var historyCollectionName = CollectionName + "_History";
-        var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
         var doc = encrypted.ToBsonDocument(); // stores encrypted state
 
-        var restoreRevision = new EntityRevision
-        {
-            EntityId = objectId.ToString(),
-            Version = nextVersion,
-            Data = doc,
-            ChangedBy = operatorId,
-            Action = $"Restore (v{version})"
-        };
-
-        if (session != null)
-            await historyCollection.InsertOneAsync(session, restoreRevision, null, ct);
-        else
-            await historyCollection.InsertOneAsync(restoreRevision, null, ct);
+        await _versioningService.SaveRevisionAsync(
+            CollectionName, objectId.ToString(), nextVersion, doc,
+            operatorId, $"Restore (v{version})", session, ct);
 
         return entity;
     }
@@ -1617,20 +1526,9 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
         if (entity is IVersionable)
         {
-            var historyCollectionName = CollectionName + "_History";
-            var historyCollection = _collection.Database.GetCollection<EntityRevision>(historyCollectionName);
-            var revision = new EntityRevision
-            {
-                EntityId = id.ToString(),
-                Version = entity.Version,
-                Data = encrypted.ToBsonDocument(),
-                ChangedBy = GetCurrentOperatorId(),
-                Action = "RestoreFromSoftDelete"
-            };
-            if (session != null)
-                await historyCollection.InsertOneAsync(session, revision, null, ct);
-            else
-                await historyCollection.InsertOneAsync(revision, null, ct);
+            await _versioningService.SaveRevisionAsync(
+                CollectionName, id.ToString(), entity.Version, encrypted.ToBsonDocument(),
+                GetCurrentOperatorId(), "RestoreFromSoftDelete", session, ct);
         }
 
         if (_auditSink != null)
@@ -1681,11 +1579,6 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         _encryptionService.DecryptEntity(entity);
     }
 
-    private T CloneEntity(T entity)
-    {
-        return EntityEncryptionService<T>.CloneEntity(entity);
-    }
-
     private static object? GetDiffValue(PropertyInfo prop, object? val)
     {
         return EntityEncryptionService<T>.GetDiffValue(prop, val);
@@ -1703,15 +1596,6 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     private static void SetProperty(object obj, string propertyName, object? value)
     {
         EntityEncryptionService<T>.SetProperty(obj, propertyName, value);
-    }
-
-    private static object? GetUnifiedPropertyValue(UnifiedSearchResult result, string fieldName)
-    {
-        if (fieldName.Equals("EntityId", StringComparison.OrdinalIgnoreCase)) return result.EntityId;
-        if (fieldName.Equals("CollectionsName", StringComparison.OrdinalIgnoreCase)) return result.CollectionsName;
-        if (fieldName.Equals("EntityType", StringComparison.OrdinalIgnoreCase)) return result.EntityType;
-
-        return result.Properties.TryGetValue(fieldName, out var val) ? val : null;
     }
 
     private async Task AuditReadAsync(string entityId, CancellationToken ct)
