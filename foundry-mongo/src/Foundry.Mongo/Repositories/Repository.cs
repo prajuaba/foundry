@@ -27,7 +27,6 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     private readonly IAuditSink? _auditSink;
     private readonly ICurrentUserContext? _userContext;
     private readonly IEncryptionProvider? _encryptionProvider;
-    private readonly Foundry.Core.Tenant.ITenantContext? _tenantContext;
 
     /// <summary>
     /// What this caller may see and change. Every isolation decision this repository makes is asked
@@ -42,6 +41,13 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     /// are compiled.
     /// </summary>
     private readonly EntitySearchTranslator<T> _searchTranslator;
+
+    /// <summary>
+    /// What has to be true for a write to land: the ambient tenant is stamped on, and the stored
+    /// version is still the one that was read. Both rules were previously spelled out at every write
+    /// site, which is how the read half's copies drifted.
+    /// </summary>
+    private readonly EntityWriteGuard<T> _writeGuard;
 
     private readonly EntityEncryptionService<T> _encryptionService;
     private readonly EntityAuditService<T> _auditService;
@@ -68,7 +74,6 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ArgumentNullException.ThrowIfNull(db);
         _auditSink = auditSink;
         _userContext = userContext;
-        _tenantContext = tenantContext;
         _accessPolicy = new EntityAccessPolicy<T>(tenantContext, userContext);
         _searchTranslator = new EntitySearchTranslator<T>(_accessPolicy);
 
@@ -93,6 +98,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         var actualCollectionName = collectionName ?? typeof(T).Name.Pluralize();
         _collection = db.GetCollection<T>(actualCollectionName);
         _indexManager = new EntityIndexManager<T>(_collection);
+        _writeGuard = new EntityWriteGuard<T>(_collection, _accessPolicy, tenantContext);
     }
 
     public async Task<T?> GetByIdAsync(object id, IClientSessionHandle? session = null, CancellationToken ct = default)
@@ -123,7 +129,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     {
         ArgumentNullException.ThrowIfNull(entity);
 
-        StampTenant(entity);
+        _writeGuard.StampTenant(entity);
         _accessPolicy.StampOwner(entity);
 
         var now = DateTime.UtcNow;
@@ -183,7 +189,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         var now = DateTime.UtcNow;
         foreach (var entity in list)
         {
-            StampTenant(entity);
+            _writeGuard.StampTenant(entity);
             _accessPolicy.StampOwner(entity);
             entity.CreatedAtUtc = now;
             entity.UpdatedAtUtc = now;
@@ -494,7 +500,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         }
 
         entityAfter.UpdatedAtUtc = DateTime.UtcNow;
-        var oldVersion = oldValues.TryGetValue("Version", out var ver) && ver is int verInt ? verInt : 0;
+        var oldVersion = EntityWriteGuard<T>.StoredVersion(oldValues);
         entityAfter.Version = oldVersion + 1;
 
         bool isSoftDeletedNow = false;
@@ -509,10 +515,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         }
 
         // Optimistic Concurrency Control
-        var occFilter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.And(
-            Builders<T>.Filter.Eq(e => e.Id, objectId),
-            Builders<T>.Filter.Eq(e => e.Version, oldVersion)
-        )));
+        var occFilter = _writeGuard.OccFilter(objectId, oldVersion);
 
         var encrypted = EncryptEntityForWrite(entityAfter);
 
@@ -526,20 +529,8 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             replaceResult = await _collection.ReplaceOneAsync(occFilter, encrypted, new ReplaceOptions { IsUpsert = false }, ct);
         }
 
-        if (replaceResult.MatchedCount == 0)
-        {
-            var existsFilter = Builders<T>.Filter.Eq(e => e.Id, objectId);
-            long existsCount = session != null
-                ? await _collection.CountDocumentsAsync(session, existsFilter, cancellationToken: ct)
-                : await _collection.CountDocumentsAsync(existsFilter, cancellationToken: ct);
-
-            if (existsCount > 0)
-            {
-                throw new ConcurrencyException(objectId.ToString(), CollectionName,
-                    $"Optimistic concurrency check failed. Document with ID '{objectId}' was modified by another operation.");
-            }
-            throw new KeyNotFoundException($"Entity with ID {id} not found or modified during update.");
-        }
+        await _writeGuard.ThrowOnConcurrencyConflictAsync(
+            replaceResult, objectId, id, WriteOperation.Update, session, ct);
 
         // Historical Revision snapshot (stores encrypted state)
         if (entityAfter is IVersionable)
@@ -611,7 +602,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
         // The update is a whole-document replace, so an unstamped tenant in the request body would
         // be written verbatim -- letting a PUT move a row into another tenant.
-        StampTenant(entity);
+        _writeGuard.StampTenant(entity);
         _accessPolicy.StampOwner(entity);
 
         var oldVersion = entity.Version;
@@ -654,10 +645,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         }
 
         // Optimistic Concurrency Control
-        var occFilter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.And(
-            Builders<T>.Filter.Eq(e => e.Id, entity.Id),
-            Builders<T>.Filter.Eq(e => e.Version, oldVersion)
-        )));
+        var occFilter = _writeGuard.OccFilter(entity.Id, oldVersion);
 
         var encrypted = EncryptEntityForWrite(entity);
 
@@ -671,20 +659,8 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             replaceResult = await _collection.ReplaceOneAsync(occFilter, encrypted, new ReplaceOptions { IsUpsert = false }, ct);
         }
 
-        if (replaceResult.MatchedCount == 0)
-        {
-            var existsFilter = Builders<T>.Filter.Eq(e => e.Id, entity.Id);
-            long existsCount = session != null
-                ? await _collection.CountDocumentsAsync(session, existsFilter, cancellationToken: ct)
-                : await _collection.CountDocumentsAsync(existsFilter, cancellationToken: ct);
-
-            if (existsCount > 0)
-            {
-                throw new ConcurrencyException(entity.Id.ToString(), CollectionName,
-                    $"Optimistic concurrency check failed. Document with ID '{entity.Id}' was modified by another operation.");
-            }
-            throw new KeyNotFoundException($"Entity with ID {entity.Id} not found or modified during update.");
-        }
+        await _writeGuard.ThrowOnConcurrencyConflictAsync(
+            replaceResult, entity.Id, entity.Id, WriteOperation.Update, session, ct);
 
         // Historical Revision snapshot (stores encrypted state)
         if (entity is IVersionable)
@@ -797,7 +773,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             }
 
             entityAfter.UpdatedAtUtc = DateTime.UtcNow;
-            var oldVersion = oldValues.TryGetValue("Version", out var ver) && ver is int verInt ? verInt : 0;
+            var oldVersion = EntityWriteGuard<T>.StoredVersion(oldValues);
             entityAfter.Version = oldVersion + 1;
 
             bool isSoftDeletedNow = false;
@@ -814,10 +790,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             var encrypted = EncryptEntityForWrite(entityAfter);
 
             // OCC check per entity replacement in bulk writes
-            var replaceFilter = Builders<T>.Filter.And(
-                Builders<T>.Filter.Eq(e => e.Id, entityAfter.Id),
-                Builders<T>.Filter.Eq(e => e.Version, oldVersion)
-            );
+            var replaceFilter = EntityWriteGuard<T>.UnscopedOccFilter(entityAfter.Id, oldVersion);
             writeModels.Add(new ReplaceOneModel<T>(replaceFilter, encrypted) { IsUpsert = false });
 
             if (entityAfter is IVersionable)
@@ -881,11 +854,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                 : await _collection.BulkWriteAsync(writeModels, null, ct);
 
             // If we did not match all documents, it implies concurrency conflict in a multi-client context
-            if (bulkResult.MatchedCount < writeModels.Count)
-            {
-                throw new ConcurrencyException("multiple-bulk-records", CollectionName,
-                    "Optimistic concurrency check failed. Some documents were modified by another transaction during bulk write.");
-            }
+            _writeGuard.ThrowOnBulkConcurrencyConflict(bulkResult, writeModels.Count);
 
             var updateResult = new UpdateResult.Acknowledged(bulkResult.MatchedCount, bulkResult.ModifiedCount, null);
             results.Add(updateResult);
@@ -922,7 +891,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
         foreach (var entity in list)
         {
-            StampTenant(entity);
+            _writeGuard.StampTenant(entity);
             _accessPolicy.StampOwner(entity);
             var filter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.Eq(e => e.Id, entity.Id)));
             var findOptions = new FindOptions<T> { Limit = 1 };
@@ -948,7 +917,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                 entity.CreatedAtUtc = catTime;
             }
 
-            var oldVersion = oldValues.TryGetValue("Version", out var ver) && ver is int verInt ? verInt : 0;
+            var oldVersion = EntityWriteGuard<T>.StoredVersion(oldValues);
             entity.UpdatedAtUtc = DateTime.UtcNow;
             entity.Version = oldVersion + 1;
 
@@ -965,10 +934,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
             var encrypted = EncryptEntityForWrite(entity);
 
-            var replaceFilter = Builders<T>.Filter.And(
-                Builders<T>.Filter.Eq(e => e.Id, entity.Id),
-                Builders<T>.Filter.Eq(e => e.Version, oldVersion)
-            );
+            var replaceFilter = EntityWriteGuard<T>.UnscopedOccFilter(entity.Id, oldVersion);
             writeModels.Add(new ReplaceOneModel<T>(replaceFilter, encrypted) { IsUpsert = false });
 
             if (entity is IVersionable)
@@ -1031,11 +997,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                 ? await _collection.BulkWriteAsync(session, writeModels, null, ct)
                 : await _collection.BulkWriteAsync(writeModels, null, ct);
 
-            if (bulkResult.MatchedCount < writeModels.Count)
-            {
-                throw new ConcurrencyException("multiple-bulk-records", CollectionName,
-                    "Optimistic concurrency check failed. Some documents were modified by another transaction during bulk write.");
-            }
+            _writeGuard.ThrowOnBulkConcurrencyConflict(bulkResult, writeModels.Count);
 
             if (revisions.Count > 0)
             {
@@ -1636,10 +1598,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         var oldVersion = entity.Version;
         entity.Version = oldVersion + 1;
 
-        var occFilter = _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(Builders<T>.Filter.And(
-            Builders<T>.Filter.Eq(e => e.Id, id),
-            Builders<T>.Filter.Eq(e => e.Version, oldVersion)
-        )));
+        var occFilter = _writeGuard.OccFilter(id, oldVersion);
 
         var encrypted = EncryptEntityForWrite(entity);
 
@@ -1653,20 +1612,8 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             replaceResult = await _collection.ReplaceOneAsync(occFilter, encrypted, new ReplaceOptions { IsUpsert = false }, ct);
         }
 
-        if (replaceResult.MatchedCount == 0)
-        {
-            var existsFilter = Builders<T>.Filter.Eq(e => e.Id, id);
-            long existsCount = session != null
-                ? await _collection.CountDocumentsAsync(session, existsFilter, cancellationToken: ct)
-                : await _collection.CountDocumentsAsync(existsFilter, cancellationToken: ct);
-
-            if (existsCount > 0)
-            {
-                throw new ConcurrencyException(id.ToString(), CollectionName,
-                    $"Optimistic concurrency check failed during restoration. Document with ID '{id}' was modified by another operation.");
-            }
-            throw new KeyNotFoundException($"Entity with ID {id} not found or modified during restoration.");
-        }
+        await _writeGuard.ThrowOnConcurrencyConflictAsync(
+            replaceResult, id, id, WriteOperation.Restoration, session, ct);
 
         if (entity is IVersionable)
         {
@@ -1752,44 +1699,6 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     };
 
     private string GetCurrentOperatorId() => _userContext?.OperatorId ?? "system";
-
-    /// <summary>
-    /// Stamps the ambient tenant onto an entity being written.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The tenant comes from the server's ambient context, never from the request body. Nothing
-    /// stamped it before, so the tenant of a new row was whichever value the caller happened to
-    /// send -- meaning a client could write directly into another tenant's data simply by naming
-    /// it, and a client that sent nothing wrote a row with an empty tenant that later became
-    /// invisible to everyone. The caller-supplied value is overwritten rather than validated,
-    /// because there is no request in which a caller writing to another tenant is correct.
-    /// </para>
-    /// <para>
-    /// A multi-tenant entity written with no tenant context throws. The alternative is a row that
-    /// belongs to no tenant: it is silently unreachable once isolation is switched on, and until
-    /// then it is visible to everybody. Refusing the write names the missing registration while
-    /// there is still something to fix.
-    /// </para>
-    /// </remarks>
-    private void StampTenant(T entity)
-    {
-        if (entity is not Foundry.Core.Tenant.IMultiTenant tenanted) return;
-
-        if (_tenantContext?.HasTenant != true)
-        {
-            throw new InvalidOperationException(
-                $"'{typeof(T).Name}' is multi-tenant, but no tenant is set for this operation, so the "
-                + "row would belong to no tenant. Ensure the request pipeline resolves a tenant: "
-                + "app.UseMiddleware<TenantContextMiddleware>() reads it from the caller's token "
-                + "(a 'tenant_id' or 'tenantId' claim), so issue tokens that carry one. Behind a "
-                + "gateway that establishes the tenant itself, opt in to the header with "
-                + "services.Configure<TenantContextOptions>(o => o.TrustCallerAssertedTenant = true). "
-                + "Outside a request, set one explicitly via ITenantContext.SetTenantId before writing.");
-        }
-
-        tenanted.TenantId = _tenantContext.TenantId!;
-    }
 
     private static void SetProperty(object obj, string propertyName, object? value)
     {
