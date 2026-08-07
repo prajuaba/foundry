@@ -1,7 +1,7 @@
 # Decomposing `Repository<T>`
 
-A four-step plan, one step per commit, each CI-green before the next. Step 1 stage one is done;
-everything below is not.
+A four-step plan, one step per commit, each CI-green before the next. Steps 1 and 2 are done; steps
+3 and 4 are not.
 
 **The rule for every step: a pure move first, a behaviour change never in the same commit.** This is
 the class where a mistake is a tenant-isolation failure, and its access-policy cluster has already
@@ -12,27 +12,37 @@ diff is how the fourth gets in.
 
 ## Where it stands
 
-**Step 1 is done.** The access policy is a real collaborator with tests that need no database.
+**Steps 1 and 2 are done.** The access policy and the search translator are real collaborators, each
+with tests that go at the thing they guard rather than at a repository that happens to reach it.
 
 | | Lines |
 | :--- | ---: |
-| `Repository.cs` | 2,027 |
+| `Repository.cs` | 1,839 |
 | `EntityAccessPolicy.cs` | 593 |
+| `EntitySearchTranslator.cs` | 263 |
 
-Stage one moved the cluster into a `partial class` file; stage two turned it into
+`Repository.cs` was 2,563 lines before step 1, 2,027 after it, and is 1,839 now.
+
+**Step 1.** Stage one moved the cluster into a `partial class` file; stage two turned it into
 `EntityAccessPolicy<T>`, constructed as `(ITenantContext?, ICurrentUserContext?)`, with
 `Repository<T>` delegating at 39 call sites. `Repository.AccessPolicy.cs` is gone and `Repository<T>`
-is no longer `partial`. `Repository.cs` went from 2,563 lines before step 1 to 2,027.
+is no longer `partial`. Five unit tests cover the policy in **~61 ms with no MongoDB**, which was the
+point: this cluster produced three separate security defects and every one had to be caught through a
+live database.
 
-Both stages were verified as pure moves by comparing every non-comment, non-blank line before and
+**Step 2.** `EntitySearchTranslator<T>`, constructed as `(EntityAccessPolicy<T>)` — that was the
+whole dependency, and measuring it first is what made the constructor obvious. 14 call sites moved,
+6 of which became delegation. Six tests cover it in **~0.7 s**.
+
+Every stage was verified as a pure move by comparing every non-comment, non-blank line before and
 after — nothing lost, the only additions being the new type's scaffolding and the delegation.
 
-Five unit tests now cover the policy in **~61 ms with no MongoDB**, which was the point: this cluster
-produced three separate security defects and every one had to be caught through a live database.
-
-**Measure before you trust this table.** The figures above were wrong by the time stage two ran —
-the spec said 2,035/530 and 36 call sites; the truth was 2,034/573 and 39. The agent doing the work
-reported what it measured rather than matching the doc, which is the correct instinct. Do the same.
+**Measure before you trust this table.** Before step 1 stage two it said 2,035/530 and 36 call sites;
+the truth was 2,034/573 and 39. Before step 2 it was accurate — 2,027 and 593, both confirmed — so
+the warning cost one `wc -l` and bought nothing that time. That is the trade, and it is a good one:
+the figures are correct exactly until a commit lands without updating them, and nothing about reading
+the table tells you which of those two states you are in. Measure, report what you measured, and
+correct the table when you are done.
 
 ## Step 1, stage two — `EntityAccessPolicy<T>` — DONE
 
@@ -93,7 +103,7 @@ a test that reconstructs the code's own assumptions can only confirm them. Asser
 
 | Step | Extract | Why |
 | :--- | :--- | :--- |
-| 2 | `EntitySearchTranslator<T>` — see below | The camelCase class of defect lives entirely here, and it has produced two bugs already |
+| 2 | `EntitySearchTranslator<T>` — see below — DONE | The camelCase class of defect lives entirely here, and it has produced two bugs already |
 | 3 | `EntityWriteGuard<T>` — OCC on `Version`, `StampTenant`, concurrency-exception paths | Write-side invariants, currently interleaved with read-side ones |
 | 4 | — | What remains is a real repository: collection access, paging, delegation |
 
@@ -111,20 +121,32 @@ the file's shape rather than of anyone's attention.
 
 ---
 
-## Step 2 — `EntitySearchTranslator<T>`
+## Step 2 — `EntitySearchTranslator<T>` — DONE
 
 Same shape as step 1: a pure move first, then the collaborator, then tests — separate commits.
 
-**Members:** `BuildBsonFilter`, `BuildExpression`, `ConvertToBsonValue`, `BuildBsonArray`,
+**Members moved:** `BuildBsonFilter`, `BuildExpression`, `ConvertToBsonValue`, `BuildBsonArray`,
 `EscapeRegex`, `BuildSortDefinition`, and the cross-collection pipeline assembly inside
-`CrossCollectionSearchAsync`.
+`CrossCollectionSearchAsync`, which became `BuildCrossCollectionPipeline`.
 
-**Dependency to check first.** `BuildBsonFilter` is `static` and calls
-`EntityAccessPolicy<T>.ElementName`, so the translator needs the entity type — probably the same
-per-type parameter that method already takes, rather than a constructor dependency. `BuildExpression`
-calls `EnsureCriteriaAreFilterable` on the policy, so the translator holds a reference to it or the
-repository sequences the two. Measure the actual references before designing the constructor; that
-measurement is what made step 1 straightforward.
+**What the dependency turned out to be.** One thing: the access policy.
+
+```csharp
+internal sealed class EntitySearchTranslator<T> where T : class, IEntity<ObjectId>
+{
+    public EntitySearchTranslator(EntityAccessPolicy<T> accessPolicy);
+}
+```
+
+The moved cluster touches `_accessPolicy` three times — `ApplyIsolationTo` twice while assembling the
+pipeline, `EnsureCriteriaAreFilterable` once before compiling an expression — and no other private
+state. No collection, no session, no database, no contexts. `ElementName` needed nothing new: it is
+`static` and takes the entity type already, so the call crossed the boundary unchanged.
+
+Two things stayed in `CrossCollectionSearchAsync`: resolving entity types to collection names, and
+running the pipeline. The translator builds; the repository executes. `pageNumber` and `pageSize` are
+now read a few lines earlier in that method because both sides need them — the only reordering in the
+move, and both are property reads on a record.
 
 **Why this one earns its own type.** Two defects have come out of it, both the same root cause and
 both silent: a hand-built `BsonDocument` does not resolve names through the class map, so a
@@ -132,8 +154,21 @@ PascalCase field name matches nothing and errors nowhere. The soft-delete predic
 cross-collection search never excluded a row; the criteria never matched a field. A filter that
 matches nothing returns nothing, and for a *search* "no results" is a plausible answer every time.
 
-**What the tests must assert.** That a criterion **matches a row**, not that a stage was built.
+**What the tests assert.** That a criterion **matches a row**, not that a stage was built.
 `CrossCollectionSearchAsync_BuildsCorrectPipelineDefinition` asserted stage shape, passed for years,
 and has been corrected twice for exactly these two defects — it checks the document the code builds
-and never the one MongoDB matches against. Prefer assertions that would fail if the element name were
-wrong.
+and never the one MongoDB matches against.
+
+So `EntitySearchTranslatorTests` seeds rows, runs the translator's own pipeline, and asserts on which
+rows come back. Five of the six use MongoDB deliberately: it is the oracle for "does this match", the
+one question a hand-written expectation cannot answer, and the reason the shape test could be wrong
+for years. That is a different argument from step 1's, where the whole point was to get *away* from a
+database — the policy is a pure function and could be asked directly; a `BsonDocument` filter cannot
+be evaluated without something that evaluates `BsonDocument` filters. The sixth, on criteria
+entitlement, needs no database and does not open one.
+
+Both defects were reintroduced to confirm the tests catch them. Writing the criterion field as the
+property name failed four tests; writing `match["IsDeleted"]` failed
+`ASoftDeletedRowIsNotMatched` with `["kept", "removed"]` against an expected `["kept"]` — the
+soft-deleted row coming back, which is the original bug exactly and in the dangerous direction: a
+filter that silently admits rows rather than one that silently drops them.
