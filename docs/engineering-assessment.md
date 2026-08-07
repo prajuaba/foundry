@@ -1396,6 +1396,68 @@ there was no schema to validate; four tests failed on it. Had only the accepting
 would have passed and the rule would have been dead code — the same shape as every silent gate in this
 document, this time caught before it shipped.
 
+### A bulk write picked its rows with a read filter
+
+`Repository<T>` was decomposed into collaborators over four pure-move commits, and putting the access
+policy in one file for the first time is what showed that `BulkUpdateManyAsync` selected the rows it
+was about to replace with `ApplyReadFilters`. That call passes `forWrite: false`, which is the one
+flag that lifts the owner filter for an `[OwnerReadExemptRoles]` holder and that adds the `SharedWith`
+disjunct for a grantee. Nothing downstream re-checked: the version filter a bulk write carries is
+scoped to neither tenant nor owner, and unlike `BulkUpdateAsync` there was no second scoped read to
+skip rows on.
+
+**So the rows a caller could see were the rows a caller could replace.** Two guarantees this codebase
+states in its own source were not true through this one method — an auditor holding a read-exempt
+role overwrote another owner's row, and a grantee on `SharedWith` overwrote the owner's row.
+`OwnerReadExemptRolesAttribute` promises that its holder *"can still only modify their own rows"*, and
+`ISharedResource` that *"a grant confers read access only"*, on the stated grounds that a grant
+conferring writes would turn "let my colleague see this" into "let my colleague delete this". Both
+were reproduced against a real database before anything was changed rather than inferred from
+reading, and both are reachable with no race and no concurrency of any kind.
+
+**Why it was invisible.** Nothing failed. The write was applied, the audit entry written, the revision
+saved, and the caller handed an acknowledged `UpdateResult` with a matched count — the correct-looking
+answer to an operation that had just corrupted somebody else's row. The one line that made a write
+into a read is three hundred lines from the write paths that get this right, and the method name says
+nothing about reading. It is the silent-success pattern this document is about, sitting in the
+authorization layer.
+
+**It was found by the refactor, not by a test.** The ownership and grant suites cover exactly these
+two rules, in detail, and every test in them passed — because every one of them addresses its write by
+an id, and every write addressed by an id was correct. The rule was right everywhere it was stated;
+this path never stated it. No test that existed could have caught this, and none of the coverage was
+wrong, which is the case for reading code against what it permits rather than adding tests to a
+surface that is already green.
+
+**The fix is in the row selection, not in the version check.** `ApplyWriteFilters` is the write-side
+counterpart of the expression overload — the same soft-delete and tenant predicates, with the owner
+scope taken on the write side — and the two share one body, so they cannot drift the way the two read
+overloads once did. Scoping the bulk version filter instead would have blocked exactly the same writes
+and reported them wrongly: a replace matching no row routes into `ThrowOnBulkConcurrencyConflict`, so
+an authorization failure would have reached the caller as a concurrency conflict, inviting a retry
+that can never succeed. A row the caller may not write is now not a candidate, and a bulk update with
+nothing writable in it returns an empty result — the same answer as a filter that matched nothing,
+which is what it is.
+
+**The sweep for the same shape found nothing else.** Every call site of `ApplyReadFilters` and of
+`TryGetOwnerScope` was checked, on the principle that this codebase has repeatedly had one rule wrong
+in several places at once. Ten call sites, nine of them genuine reads, and this the only write among
+them; every other write composes `ScopeToOwner(ScopeToTenant(...))`. `BulkUpdateAsync` was verified
+rather than assumed — it re-reads each row through the write-scoped filter and skips what does not
+match. `CachedRepository` and `PartitionedRepository` both delegate to this method and inherit the fix.
+A useful negative result, and the first sweep of this kind here to come back clean.
+
+Six tests. Four fail when the one-line selection change is reverted, and two of those failures
+reproduce verbatim the strings the original investigation recorded — `OVERWRITTEN BY AUDITOR` and
+`OVERWRITTEN BY GRANTEE`. The other two are controls against over-correcting: a fully exempt role must
+keep the write breadth `[OwnerExemptRoles]` does grant, and an owner must still be able to bulk-update
+their own rows. Both fail if the selection is scoped by owner unconditionally instead of through the
+write-side scope. MongoDB is the oracle for all six, deliberately: the predicate does not stay in .NET
+— the LINQ provider translates it into a query the server evaluates — so a compiled delegate would
+answer what an in-process `Func` admits and would agree with itself about an owner predicate the
+provider had dropped. The assertions are on the stored body of each row, because the harm is a row
+whose contents were replaced.
+
 ## 4. Coverage and what covering it found
 
 Every module has tests. **1,074 C# tests in total**, from 258 at the start, plus 50 TypeScript across
@@ -1570,6 +1632,19 @@ tenant opt in with `services.Configure<TenantContextOptions>(o => o.TrustCallerA
 which names the trust boundary instead of assuming it. The smoke test asserts the closed case against
 a live application: a tenantless token that sends `X-Tenant-ID: globex` is refused, and no row appears
 in globex.
+
+**The two bulk paths still build their version check without tenant or owner scoping.** The three
+single-document write paths scope theirs; `BulkUpdateManyAsync` and `BulkUpdateAsync` filter on the id
+and the version alone. Now that the selection defect above is fixed, both are in the position
+`BulkUpdateAsync` has always been in: the unscoped filter is applied to a row that a scoped read has
+just returned. Reaching past it needs a writer outside `IRepository<T>` — a migration, an admin tool,
+anything using the publicly exposed `Repository<T>.Collection` — that changes a row's `TenantId` or
+`OwnerId` **without bumping `Version`**, which no path through the repository does, *plus* a race
+landing in the window between that read and the `BulkWriteAsync`. Missing depth rather than an open
+door. It was left out of the selection fix on purpose, so that each is one decision: with the
+selection corrected, closing this is a cheap defence-in-depth change rather than a behaviour change
+with an error-reporting problem attached. `EntityWriteGuardTests.TheBulkFilterIsNotTenantScoped`
+records today's behaviour so that changing it has to be deliberate.
 
 **Studio needs the backend running to show a route.** Removing the last mirror means the designer and
 playground read routes from a derived manifest, so with the backend down a route is *unknown* rather

@@ -231,6 +231,134 @@ public class GrantTests : IDisposable
         Assert.Equal("edited", (await NotesAs("alice").GetByIdAsync(id))!.Body);
     }
 
+    // ── The same two rules, through the bulk write path ─────────────────────
+
+    // Everything above reaches the owner scope through a write addressed by an id. BulkUpdateManyAsync
+    // is the one write that names its rows with a predicate instead, and it selected them with the
+    // *read* filter -- so both rules above were enforced everywhere they were tested and absent here.
+    //
+    // MongoDB is the oracle for these, and deliberately, on the same reasoning the rest of this file
+    // uses. The question is which rows a predicate selects and what is left in them afterwards, and
+    // the predicate does not stay in .NET: it is translated by the LINQ provider into a query the
+    // server evaluates. A compiled delegate would answer a question nobody asks -- what an in-process
+    // Func admits -- and would agree with itself about an owner predicate that the provider dropped.
+    // The harm is a row whose contents were replaced, so that is what is asserted: the stored body.
+
+    /// <summary>
+    /// A grantee's bulk update rewrites their own rows and leaves the row shared with them alone.
+    /// </summary>
+    /// <remarks>
+    /// Both halves are the test. Bob really can see both rows, so a selection that refused everything
+    /// would satisfy the assertion that matters and quietly break the feature; asserting that his own
+    /// row did change is what distinguishes "scoped to what he may write" from "scoped to nothing".
+    /// </remarks>
+    [Fact]
+    public async Task ABulkUpdateDoesNotReachARowMerelySharedWithTheCaller()
+    {
+        var alices = await SeedAsync("alice", "alice's shared doc", "bob");
+        var bobs = await SeedAsync("bob", "bob's own");
+
+        // Bob can read both, and asks to rewrite everything he can reach.
+        Assert.Equal(2, (await NotesAs("bob").FindManyAsync()).Count);
+
+        await NotesAs("bob").BulkUpdateManyAsync(n => n.Body != null, n => n with { Body = "OVERWRITTEN BY GRANTEE" });
+
+        Assert.Equal("alice's shared doc", (await NotesAs("alice").GetByIdAsync(alices))!.Body);
+        Assert.Equal("OVERWRITTEN BY GRANTEE", (await NotesAs("bob").GetByIdAsync(bobs))!.Body);
+    }
+
+    [Fact]
+    public async Task ABulkUpdateDoesNotReachARowSharedWithTheCallersGroup()
+    {
+        var id = await SeedAsync("alice", "team doc", "finance");
+
+        await NotesAs("bob", groups: ["finance"])
+            .BulkUpdateManyAsync(n => n.Body != null, n => n with { Body = "OVERWRITTEN BY GROUP" });
+
+        Assert.Equal("team doc", (await NotesAs("alice").GetByIdAsync(id))!.Body);
+    }
+
+    /// <summary>
+    /// A read-exempt role's bulk update rewrites its own rows and nobody else's.
+    /// </summary>
+    /// <remarks>
+    /// The auditor is the sharpest case: <c>[OwnerReadExemptRoles]</c> exists so that someone can be
+    /// given sight of a whole tenant without being given the ability to change it, and this path
+    /// handed them the second along with the first.
+    /// </remarks>
+    [Fact]
+    public async Task ABulkUpdateByAReadExemptRoleDoesNotReachAnotherCallersRow()
+    {
+        var alices = await SeedAsync("alice", "alice's private note");
+        var carols = await SeedAsync("carol", "carol's own note");
+
+        var auditor = NotesAs("carol", roles: ["Auditor"]);
+        Assert.Equal(2, (await auditor.FindManyAsync()).Count);   // reads the whole tenant, as intended
+
+        await auditor.BulkUpdateManyAsync(n => n.Body != null, n => n with { Body = "OVERWRITTEN BY AUDITOR" });
+
+        Assert.Equal("alice's private note", (await NotesAs("alice").GetByIdAsync(alices))!.Body);
+        Assert.Equal("OVERWRITTEN BY AUDITOR", (await auditor.GetByIdAsync(carols))!.Body);
+    }
+
+    /// <summary>
+    /// A fully exempt role still bulk-updates other callers' rows.
+    /// </summary>
+    /// <remarks>
+    /// <c>[OwnerExemptRoles]</c> is exempt on writes as well as reads, and narrowing the selection
+    /// must not quietly take that away — the fix is meant to remove write breadth that was never
+    /// granted, not the breadth that was. This is the assertion that fails if the row selection is
+    /// scoped by owner unconditionally rather than through the write-side scope.
+    /// </remarks>
+    [Fact]
+    public async Task AFullyExemptRoleCanStillBulkUpdateAnotherCallersRow()
+    {
+        var id = await SeedAsync("alice", "a");
+
+        await NotesAs("dave", roles: ["Supervisor"])
+            .BulkUpdateManyAsync(n => n.Body != null, n => n with { Body = "edited by supervisor" });
+
+        Assert.Equal("edited by supervisor", (await NotesAs("alice").GetByIdAsync(id))!.Body);
+    }
+
+    [Fact]
+    public async Task AnOwnerCanStillBulkUpdateTheirOwnRows()
+    {
+        var first = await SeedAsync("alice", "one");
+        var second = await SeedAsync("alice", "two");
+
+        await NotesAs("alice").BulkUpdateManyAsync(n => n.Body != null, n => n with { Body = "rewritten" });
+
+        Assert.Equal("rewritten", (await NotesAs("alice").GetByIdAsync(first))!.Body);
+        Assert.Equal("rewritten", (await NotesAs("alice").GetByIdAsync(second))!.Body);
+    }
+
+    /// <summary>
+    /// A bulk update with nothing the caller may write is an empty result, not a concurrency conflict.
+    /// </summary>
+    /// <remarks>
+    /// This is why the fix is in the row selection rather than in the version check the bulk write
+    /// carries. Scoping that filter would block exactly the same writes, but a replace that matches no
+    /// row routes into <c>ThrowOnBulkConcurrencyConflict</c> — so the caller would be told their write
+    /// lost a race, and invited to retry something that can never succeed however many times it is
+    /// tried. A row the caller may not write is not a candidate, so there is no conflict to report and
+    /// no write to retry.
+    /// </remarks>
+    [Fact]
+    public async Task ABulkUpdateRefusedByOwnershipIsNotReportedAsAConcurrencyConflict()
+    {
+        var id = await SeedAsync("alice", "alice's private note");
+
+        var auditor = NotesAs("carol", roles: ["Auditor"]);
+
+        // Not ConcurrencyException, and not any other exception: the correct answer to "update every
+        // row matching this predicate" when none of them is yours is that none of them changed.
+        var results = await auditor.BulkUpdateManyAsync(n => n.Body != null, n => n with { Body = "OVERWRITTEN" });
+
+        Assert.Empty(results);
+        Assert.Equal("alice's private note", (await NotesAs("alice").GetByIdAsync(id))!.Body);
+    }
+
     // ── A grant never widens past the tenant ────────────────────────────────
 
     [Fact]

@@ -714,8 +714,14 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ArgumentNullException.ThrowIfNull(filter);
         ArgumentNullException.ThrowIfNull(updateSelector);
 
-        var finalFilter = _accessPolicy.ApplyReadFilters(filter);
-        
+        // Write filters, not read filters. This is a write that names its rows with a predicate, so
+        // the candidates it loads have to be the ones the caller may change rather than the ones they
+        // may see -- otherwise a read-exempt auditor or a SharedWith grantee replaces a row they were
+        // only ever granted sight of, and nothing downstream re-checks. Selecting the rows is the
+        // right place: the version check further down cannot refuse a write without reporting it as a
+        // concurrency conflict.
+        var finalFilter = _accessPolicy.ApplyWriteFilters(filter);
+
         var findOptions = new FindOptions<T>();
         var entitiesCursor = session != null
             ? await _collection.FindAsync(session, finalFilter, findOptions, ct)

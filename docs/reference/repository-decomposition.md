@@ -2,8 +2,8 @@
 
 **This plan is finished. All four steps are done, and step 4 concluded that no fifth extraction is
 warranted — see "Where it stands" and "Step 4" below before reopening it.** Two follow-ups came out
-of the work and are recorded at the end: one dead collaborator still to wire up, and one confirmed
-write-authorization defect that is out of scope for a refactor and needs a decision.
+of the work and are recorded at the end: one dead collaborator still to wire up, and one
+write-authorization defect, since fixed on the recommendation below.
 
 A four-step plan, one step per commit, each CI-green before the next.
 
@@ -368,7 +368,8 @@ orders. Step 3 already declined to fuse those into a `GuardedReplaceAsync` and w
 a rewrite, and the orchestration is the part that legitimately differs per operation.
 
 **Do not reopen this to hit a line count.** The next reader's time is better spent on the two items
-below, both of which are real.
+below, both of which are real. Follow-up 2's defect has since been fixed; what remains of it, and all
+of follow-up 1, has not.
 
 ---
 
@@ -400,7 +401,11 @@ round-trip tests, on the model of step 4's.
 
 **Step 3 asked step 4 to decide about `OccFilter` vs `UnscopedOccFilter` deliberately. Investigating
 that turned up a larger and separate defect, which is confirmed and reachable with no race at all.**
-Neither has been changed — both are behaviour decisions, not refactoring.
+Neither was changed by the refactor — both are behaviour decisions, not refactoring.
+
+**The defect below is now fixed, on the recommendation this section ends with; the analysis is kept
+because it is the reasoning behind where the fix went. The OCC asymmetry is still open, and is now
+the cheap change this section predicted it would become.** See "What was done" at the end.
 
 ### The OCC asymmetry itself: not a defect, and not the thing to fix
 
@@ -462,3 +467,29 @@ decide about `UnscopedOccFilter` separately. Once `BulkUpdateManyAsync` selects 
 both bulk paths are in the same position `BulkUpdateAsync` is in today, and closing the OCC gap
 becomes a cheap defence-in-depth change rather than a behaviour change with an error-reporting
 problem attached.
+
+### What was done
+
+`EntityAccessPolicy<T>.ApplyWriteFilters` is the write-side counterpart of the expression overload of
+`ApplyReadFilters`: the same soft-delete and tenant predicates, with `TryGetOwnerScope(forWrite: true)`
+instead of `false`. The two now share one body and differ only by that flag, so they cannot drift the
+way the two read overloads once did. `BulkUpdateManyAsync` calls it, which is a one-line change at the
+only site that needed one, and the two wrapping repositories inherit it by delegation.
+
+**The sweep this asked for came back clean.** Ten call sites reach `ApplyReadFilters`; nine are reads
+and `BulkUpdateManyAsync` was the only write among them. Every other write path composes
+`ScopeToOwner(ScopeToTenant(...))`. `BulkUpdateAsync` was checked rather than taken on trust and is
+genuinely unaffected. `TryGetOwnerScopeFor`, the cross-collection variant, takes no `forWrite` flag at
+all and is reached only from `ApplyIsolationTo`, which is search.
+
+Six tests in `GrantTests`, against a real MongoDB and asserting on the stored body of each row, which
+is the only place the harm shows up. Four fail when the one-line change is reverted; the other two are
+controls in the opposite direction — `[OwnerExemptRoles]` keeps the write breadth it does grant, and
+an owner can still bulk-update their own rows — and both fail if the selection is scoped by owner
+unconditionally rather than through the write-side scope. One of the six pins the reason the fix is
+here and not in the OCC filter: a bulk update with nothing writable in it returns an empty result and
+raises no `ConcurrencyException`.
+
+**Still open: the OCC asymmetry.** `UnscopedOccFilter` is unchanged in both bulk paths and
+`EntityWriteGuardTests.TheBulkFilterIsNotTenantScoped` still records that. It is now exactly the cheap
+defence-in-depth change described above, with no error-reporting problem attached to it.

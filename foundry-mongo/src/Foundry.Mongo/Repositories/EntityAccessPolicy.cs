@@ -24,9 +24,10 @@ namespace Foundry.Mongo.Repositories;
 /// and none by the obvious one.
 /// </para>
 /// <para>
-/// The members are unchanged from when they lived on <c>Repository&lt;T&gt;</c>. This is the second
-/// stage of a move, not a redesign — the one cluster in this codebase where a mistake is a
-/// tenant-isolation failure is the worst place to combine a structural change with a semantic one.
+/// The members arrived unchanged from <c>Repository&lt;T&gt;</c>. That extraction was a move and not a
+/// redesign — the one cluster in this codebase where a mistake is a tenant-isolation failure is the
+/// worst place to combine a structural change with a semantic one — and <c>ApplyWriteFilters</c> is
+/// the one member added since, in its own commit, to fix a defect the move made visible.
 /// </para>
 /// <para>
 /// <c>CallerMaySeeRecordAsync</c> stays on the repository because it queries the collection; it asks
@@ -446,13 +447,47 @@ internal sealed class EntityAccessPolicy<T> where T : class, IEntity<ObjectId>
     /// <remarks>
     /// This overload applied soft delete and nothing else, while the <see cref="FilterDefinition{T}"/>
     /// one applied soft delete *and* the tenant filter. The methods behind the generated list and
-    /// count endpoints -- <c>FindManyAsync</c>, <c>CountAsync</c>, <c>FindByCriteriaAsync</c> and
-    /// <c>BulkUpdateManyAsync</c> -- all take an expression, so the primary read path of every
-    /// multi-tenant application returned every tenant's rows with a 200 and no indication that
-    /// isolation had not been applied. It could not have been noticed in passing: it was `static`,
-    /// which put <c>_tenantContext</c> out of reach and made the omission look deliberate.
+    /// count endpoints -- <c>FindManyAsync</c>, <c>CountAsync</c> and <c>FindByCriteriaAsync</c> --
+    /// all take an expression, so the primary read path of every multi-tenant application returned
+    /// every tenant's rows with a 200 and no indication that isolation had not been applied. It could
+    /// not have been noticed in passing: it was `static`, which put <c>_tenantContext</c> out of reach
+    /// and made the omission look deliberate.
     /// </remarks>
     public Expression<Func<T, bool>> ApplyReadFilters(Expression<Func<T, bool>>? filter)
+        => ApplyFilters(filter, forWrite: false);
+
+    /// <summary>
+    /// Narrows a predicate to the rows the caller is allowed to <em>change</em>: the read filters,
+    /// with the owner scope taken on the write side.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The counterpart of <see cref="ScopeToOwner"/> for a write that names its rows with a predicate
+    /// rather than with an id. <c>BulkUpdateManyAsync</c> is the only such write, and it selected its
+    /// candidates with <see cref="ApplyReadFilters(Expression{Func{T, bool}})"/> — so it loaded every
+    /// row the caller could <em>see</em> and replaced all of them. A read-exempt auditor overwrote
+    /// another owner's row, and a <c>SharedWith</c> grantee overwrote the owner's row, both without a
+    /// race and both contradicting what <c>OwnerReadExemptRolesAttribute</c> and
+    /// <c>ISharedResource</c> promise in their own documentation. Every single-document write refused
+    /// the same callers correctly, which is why it survived: the rule was right everywhere it was
+    /// stated, and this path never stated it.
+    /// </para>
+    /// <para>
+    /// It is fixed in the selection rather than in the version check the bulk write carries. Scoping
+    /// that filter would block the same writes, but a zero-match replace routes into
+    /// <see cref="EntityWriteGuard{T}.ThrowOnBulkConcurrencyConflict"/> — so an authorization failure
+    /// would reach the caller as a concurrency conflict, inviting a retry that can never succeed. A
+    /// row the caller may not write is simply not a candidate.
+    /// </para>
+    /// <para>
+    /// Soft delete and the tenant filter are identical to the read side; only the owner scope differs,
+    /// so the two share one body and cannot drift the way the two read overloads did.
+    /// </para>
+    /// </remarks>
+    public Expression<Func<T, bool>> ApplyWriteFilters(Expression<Func<T, bool>>? filter)
+        => ApplyFilters(filter, forWrite: true);
+
+    private Expression<Func<T, bool>> ApplyFilters(Expression<Func<T, bool>>? filter, bool forWrite)
     {
         var parameter = filter?.Parameters[0] ?? Expression.Parameter(typeof(T), "x");
         Expression? body = filter?.Body;
@@ -472,11 +507,13 @@ internal sealed class EntityAccessPolicy<T> where T : class, IEntity<ObjectId>
                 Expression.Constant(_tenantContext.TenantId, typeof(string))));
         }
 
-        // This overload is the one behind FindManyAsync, CountAsync and FindByCriteriaAsync -- every
-        // generated list endpoint. Omitting the owner predicate here would leave ownership enforced
-        // on reads of a single row and absent from reads of all of them, which is the more damaging
-        // half to miss. It is the same trap the tenant filter fell into.
-        if (TryGetOwnerScope(forWrite: false, out var ownerId, out var grantedTo))
+        // This body is behind FindManyAsync, CountAsync and FindByCriteriaAsync -- every generated
+        // list endpoint -- and, with forWrite set, behind BulkUpdateManyAsync's row selection.
+        // Omitting the owner predicate here would leave ownership enforced on reads of a single row
+        // and absent from reads of all of them, which is the more damaging half to miss. It is the
+        // same trap the tenant filter fell into. The flag is what makes a grant a read grant and a
+        // read-only exemption read-only, exactly as it does in ScopeToOwner.
+        if (TryGetOwnerScope(forWrite, out var ownerId, out var grantedTo))
         {
             Expression visible = Expression.Equal(
                 Expression.Property(parameter, nameof(Foundry.Core.Security.IOwnedResource.OwnerId)),
