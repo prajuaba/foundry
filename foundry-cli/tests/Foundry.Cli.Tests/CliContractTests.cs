@@ -380,4 +380,307 @@ public class CliContractTests : IDisposable
             Assert.Equal(0, result.ExitCode);
         }
     }
+
+    // ---- token mint ----
+
+    private const string ValidSigningKey = "this-is-a-test-signing-key-that-is-long-enough-1234567890";
+
+    [Fact]
+    public async Task TokenMint_WithValidArgsProducesAJwt()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey,
+            "--sub", "alice",
+            "--role", "Admin");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.NotEmpty(result.StdOut);
+
+        var token = result.StdOut.Trim();
+        Assert.Contains(".", token);
+        Assert.True(token.Split('.').Length == 3, "JWT should have three parts (header.payload.signature)");
+    }
+
+    [Fact]
+    public async Task TokenMint_WithoutSigningKeyExitsNonZero()
+    {
+        // Clears the environment variable if set, to test the error case.
+        var result = await Cli.RunWithEnvironmentAsync(
+            new Dictionary<string, string?> { ["Authentication__Jwt__SigningKey"] = null },
+            false,
+            "token", "mint", "--sub", "alice", "--role", "Admin");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("No signing key provided", result.StdErr);
+    }
+
+    [Fact]
+    public async Task TokenMint_WithAShortSigningKeyExitsNonZero()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", "tooshort");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("HS256 requires at least 32 bytes", result.StdErr);
+    }
+
+    [Fact]
+    public async Task TokenMint_UsesEnvironmentVariableForSigningKey()
+    {
+        var result = await Cli.RunWithEnvironmentAsync(
+            new Dictionary<string, string?> { ["Authentication__Jwt__SigningKey"] = ValidSigningKey },
+            false,
+            "token", "mint", "--sub", "bob", "--role", "User");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.NotEmpty(result.StdOut);
+    }
+
+    [Fact]
+    public async Task TokenMint_DefaultsSubToDevUser()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey);
+
+        Assert.Equal(0, result.ExitCode);
+
+        var token = result.StdOut.Trim();
+        var decoded = DecodeJwt(token);
+        Assert.Equal("dev-user", decoded["sub"]);
+    }
+
+    [Fact]
+    public async Task TokenMint_WithRoleAddsRoleClaim()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey,
+            "--sub", "alice",
+            "--role", "Admin");
+
+        Assert.Equal(0, result.ExitCode);
+
+        var token = result.StdOut.Trim();
+        var decoded = DecodeJwt(token);
+        if (decoded["role"] is List<string> roleList)
+        {
+            Assert.Contains("Admin", roleList);
+        }
+        else
+        {
+            Assert.Equal("Admin", decoded["role"]);
+        }
+    }
+
+    [Fact]
+    public async Task TokenMint_WithMultipleRolesAddsAllRoles()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey,
+            "--sub", "charlie",
+            "--role", "Admin",
+            "--role", "User",
+            "--role", "Viewer");
+
+        Assert.Equal(0, result.ExitCode);
+
+        var token = result.StdOut.Trim();
+        var decoded = DecodeJwt(token);
+        var roleList = decoded["role"] as List<string>;
+        Assert.NotNull(roleList);
+        Assert.Contains("Admin", roleList);
+        Assert.Contains("User", roleList);
+        Assert.Contains("Viewer", roleList);
+    }
+
+    [Fact]
+    public async Task TokenMint_WithTenantAddsTenantIdClaim()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey,
+            "--sub", "alice",
+            "--tenant", "acme");
+
+        Assert.Equal(0, result.ExitCode);
+
+        var token = result.StdOut.Trim();
+        var decoded = DecodeJwt(token);
+        Assert.Equal("acme", decoded["tenant_id"]);
+    }
+
+    [Fact]
+    public async Task TokenMint_WithAudienceAddsAudClaim()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey,
+            "--sub", "alice",
+            "--audience", "myapi");
+
+        Assert.Equal(0, result.ExitCode);
+
+        var token = result.StdOut.Trim();
+        var decoded = DecodeJwt(token);
+        Assert.Equal("myapi", decoded["aud"]);
+    }
+
+    [Fact]
+    public async Task TokenMint_WithIssuerAddsIssClaim()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey,
+            "--sub", "alice",
+            "--issuer", "myservice");
+
+        Assert.Equal(0, result.ExitCode);
+
+        var token = result.StdOut.Trim();
+        var decoded = DecodeJwt(token);
+        Assert.Equal("myservice", decoded["iss"]);
+    }
+
+    [Fact]
+    public async Task TokenMint_WithGroupsAddsGroupsClaim()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey,
+            "--sub", "alice",
+            "--group", "finance",
+            "--group", "operations");
+
+        Assert.Equal(0, result.ExitCode);
+
+        var token = result.StdOut.Trim();
+        var decoded = DecodeJwt(token);
+        var groupsList = decoded["groups"] as List<string>;
+        Assert.NotNull(groupsList);
+        Assert.Contains("finance", groupsList);
+        Assert.Contains("operations", groupsList);
+    }
+
+    [Fact]
+    public async Task TokenMint_WithScopesAddsScopeClaim()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey,
+            "--sub", "alice",
+            "--scope", "view:financial",
+            "--scope", "view:pii");
+
+        Assert.Equal(0, result.ExitCode);
+
+        var token = result.StdOut.Trim();
+        var decoded = DecodeJwt(token);
+        var scopeList = decoded["scope"] as List<string>;
+        Assert.NotNull(scopeList);
+        Assert.Contains("view:financial", scopeList);
+        Assert.Contains("view:pii", scopeList);
+    }
+
+    [Fact]
+    public async Task TokenMint_DefaultsExpiresInToOneHour()
+    {
+        var beforeGeneration = DateTimeOffset.UtcNow;
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey,
+            "--sub", "alice");
+        var afterGeneration = DateTimeOffset.UtcNow;
+
+        Assert.Equal(0, result.ExitCode);
+
+        var token = result.StdOut.Trim();
+        var decoded = DecodeJwt(token);
+        var expiration = long.Parse(decoded["exp"]?.ToString() ?? "0");
+        var expirationTime = DateTimeOffset.FromUnixTimeSeconds(expiration);
+
+        // The expiration should be approximately 1 hour from now (allowing 5 seconds for test execution)
+        var expectedExpiration = DateTimeOffset.UtcNow.AddHours(1);
+        var timeDifference = Math.Abs((expirationTime - expectedExpiration).TotalSeconds);
+        Assert.True(timeDifference < 5, $"Expiration time differs from expected by {timeDifference} seconds");
+    }
+
+    [Fact]
+    public async Task TokenMint_HonorsCustomExpiresInDuration()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey,
+            "--sub", "alice",
+            "--expires-in", "30m");
+
+        Assert.Equal(0, result.ExitCode);
+
+        var token = result.StdOut.Trim();
+        var decoded = DecodeJwt(token);
+        var expiration = long.Parse(decoded["exp"]?.ToString() ?? "0");
+        var iatTime = long.Parse(decoded["iat"]?.ToString() ?? "0");
+
+        var durationSeconds = expiration - iatTime;
+        Assert.Equal(1800, durationSeconds); // 30 minutes = 1800 seconds
+    }
+
+    [Fact]
+    public async Task TokenMint_WithPrettyPrintsDecodedHeaderAndPayload()
+    {
+        var result = await Cli.RunAsync(_workspace, "token", "mint",
+            "--signing-key", ValidSigningKey,
+            "--sub", "alice",
+            "--role", "Admin",
+            "--pretty");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.NotEmpty(result.StdOut);
+        Assert.NotEmpty(result.StdErr);
+
+        // StdOut should contain the JWT, StdErr should contain pretty JSON
+        var token = result.StdOut.Trim();
+        Assert.Contains(".", token);
+
+        Assert.Contains("header", result.StdErr);
+        Assert.Contains("payload", result.StdErr);
+        Assert.Contains("HS256", result.StdErr);
+    }
+
+    private static Dictionary<string, object> DecodeJwt(string token)
+    {
+        var parts = token.Split('.');
+        if (parts.Length != 3)
+            throw new InvalidOperationException("Invalid JWT format");
+
+        var payload = parts[1];
+        // Add padding if needed
+        var paddingNeeded = (4 - (payload.Length % 4)) % 4;
+        payload += new string('=', paddingNeeded);
+
+        var decodedBytes = Convert.FromBase64String(payload);
+        var json = System.Text.Encoding.UTF8.GetString(decodedBytes);
+
+        var doc = System.Text.Json.JsonDocument.Parse(json);
+        var result = new Dictionary<string, object>();
+
+        foreach (var prop in doc.RootElement.EnumerateObject())
+        {
+            if (prop.Value.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                result[prop.Name] = prop.Value.GetString() ?? string.Empty;
+            }
+            else if (prop.Value.ValueKind == System.Text.Json.JsonValueKind.Number)
+            {
+                result[prop.Name] = prop.Value.GetInt64();
+            }
+            else if (prop.Value.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                var list = new List<string>();
+                foreach (var item in prop.Value.EnumerateArray())
+                {
+                    if (item.ValueKind == System.Text.Json.JsonValueKind.String)
+                        list.Add(item.GetString() ?? string.Empty);
+                }
+                result[prop.Name] = list;
+            }
+            else
+            {
+                result[prop.Name] = prop.Value;
+            }
+        }
+
+        return result;
+    }
 }

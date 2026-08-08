@@ -85,6 +85,10 @@ public class Program
                 Console.WriteLine($"Foundry Framework Unified Executable v{version} (.NET 10)");
                 return Task.FromResult(0);
             }),
+
+        new("token", "token mint [--signing-key <key>] [--sub <id>] [--role <role>]...",
+            "Mints an HS256 JWT for local dev / CI / service-to-service use.",
+            args => Task.FromResult(TokenMint.Handle(args))),
     ];
 
     public static async Task<int> Main(string[] args)

@@ -47,4 +47,9 @@
     <ProjectReference Include="../../../foundry-testing/src/Foundry.Testing/Foundry.Testing.csproj" />
     <ProjectReference Include="../../../foundry-connectors/src/Foundry.Connectors/Foundry.Connectors.csproj" />
   </ItemGroup>
+
+  <!-- JWT token signing for the 'token mint' command -->
+  <ItemGroup>
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" />
+  </ItemGroup>
 </Project>
