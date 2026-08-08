@@ -2,6 +2,10 @@
 
 Foundry is a high-performance, developer-centric rapid application development framework built on C# (.NET 10) and TypeScript (React 19 + Vite). It features visual domain schema compilation, automatic C# code generation, multi-protocol integration (REST, GraphQL, Kafka, WebSockets, FileIO, Connectors), multi-tenant isolation, native client SDK generation, and an autonomous multi-protocol testing engine.
 
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
 ---
 
 ## 🗺️ Project Architecture & Components

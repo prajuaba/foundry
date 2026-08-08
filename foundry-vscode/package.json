@@ -4,6 +4,7 @@
   "description": "Visual Domain Schema Compiler and RAD Studio for Foundry Framework (.NET 10 & React 19)",
   "version": "1.1.0",
   "publisher": "foundry",
+  "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.85.0"
   },
