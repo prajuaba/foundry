@@ -37,6 +37,15 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
     private readonly IWorkflowStateStore _stateStore;
     private readonly ICurrentUserContext? _userContext;
 
+    /// <summary>Delay function, injectable purely so tests can skip real wall-clock delays during retry backoff.</summary>
+    private readonly Func<TimeSpan, CancellationToken, Task> _delay;
+
+    /// <summary>Maximum choice-node hops before the routing chain is treated as a cycle.</summary>
+    private const int MaxChoiceDepth = 5;
+
+    /// <summary>Maximum retry attempts for an action that is configured as retryable.</summary>
+    private const int MaxActionAttempts = 3;
+
     /// <summary>
     /// Initializes a new instance of the <see cref="WorkflowTransitionBehavior{TRequest, TResponse}"/> class.
     /// </summary>
@@ -47,20 +56,20 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
     /// The caller's identity. Optional: a background or system-initiated transition has no user, and
     /// requiring one would make the workflow unusable outside a request.
     /// </param>
+    /// <param name="delay">Optional delay function for retries. Defaults to Task.Delay for production use.</param>
     public WorkflowTransitionBehavior(
         IWorkflowEngine workflowEngine,
         IWorkflowDefinitionProvider definitions,
         IWorkflowStateStore stateStore,
-        ICurrentUserContext? userContext = null)
+        ICurrentUserContext? userContext = null,
+        Func<TimeSpan, CancellationToken, Task>? delay = null)
     {
         _workflowEngine = workflowEngine ?? throw new ArgumentNullException(nameof(workflowEngine));
         _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _userContext = userContext;
+        _delay = delay ?? Task.Delay;
     }
-
-    /// <summary>Maximum choice-node hops before the routing chain is treated as a cycle.</summary>
-    private const int MaxChoiceDepth = 5;
 
     /// <inheritdoc />
     public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken ct)
@@ -200,21 +209,78 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
             throw;
         }
 
+        // Track succeeded actions for potential compensation: (original action config, execution detail)
+        var succeededActions = new List<(WorkflowActionConfig Action, ActionExecutionDetail Detail)>();
+
+        // Determine the action that failed, if any, for error reporting
+        ActionExecutionDetail? failedActionDetail = null;
+
         foreach (var action in transitionConfig.Actions ?? new List<WorkflowActionConfig>())
         {
-            var detail = await _workflowEngine.ExecuteActionAsync(
-                action.Type, action.RequestType, action.PayloadTemplate,
-                action.Method, action.Url, action.Headers, action.BodyTemplate, request, ct);
+            int attemptsRemaining = action.Retryable ? MaxActionAttempts : 1;
+            bool lastAttemptSucceeded = false;
 
-            actionDetails.Add(detail);
-
-            if (!detail.Success)
+            for (int attemptNumber = 1; attemptNumber <= MaxActionAttempts && attemptsRemaining > 0; attemptNumber++)
             {
+                var detail = await _workflowEngine.ExecuteActionAsync(
+                    action.Type, action.RequestType, action.PayloadTemplate,
+                    action.Method, action.Url, action.Headers, action.BodyTemplate, request, ct);
+
+                detail = detail with { AttemptNumber = attemptNumber };
+                actionDetails.Add(detail);
+
+                if (detail.Success)
+                {
+                    lastAttemptSucceeded = true;
+
+                    // Store succeeded action for potential compensation
+                    succeededActions.Add((action, detail));
+                    break; // Exit retry loop on success
+                }
+
+                failedActionDetail = detail;
+                attemptsRemaining--;
+                if (attemptsRemaining > 0)
+                {
+                    var delay = TimeSpan.FromSeconds(Math.Min(30, 2 * Math.Pow(2, attemptNumber)));
+                    await _delay(delay, ct);
+                }
+            }
+
+            if (!lastAttemptSucceeded)
+            {
+                // Execute compensation for all previously succeeded actions in reverse order
+                foreach (var (compensatedAction, compensatedDetail) in succeededActions.AsEnumerable().Reverse())
+                {
+                    var compensateConfig = compensatedAction.CompensateWith;
+                    if (compensateConfig != null)
+                    {
+                        var compensationDetail = await _workflowEngine.ExecuteActionAsync(
+                            compensateConfig.Type,
+                            compensateConfig.RequestType,
+                            compensateConfig.PayloadTemplate,
+                            compensateConfig.Method,
+                            compensateConfig.Url,
+                            compensateConfig.Headers,
+                            compensateConfig.BodyTemplate,
+                            request,
+                            ct);
+
+                        compensationDetail = compensationDetail with
+                        {
+                            IsCompensation = true,
+                            CompensatesActionName = compensatedDetail.ActionName
+                        };
+
+                        actionDetails.Add(compensationDetail);
+                    }
+                }
+
                 await AppendLogAsync(transitionRequest, workflowConfig, resolvedTargetState, operatorId,
-                    request, actionDetails, success: false, detail.ResponseBody, ct);
+                    request, actionDetails, success: false, failedActionDetail?.ResponseBody, ct);
 
                 throw new WorkflowException(
-                    $"Workflow action execution failed on '{detail.ActionName}': {detail.ResponseBody}");
+                    $"Workflow action execution failed on '{failedActionDetail?.ActionName}': {failedActionDetail?.ResponseBody}");
             }
         }
 

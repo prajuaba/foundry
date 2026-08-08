@@ -105,4 +105,19 @@ public record ActionExecutionDetail
     /// Gets or sets body response text if any.
     /// </summary>
     public string? ResponseBody { get; init; }
+
+    /// <summary>
+    /// Gets or sets the attempt number (1-indexed).
+    /// </summary>
+    public int AttemptNumber { get; init; } = 1;
+
+    /// <summary>
+    /// Gets or sets a value indicating whether this action is executing as compensation.
+    /// </summary>
+    public bool IsCompensation { get; init; }
+
+    /// <summary>
+    /// Gets or sets the name of the action being compensated, if any.
+    /// </summary>
+    public string? CompensatesActionName { get; init; }
 }

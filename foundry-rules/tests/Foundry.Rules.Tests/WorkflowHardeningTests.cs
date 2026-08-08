@@ -321,6 +321,8 @@ public class WorkflowHardeningTests
         private readonly WorkflowEngine _inner = new(new EmptyProvider());
         public List<string> Calls { get; } = [];
         public bool FailAction { get; init; }
+        public Queue<ActionExecutionDetail> ResultQueue { get; } = new();
+        public int ActionCallCount { get; private set; }
 
         public void ValidatePermission(string t, string s, List<string> tr, List<string> sr, IEnumerable<string> ur)
             => _inner.ValidatePermission(t, s, tr, sr, ur);
@@ -333,14 +335,26 @@ public class WorkflowHardeningTests
             Dictionary<string, string>? headers, string? bodyTemplate, object requestPayload, CancellationToken ct)
         {
             Calls.Add("action");
-            return Task.FromResult(new ActionExecutionDetail
+            ActionCallCount++;
+
+            if (ResultQueue.Count > 0)
+            {
+                var result = ResultQueue.Dequeue();
+                // Set AttemptNumber to the call count if it hasn't been set already
+                result = result with { AttemptNumber = result.AttemptNumber == 1 ? ActionCallCount : result.AttemptNumber };
+                return Task.FromResult(result);
+            }
+
+            // Fallback to original FailAction behavior when no queue is present
+            var fallback = new ActionExecutionDetail
             {
                 ActionType = actionType,
                 ActionName = "test",
                 Success = !FailAction,
                 StatusCode = FailAction ? 500 : 200,
-                ResponseBody = "body"
-            });
+                AttemptNumber = ActionCallCount
+            };
+            return Task.FromResult(fallback);
         }
     }
 
@@ -533,5 +547,293 @@ public class WorkflowHardeningTests
 
         // Redaction indicator should appear for the nested sensitive field
         Assert.Contains(WorkflowPayloadRedactor.Redacted, json);
+    }
+
+    // ---- NEW: Retry and Compensation tests ----
+
+    private static WorkflowActionConfig MakeRetryable(string actionName)
+        => new()
+        {
+            Type = "ExternalApi",
+            Url = $"https://example.invalid/{actionName}",
+            Method = "POST",
+            Headers = [],
+            BodyTemplate = "{}",
+            Retryable = true
+        };
+
+    private static WorkflowActionConfig MakeNonRetryable(string actionName)
+        => new()
+        {
+            Type = "ExternalApi",
+            Url = $"https://example.invalid/{actionName}",
+            Method = "POST",
+            Headers = [],
+            BodyTemplate = "{}"
+        };
+
+    [Fact]
+    public async Task RetryableActionWithThreeTotalAttemptsFailFailSucceed()
+    {
+        var engine = new RecordingEngine();
+        // Queue: fail, fail, succeed (3 total attempts due to MaxActionAttempts=3)
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail
+        { ActionType = "ExternalApi", ActionName = "action1", Success = false, StatusCode = 500 });
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail
+        { ActionType = "ExternalApi", ActionName = "action1", Success = false, StatusCode = 500 });
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail
+        { ActionType = "ExternalApi", ActionName = "action1", Success = true, StatusCode = 200 });
+
+        var store = new FakeStore(new StatefulEntity());
+
+        var wfConfig = new WorkflowConfig
+        {
+            Id = "order_wf",
+            Entity = "Order",
+            Version = "1.0.0",
+            IsActive = true,
+            States = [new WorkflowStateConfig { Name = "Draft", IsInitial = true }],
+            Transitions =
+            [
+                new WorkflowTransitionConfig
+                {
+                    Id = "submit",
+                    FromState = "Draft",
+                    ToState = "Submitted",
+                    Actions = [MakeRetryable("action1")]
+                }
+            ]
+        };
+
+        var behavior = new WorkflowTransitionBehavior<TransitionCommand, Unit>(
+            engine, new FakeDefinitions(wfConfig), store, delay: (_, _) => Task.CompletedTask);
+
+        await behavior.Handle(new TransitionCommand(), () => Task.FromResult(Unit.Value), default);
+
+        Assert.Equal(3, engine.ActionCallCount);
+        Assert.Single(store.Saved);
+        Assert.Equal("Submitted", store.Saved[0].CurrentState);
+
+        var log = Assert.Single(store.Logs);
+        Assert.True(log.Success);
+        Assert.Equal(3, log.ExecutedActions.Count);
+        Assert.Equal(new[] { false, false, true }, log.ExecutedActions.Select(a => a.Success));
+        Assert.Equal(new[] { 1, 2, 3 }, log.ExecutedActions.Select(a => a.AttemptNumber));
+    }
+
+    [Fact]
+    public async Task RetryableActionExhaustsAllRetriesFailFailFail()
+    {
+        var engine = new RecordingEngine();
+        // Queue: fail, fail, fail (MaxActionAttempts=3)
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail
+        { ActionType = "ExternalApi", ActionName = "action1", Success = false, StatusCode = 500 });
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail
+        { ActionType = "ExternalApi", ActionName = "action1", Success = false, StatusCode = 500 });
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail
+        { ActionType = "ExternalApi", ActionName = "action1", Success = false, StatusCode = 500 });
+
+        var store = new FakeStore(new StatefulEntity());
+
+        var wfConfig = new WorkflowConfig
+        {
+            Id = "order_wf",
+            Entity = "Order",
+            Version = "1.0.0",
+            IsActive = true,
+            States = [new WorkflowStateConfig { Name = "Draft", IsInitial = true }],
+            Transitions =
+            [
+                new WorkflowTransitionConfig
+                {
+                    Id = "submit",
+                    FromState = "Draft",
+                    ToState = "Submitted",
+                    Actions = [MakeRetryable("action1")]
+                }
+            ]
+        };
+
+        var behavior = new WorkflowTransitionBehavior<TransitionCommand, Unit>(
+            engine, new FakeDefinitions(wfConfig), store, delay: (_, _) => Task.CompletedTask);
+
+        await Assert.ThrowsAsync<WorkflowException>(() =>
+            behavior.Handle(new TransitionCommand(), () => Task.FromResult(Unit.Value), default));
+
+        Assert.Equal(3, engine.ActionCallCount);
+        Assert.Empty(store.Saved);
+
+        var log = Assert.Single(store.Logs);
+        Assert.False(log.Success);
+        Assert.Equal(3, log.ExecutedActions.Count);
+        Assert.All(log.ExecutedActions, a => Assert.False(a.Success));
+        Assert.Equal(new[] { 1, 2, 3 }, log.ExecutedActions.Select(a => a.AttemptNumber));
+    }
+
+    [Fact]
+    public async Task ThreeActionsWithCompensationTwoSucceedThirdFails()
+    {
+        var engine = new RecordingEngine();
+        // A succeeds, B succeeds, C fails
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail { ActionType = "ExternalApi", ActionName = "A", Success = true, StatusCode = 200 });
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail { ActionType = "ExternalApi", ActionName = "B", Success = true, StatusCode = 200 });
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail { ActionType = "ExternalApi", ActionName = "C", Success = false, StatusCode = 500 });
+        // B's compensation succeeds
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail { ActionType = "ExternalApi", ActionName = "Compensate B", Success = true, StatusCode = 200 });
+        // A's compensation succeeds
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail { ActionType = "ExternalApi", ActionName = "Compensate A", Success = true, StatusCode = 200 });
+
+        var compensateA = new WorkflowActionConfig
+        {
+            Type = "ExternalApi",
+            Url = "https://example.invalid/comp-a",
+            Method = "POST",
+            Headers = [],
+            BodyTemplate = "{}"
+        };
+        var compensateB = new WorkflowActionConfig
+        {
+            Type = "ExternalApi",
+            Url = "https://example.invalid/comp-b",
+            Method = "POST",
+            Headers = [],
+            BodyTemplate = "{}"
+        };
+
+        var store = new FakeStore(new StatefulEntity());
+
+        var wfConfig = new WorkflowConfig
+        {
+            Id = "order_wf",
+            Entity = "Order",
+            Version = "1.0.0",
+            IsActive = true,
+            States = [new WorkflowStateConfig { Name = "Draft", IsInitial = true }],
+            Transitions =
+            [
+                new WorkflowTransitionConfig
+                {
+                    Id = "submit",
+                    FromState = "Draft",
+                    ToState = "Submitted",
+                    Actions =
+                    [
+                        new WorkflowActionConfig { Type = "ExternalApi", Url = "https://example.invalid/A", Method = "POST", Headers = [], BodyTemplate = "{}", CompensateWith = compensateA },
+                        new WorkflowActionConfig { Type = "ExternalApi", Url = "https://example.invalid/B", Method = "POST", Headers = [], BodyTemplate = "{}", CompensateWith = compensateB },
+                        MakeNonRetryable("C")
+                    ]
+                }
+            ]
+        };
+
+        var behavior = new WorkflowTransitionBehavior<TransitionCommand, Unit>(
+            engine, new FakeDefinitions(wfConfig), store);
+
+        await Assert.ThrowsAsync<WorkflowException>(() =>
+            behavior.Handle(new TransitionCommand(), () => Task.FromResult(Unit.Value), default));
+
+        var log = Assert.Single(store.Logs);
+        Assert.False(log.Success);
+        Assert.Equal(5, log.ExecutedActions.Count);
+
+        // Order: A success (1), B success (2), C failure (3), Compensate B (4), Compensate A (5)
+        Assert.Equal("A", log.ExecutedActions[0].ActionName);
+        Assert.True(log.ExecutedActions[0].Success);
+        Assert.False(log.ExecutedActions[0].IsCompensation);
+
+        Assert.Equal("B", log.ExecutedActions[1].ActionName);
+        Assert.True(log.ExecutedActions[1].Success);
+        Assert.False(log.ExecutedActions[1].IsCompensation);
+
+        Assert.Equal("C", log.ExecutedActions[2].ActionName);
+        Assert.False(log.ExecutedActions[2].Success);
+        Assert.False(log.ExecutedActions[2].IsCompensation);
+
+        Assert.Equal("Compensate B", log.ExecutedActions[3].ActionName);
+        Assert.True(log.ExecutedActions[3].Success);
+        Assert.True(log.ExecutedActions[3].IsCompensation);
+        Assert.Equal("B", log.ExecutedActions[3].CompensatesActionName);
+
+        Assert.Equal("Compensate A", log.ExecutedActions[4].ActionName);
+        Assert.True(log.ExecutedActions[4].Success);
+        Assert.True(log.ExecutedActions[4].IsCompensation);
+        Assert.Equal("A", log.ExecutedActions[4].CompensatesActionName);
+    }
+
+    [Fact]
+    public async Task CompensationItselfFailsBUTCompensationsCompleteSweep()
+    {
+        var engine = new RecordingEngine();
+        // A succeeds, B succeeds, C fails, Comp B fails, Comp A succeeds
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail { ActionType = "ExternalApi", ActionName = "A", Success = true, StatusCode = 200 });
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail { ActionType = "ExternalApi", ActionName = "B", Success = true, StatusCode = 200 });
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail { ActionType = "ExternalApi", ActionName = "C", Success = false, StatusCode = 500 });
+        // B's compensation fails
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail { ActionType = "ExternalApi", ActionName = "Compensate B", Success = false, StatusCode = 500 });
+        // A's compensation succeeds (even though B's failed - sweep continues)
+        engine.ResultQueue.Enqueue(new ActionExecutionDetail { ActionType = "ExternalApi", ActionName = "Compensate A", Success = true, StatusCode = 200 });
+
+        var compensateA = new WorkflowActionConfig
+        {
+            Type = "ExternalApi",
+            Url = "https://example.invalid/comp-a",
+            Method = "POST",
+            Headers = [],
+            BodyTemplate = "{}"
+        };
+        var compensateB = new WorkflowActionConfig
+        {
+            Type = "ExternalApi",
+            Url = "https://example.invalid/comp-b",
+            Method = "POST",
+            Headers = [],
+            BodyTemplate = "{}"
+        };
+
+        var store = new FakeStore(new StatefulEntity());
+
+        var wfConfig = new WorkflowConfig
+        {
+            Id = "order_wf",
+            Entity = "Order",
+            Version = "1.0.0",
+            IsActive = true,
+            States = [new WorkflowStateConfig { Name = "Draft", IsInitial = true }],
+            Transitions =
+            [
+                new WorkflowTransitionConfig
+                {
+                    Id = "submit",
+                    FromState = "Draft",
+                    ToState = "Submitted",
+                    Actions =
+                    [
+                        new WorkflowActionConfig { Type = "ExternalApi", Url = "https://example.invalid/A", Method = "POST", Headers = [], BodyTemplate = "{}", CompensateWith = compensateA },
+                        new WorkflowActionConfig { Type = "ExternalApi", Url = "https://example.invalid/B", Method = "POST", Headers = [], BodyTemplate = "{}", CompensateWith = compensateB },
+                        MakeNonRetryable("C")
+                    ]
+                }
+            ]
+        };
+
+        var behavior = new WorkflowTransitionBehavior<TransitionCommand, Unit>(
+            engine, new FakeDefinitions(wfConfig), store);
+
+        await Assert.ThrowsAsync<WorkflowException>(() =>
+            behavior.Handle(new TransitionCommand(), () => Task.FromResult(Unit.Value), default));
+
+        var log = Assert.Single(store.Logs);
+        Assert.False(log.Success);
+        Assert.Equal(5, log.ExecutedActions.Count);
+
+        // Compensation order: B then A (reverse of original execution order)
+        // Even though Compensate B failed, the sweep continued to Compensate A
+        Assert.True(log.ExecutedActions[3].IsCompensation);
+        Assert.Equal("B", log.ExecutedActions[3].CompensatesActionName);
+        Assert.False(log.ExecutedActions[3].Success);
+
+        Assert.True(log.ExecutedActions[4].IsCompensation);
+        Assert.Equal("A", log.ExecutedActions[4].CompensatesActionName);
+        Assert.True(log.ExecutedActions[4].Success);
     }
 }

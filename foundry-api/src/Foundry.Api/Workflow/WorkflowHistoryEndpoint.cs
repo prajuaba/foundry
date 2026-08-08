@@ -176,12 +176,24 @@ public sealed record WorkflowHistoryAction
     /// <summary>The status it reported.</summary>
     public required int StatusCode { get; init; }
 
+    /// <summary>The attempt number (1-indexed).</summary>
+    public int AttemptNumber { get; init; }
+
+    /// <summary>Whether this action is executing as compensation.</summary>
+    public bool IsCompensation { get; init; }
+
+    /// <summary>The name of the action being compensated, if any.</summary>
+    public string? CompensatesActionName { get; init; }
+
     internal static WorkflowHistoryAction From(ActionExecutionDetail detail) => new()
     {
         ActionType = detail.ActionType,
         ActionName = detail.ActionName,
         Success = detail.Success,
-        StatusCode = detail.StatusCode
+        StatusCode = detail.StatusCode,
+        AttemptNumber = detail.AttemptNumber,
+        IsCompensation = detail.IsCompensation,
+        CompensatesActionName = detail.CompensatesActionName
 
         // ResponseBody is deliberately not projected. It is whatever an external system returned, of
         // unbounded size and unreviewed content, and an action can target any URL the workflow names
