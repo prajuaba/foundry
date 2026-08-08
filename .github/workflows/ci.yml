@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main, master, 'feature/**']
+    tags: ['v*']
   pull_request:
     branches: [main, master]
   workflow_dispatch:
@@ -207,10 +208,15 @@ jobs:
       - name: Publish and verify the foundry binary
         run: bash scripts/build-distro.sh linux-x64 "${{ steps.version.outputs.version }}"
 
-      # Uploaded only for main, where it is the build someone might actually want to install.
-      # Pull requests get the verification without paying to store a 60 MB artifact per run.
+      # Uploaded for main and for a version tag, where it is a build someone might actually want to
+      # install. Pull requests get the verification without paying to store a 60 MB artifact per run.
+      #
+      # A tag push alone never reached this condition before: the workflow's own `on: push:` had no
+      # `tags:` trigger, so pushing a tag ran no workflow at all, and this condition additionally
+      # named only `refs/heads/main` -- so even a manual run against a tag skipped the upload. Tagging
+      # v1.0.0 is what caught it: the artifact RELEASING.md promises never actually got produced.
       - name: Upload binary
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: foundry-linux-x64-${{ steps.version.outputs.version }}
