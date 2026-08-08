@@ -1860,3 +1860,80 @@ falling back to a published key — and not one of them was found by anything au
 was behaving correctly by its own definition. That gap is not closed and probably cannot be closed by
 tooling. It is closed by someone reading the code with the right question, which is now the first item
 in section 6 rather than an afterthought.
+
+---
+
+## 8. Addendum — 2026-08-08
+
+A production-readiness review external to this document (not one of the five security reviews above)
+concluded the same thing section 7 already said — not production-ready, closer than it was — and named
+six concrete gaps, four of them lifted straight from section 5 and 6 above rather than newly found.
+This addendum records what closed and what did not, in the same register as the rest of the document:
+what changed, not why it should be believed to be enough.
+
+**Closed, matching section 5's own description of the fix:**
+
+- **The bulk-write OCC asymmetry**, named in section 5 as "now exactly the cheap defence-in-depth
+  change described above, with no error-reporting problem attached to it." Both `BulkUpdateManyAsync`
+  and `BulkUpdateAsync` now build their optimistic-concurrency filter through the same scoped
+  `_writeGuard.OccFilter` every single-document write path already used, instead of the static
+  unscoped one. `EntityWriteGuardTests.TheBulkFilterIsNotTenantScoped` — the characterization test
+  that pinned the old behaviour — is renamed and its assertion inverted, and a cross-tenant refusal
+  test now exists for the bulk path the way it already did for single-document writes.
+- **Group claim names**, named in section 5 as "read from `groups` and `group` and are not
+  configurable." `FoundryAuthenticationOptions.GroupClaimTypes` now exists, bound the same way
+  `RoleClaimType` already was, and pushes into `Foundry.Core.Security.GroupClaims.Types` — kept as a
+  settable static rather than reaching across the `foundry-mongo` → `foundry-api` assembly boundary.
+- **`InternalApi`'s reflection scan**, named in section 5 as "Not fixed, and named because a reviewer
+  should not have to rediscover it." A `WorkflowCommandTypeRegistry` now exists in `foundry-api`,
+  mirroring `WorkflowEntityTypeRegistry`'s own design exactly — explicit registration, actionable
+  failure on a miss — reached through an `IWorkflowCommandTypeResolver` interface in `foundry-rules`
+  so the dependency direction stays intact. Finding this fix's first draft is itself a small data point
+  for section 6's thesis: it passed `foundry-rules`' own test suite, and broke a pre-existing test in
+  `foundry-api`'s — `WorkflowEngineTests`, which constructs `WorkflowEngine` directly rather than
+  through DI — that a narrower test run did not touch. Caught by running the whole suite, not by
+  reading either change.
+- **The archival sweep's unbounded load**, named in section 5 as "nothing here has been run at a size
+  where that bites, so this is a stated limit rather than a measured one." `ProcessPartitionedTypeAsync`
+  now chunks its read against the same `_id`-ordered filter the sweep already used — because archiving
+  deletes what it processes, repeating the filter naturally yields the next batch — so neither the
+  in-memory load nor a single transaction is sized by how much a type has accumulated.
+
+**Named in section 5, addressed but not closed the way the item asked:**
+
+- **The no-roles transition/state gap** — section 5's own framing was "worth an explicit decision per
+  workflow rather than a default nobody looked at," and that is what shipped: a schema-validation
+  warning (`FDY3021`) when a transition or state declares no roles, not a change to the runtime
+  default. The behaviour section 5 described is unchanged; it is now visible at compile time instead
+  of silent.
+- **Payload redaction's top-level-only limit** — extended one level of nesting, not the full recursive
+  walk section 5 judged "a larger thing than this needs to be" and declined for the same reason here.
+  A sensitive value two levels deep still reaches the activity log un-redacted; the class's own remarks
+  say so now, where they previously said only "top-level."
+
+**Not named in section 5 — a different kind of gap, found by the same question ("is this
+production-ready?") asked of the *project* rather than the runtime:**
+
+- No LICENSE existed. Now Apache-2.0, repo-wide.
+- No version discipline existed: no git tags, no `Directory.Build.props`, and `foundry version` printed
+  a hardcoded string that had already drifted from what `foundry doctor` read off the assembly. Fixed
+  with a single version source and CI wired to stamp it into the distro binary and its artifact name —
+  which promptly caught its own bug: `git describe --tags --always` never fails, so with no tags yet it
+  silently returned a bare commit hash instead of a version, and that non-numeric string reached
+  `-p:Version=` and failed the build. Not caught by writing the fix or by the local build — the local
+  publish target didn't match the CI runner's architecture, so it was the actual CI run, on the actual
+  runner, that found it. One more instance of section 6's distinction: reading the script found nothing
+  wrong with it; running it did.
+
+**Verification.** Full solution: 1,124 tests, 0 failures, across 14 suites (`bash scripts/run-tests.sh`,
+against a live replica-set Mongo, standalone Mongo, and Kafka broker — the same infrastructure-gated
+suites section 4 describes). CI: all 7 jobs green on the commit that includes this addendum, including
+`distro-binary`, the job that failed on the first push of this cycle for the reason above and is now
+fixed.
+
+**What this addendum does not claim.** Every item section 5 marked "would block a regulated
+deployment" and did not name above is still open: masking is still scope-only, an unauthenticated
+principal is still unnarrowed by ownership on reads, there is still no token issuance story. The
+base rate in section 6 — running finds what reading missed, and reading-for-permission finds what
+running missed — is not retired by this cycle either; it produced one more confirming data point
+(the CI version bug) rather than a reason to stop asking the question.
