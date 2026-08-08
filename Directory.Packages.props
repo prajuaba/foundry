@@ -71,6 +71,13 @@
     <PackageVersion Include="FluentAssertions" Version="6.12.0" />
     <PackageVersion Include="Moq" Version="4.20.72" />
     <PackageVersion Include="System.ServiceModel.Http" Version="8.1.1" />
-    <PackageVersion Include="System.IdentityModel.Tokens.Jwt" Version="8.2.1" />
+    <!-- Pinned to 8.0.1, not a newer version: CentralPackageTransitivePinningEnabled applies this
+         version solution-wide, and Microsoft.AspNetCore.Authentication.JwtBearer 10.0.0 already
+         needs Microsoft.IdentityModel.Tokens 8.0.1 transitively (via
+         Microsoft.IdentityModel.Protocols.OpenIdConnect 8.0.1). Pinning this package to 8.2.1 forced
+         a mismatched Microsoft.IdentityModel.Tokens onto foundry-api too, which failed at runtime
+         with FileNotFoundException, caught by the runtime smoke test's CI job rather than by any
+         local build or unit test. -->
+    <PackageVersion Include="System.IdentityModel.Tokens.Jwt" Version="8.0.1" />
   </ItemGroup>
 </Project>
