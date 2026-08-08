@@ -192,13 +192,20 @@ jobs:
       # runners cost several times more per minute. A RID-specific packaging break would still get
       # through; that is a deliberate trade, not an oversight.
       #
+      # Capture the git version for artifact naming
+      - name: Capture version
+        id: version
+        run: |
+          VERSION=$(git describe --tags --always 2>/dev/null || echo "1.0.0")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       # The script publishes and then runs the binary: version, the non-zero exit on no arguments,
       # validate, schema build, and serving the embedded Studio page. That last one is the reason a
       # build step alone would not be enough -- the Studio bundle is embedded as a resource and its
       # absence is only an MSBuild warning, so a publish that omits it succeeds and ships a CLI
       # whose `foundry studio` command silently does nothing.
       - name: Publish and verify the foundry binary
-        run: bash scripts/build-distro.sh linux-x64
+        run: bash scripts/build-distro.sh linux-x64 "${{ steps.version.outputs.version }}"
 
       # Uploaded only for main, where it is the build someone might actually want to install.
       # Pull requests get the verification without paying to store a 60 MB artifact per run.
@@ -206,7 +213,7 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
-          name: foundry-linux-x64
+          name: foundry-linux-x64-${{ steps.version.outputs.version }}
           path: dist-bin/foundry
           retention-days: 14
           if-no-files-found: error

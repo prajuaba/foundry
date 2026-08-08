@@ -48,5 +48,6 @@ graph TD
 
 ## ⚡ Quick Links
 * **Repository Root README**: [README.md](../README.md)
+* **Changelog**: [CHANGELOG.md](../CHANGELOG.md)
 * **Sample Showcase App**: [samples/Foundry.E2E.Showcase](../samples/Foundry.E2E.Showcase/)
 * **Integration Tests**: [foundry-integration-tests](../foundry-integration-tests/)

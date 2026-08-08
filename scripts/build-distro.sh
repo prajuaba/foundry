@@ -23,6 +23,7 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
 RID="${1:-}"
+VERSION="${2:-}"
 if [ -z "$RID" ]; then
   case "$(uname -s)/$(uname -m)" in
     Darwin/arm64)  RID=osx-arm64  ;;
@@ -33,6 +34,11 @@ if [ -z "$RID" ]; then
        echo "Pass one explicitly, e.g. $0 linux-x64" >&2
        exit 1 ;;
   esac
+fi
+
+# Default version to git describe output or fallback to 1.0.0
+if [ -z "$VERSION" ]; then
+  VERSION=$(git describe --tags --always 2>/dev/null || echo "1.0.0")
 fi
 
 OUT="$ROOT/dist-bin"
@@ -49,12 +55,13 @@ if [ ! -f "$BUNDLE" ]; then
   exit 1
 fi
 
-echo "==> Publishing foundry ($RID)"
+echo "==> Publishing foundry ($RID) version $VERSION"
 rm -rf "$OUT"
 dotnet publish "$ROOT/foundry-cli/src/Foundry.Cli/Foundry.Cli.csproj" \
   --configuration Release \
   --runtime "$RID" \
   -p:SelfContained=true \
+  -p:Version="$VERSION" \
   --output "$OUT"
 
 BIN="$OUT/foundry"

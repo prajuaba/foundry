@@ -80,7 +80,11 @@ public class Program
             HandleEvalCommandAsync),
 
         new("version", "version", "Prints the executable framework version.",
-            _ => { Console.WriteLine("Foundry Framework Unified Executable v1.0.0 (.NET 10)"); return Task.FromResult(0); }),
+            _ => {
+                var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+                Console.WriteLine($"Foundry Framework Unified Executable v{version} (.NET 10)");
+                return Task.FromResult(0);
+            }),
     ];
 
     public static async Task<int> Main(string[] args)
