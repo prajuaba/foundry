@@ -489,4 +489,49 @@ public class WorkflowHardeningTests
         Assert.DoesNotContain("4111111111111111", log.PayloadDetails);
         Assert.Contains("INV-001", log.PayloadDetails);
     }
+
+    // ---- nested redaction (one level deep) ----
+
+    private sealed record NestedCommand : IRequest<Unit>, IWorkflowTransitionRequest
+    {
+        public string EntityId { get; init; } = "6a65ba09986eed749ed7e968";
+        public string EntityType { get; init; } = "Order";
+        public string TransitionId { get; init; } = "submit";
+        public string FromState { get; init; } = "Draft";
+        public string ToState { get; init; } = "Submitted";
+
+        // Non-sensitive top-level property to verify it's preserved
+        public string ReferenceNumber { get; init; } = "REF-12345";
+
+        // Nested object with mixed sensitivity
+        public CustomerData Customer { get; init; } = new();
+    }
+
+    private sealed record CustomerData
+    {
+        // Non-sensitive nested property
+        public string Name { get; init; } = "John Doe";
+
+        // Sensitive nested property (one level deep)
+        [PiiData(PiiType.Email)]
+        public string Email { get; init; } = "john.doe@example.com";
+    }
+
+    [Fact]
+    public void NestedSensitiveValuesAreRedactedOneLevel()
+    {
+        var json = WorkflowPayloadRedactor.Serialize(new NestedCommand());
+
+        // Non-sensitive top-level property should be present
+        Assert.Contains("REF-12345", json);
+
+        // Non-sensitive nested property (one level deep) should be present
+        Assert.Contains("\"Name\":\"John Doe\"", json);
+
+        // Sensitive nested property (one level deep) should NOT appear in plaintext
+        Assert.DoesNotContain("john.doe@example.com", json);
+
+        // Redaction indicator should appear for the nested sensitive field
+        Assert.Contains(WorkflowPayloadRedactor.Redacted, json);
+    }
 }

@@ -26,10 +26,14 @@ namespace Foundry.Rules;
 /// entity's own protections key off, so the two cannot disagree about what is sensitive.
 /// </para>
 /// <para>
-/// Top-level properties only. Transition commands are flat records by construction; a nested object
-/// is serialised whole, and a sensitive value hidden inside one would not be caught. That is a real
-/// limit rather than an oversight, and the alternative — a recursive walk with cycle detection over
-/// arbitrary caller types — is a larger thing than this needs to be.
+/// Top-level properties are always checked for sensitivity. For non-sensitive top-level properties,
+/// if the declared type is a non-primitive, non-collection class or record, direct nested public
+/// properties are examined for sensitivity as well: sensitive ones are redacted, non-sensitive
+/// ones are included normally. This allows one level of nesting to be redacted correctly. Properties
+/// nested two or more levels deep remain unexamined—their values fall back to SafeRead's ToString()
+/// as before. Collections (arrays, lists) are never opened for nesting and use SafeRead's ToString()
+/// directly. This one-level limit respects the design trade-off: it catches common nested patterns
+/// without the complexity of unbounded recursion and cycle detection.
 /// </para>
 /// </remarks>
 public static class WorkflowPayloadRedactor
@@ -50,9 +54,33 @@ public static class WorkflowPayloadRedactor
                          .GetProperties(BindingFlags.Public | BindingFlags.Instance)
                          .Where(p => p.CanRead && p.GetIndexParameters().Length == 0))
             {
-                projection[property.Name] = IsSensitive(property)
-                    ? Redacted
-                    : SafeRead(property, request);
+                if (IsSensitive(property))
+                {
+                    projection[property.Name] = Redacted;
+                }
+                else if (IsEligibleForNestedRedaction(property.PropertyType))
+                {
+                    try
+                    {
+                        var value = property.GetValue(request);
+                        if (value != null)
+                        {
+                            projection[property.Name] = ProcessNestedObject(value);
+                        }
+                        else
+                        {
+                            projection[property.Name] = null;
+                        }
+                    }
+                    catch (TargetInvocationException)
+                    {
+                        projection[property.Name] = "[unreadable]";
+                    }
+                }
+                else
+                {
+                    projection[property.Name] = SafeRead(property, request);
+                }
             }
 
             return JsonSerializer.Serialize(projection);
@@ -93,5 +121,40 @@ public static class WorkflowPayloadRedactor
         {
             return "[unreadable]";
         }
+    }
+
+    private static bool IsEligibleForNestedRedaction(Type type)
+    {
+        if (type == typeof(string) || type.IsEnum) return false;
+        if (type.IsPrimitive || type == typeof(decimal) ||
+            type == typeof(DateTime) || type == typeof(DateTimeOffset) ||
+            type == typeof(Guid) || type == typeof(bool)) return false;
+
+        // Exclude value types and collections
+        if (type.IsValueType) return false;
+        if (type.IsArray) return false;
+        if (typeof(System.Collections.IEnumerable).IsAssignableFrom(type)) return false;
+
+        return true;
+    }
+
+    private static Dictionary<string, object?> ProcessNestedObject(object nested)
+    {
+        var dict = new Dictionary<string, object?>(StringComparer.Ordinal);
+
+        foreach (var property in nested.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                     .Where(p => p.CanRead && p.GetIndexParameters().Length == 0))
+        {
+            if (IsSensitive(property))
+            {
+                dict[property.Name] = Redacted;
+            }
+            else
+            {
+                dict[property.Name] = SafeRead(property, nested);
+            }
+        }
+
+        return dict;
     }
 }
