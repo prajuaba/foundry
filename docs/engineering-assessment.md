@@ -1937,3 +1937,65 @@ principal is still unnarrowed by ownership on reads, there is still no token iss
 base rate in section 6 — running finds what reading missed, and reading-for-permission finds what
 running missed — is not retired by this cycle either; it produced one more confirming data point
 (the CI version bug) rather than a reason to stop asking the question.
+
+---
+
+## 9. Addendum — 2026-08-08 (second)
+
+The three items section 8 explicitly left open — masking is scope-only, no token issuance story,
+unauthenticated reads unnarrowed — are the same three this addendum closes. Same day as section 8;
+a separate cycle, so it stays a separate entry rather than folding into it.
+
+**Masking now accepts roles, not only scopes.** `[SensitiveData]` and `[PiiData]` both gained a
+`Roles` property (empty by default); `EntityAccessPolicy.ShouldMask` and
+`EnsureCriteriaAreFilterable` entitle on the scope *or* a held role, reusing `HoldsAnyRole` rather
+than adding a second way to read claims. Per-category independence — the property this document
+spent real effort proving in the section 3 masking work — was the thing most at risk of a role-based
+addition and is the thing most carefully re-tested: a role for one category still does not touch
+another, exactly as a scope for one category never did.
+
+**`foundry token mint` exists.** Nothing in this repository had ever minted a JWT outside a bash
+test helper. Shipped as a CLI command rather than an HTTP endpoint, deliberately: there is still no
+user or credential store anywhere in the framework, so a real login flow was never on the table
+without building one from nothing, which is the thing this document's own "right split" framing
+argued against building. A CLI tool serves exactly the case the framework already documented and
+never delivered — a self-issued token, inside a trust boundary — without adding a new
+always-reachable surface to every generated app.
+
+**An unauthenticated caller reading an owner-scoped entity now sees nothing, not everything.** This
+document called the open behavior deliberate, citing background jobs, migrations, and the archival
+worker as callers that need it. None of the three do: the archival worker and the sample migration
+runner both talk to MongoDB directly and never reach `EntityAccessPolicy`, and the outbox worker's
+one read through the repository layer is against an entity that was never owner-scoped to begin
+with. The citation was wrong, and finding that out is what made the default worth changing rather
+than merely documenting. `FoundryMongoOptions.AllowUnauthenticatedFullReads` restores the old
+behavior, named the same way `TrustCallerAssertedTenant` names its own boundary, for whatever
+legitimate case this repository has not yet needed.
+
+**A regression the work introduced, caught before it shipped rather than after.** Pinning
+`System.IdentityModel.Tokens.Jwt` for the CLI command rippled solution-wide through
+`CentralPackageTransitivePinningEnabled` — the same mechanism this file's own header comment
+documents as existing on purpose, to patch one transitive dependency from a single place — and
+forced a `Microsoft.IdentityModel.Tokens` version onto `foundry-api` that its actual JwtBearer
+dependency chain does not use. Every unit suite stayed green throughout, because none of them run a
+generated application and ask it to validate a real token; the runtime smoke test did exactly that,
+and failed with `FileNotFoundException` the moment a scaffolded app tried to authenticate a request.
+Fixed by pinning to the version JwtBearer's own chain already resolves, so nothing needs two
+different copies of the same assembly. Recorded here because it is this document's own thesis played
+out at a smaller scale: a defect with a real, checkable symptom, invisible to a fast unit-only gate
+and caught by the one gate that runs the thing for real. It was caught during this same push, not
+merely typed as a lesson: `git commit` naming the failure follows the `git commit` that broke it by
+one entry in this same session's history, both before the next push.
+
+**Unexplained, and left that way rather than quietly worked around.** A separate CI run hung with
+zero output for roughly twelve minutes inside `Foundry.Schema.Compiler.Tests` — a project untouched
+by any of this cycle's four commits — then completed normally in 2m25s on an unmodified re-run of
+the same commit. Treated as infrastructure flake rather than investigated further, on the same
+standard this document applies to itself elsewhere: a hang that does not reproduce and touches code
+nothing in the change touched is not evidence of a defect, and calling it one without a second data
+point would be exactly the kind of unfounded confidence this document exists to argue against.
+
+Verification: 1,146 tests, 0 failures, across 14 suites, plus the runtime smoke test run directly
+(not inferred from CI) after the version-pin fix, specifically to confirm the failure it fixed was
+actually gone rather than trusting a second green run to mean the same thing as a first one would
+have. All 7 CI jobs green on the commit this addendum ships with.
