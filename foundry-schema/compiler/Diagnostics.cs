@@ -293,6 +293,15 @@ namespace Foundry.Schema.Compiler
         /// <summary>A workflow state or transition declares no roles, which means any authenticated caller can reach it.</summary>
         public const string WorkflowEmptyRoles = "FDY3021";
 
+        /// <summary>A workflow action has an unrecognized Type (must be "InternalApi" or "ExternalApi").</summary>
+        public const string WorkflowActionUnrecognizedType = "FDY3022";
+
+        /// <summary>An InternalApi workflow action is missing the required RequestType field.</summary>
+        public const string WorkflowActionMissingRequestType = "FDY3023";
+
+        /// <summary>An ExternalApi workflow action is missing the required Url field.</summary>
+        public const string WorkflowActionMissingUrl = "FDY3024";
+
         // ---- FDY4xxx: naming and identifier safety ----
 
         /// <summary>A name is not a valid C# identifier and cannot be emitted as code.</summary>
@@ -392,7 +401,10 @@ namespace Foundry.Schema.Compiler
             [ReservedKeyword] = "The name is a reserved C# keyword. Choose a different name.",
             [InvalidNamespace] = "The namespace must be dot-separated valid C# identifiers, e.g. 'Acme.Billing'.",
             [UnsafeAttributeArgument] = "The attribute argument contains quote, backslash or brace characters that cannot be safely emitted.",
-            [WorkflowEmptyRoles] = "A workflow state or transition with no roles is reachable by any authenticated caller. If this is intentional, no action is needed."
+            [WorkflowEmptyRoles] = "A workflow state or transition with no roles is reachable by any authenticated caller. If this is intentional, no action is needed.",
+            [WorkflowActionUnrecognizedType] = "A workflow action's 'type' must be either 'InternalApi' or 'ExternalApi'. Other values like 'Webhook' or 'Command' are not supported by the workflow engine and will fail at runtime.",
+            [WorkflowActionMissingRequestType] = "An InternalApi action requires a 'requestType' field naming the command to dispatch internally.",
+            [WorkflowActionMissingUrl] = "An ExternalApi action requires a 'url' field for the external HTTP endpoint."
         };
     }
 }

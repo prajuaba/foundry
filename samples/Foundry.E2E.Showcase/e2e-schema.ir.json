@@ -661,13 +661,19 @@
           ],
           "actions": [
             {
-              "type": "Webhook",
+              "type": "ExternalApi",
               "method": "POST",
               "url": "https://hooks.internal.example/order-approved",
               "headers": {
                 "X-Source": "foundry-showcase"
               },
-              "bodyTemplate": "{\"orderNumber\":\"{{OrderNumber}}\",\"amount\":\"{{TotalAmount}}\"}"
+              "bodyTemplate": "{\"orderNumber\":\"{{OrderNumber}}\",\"amount\":\"{{TotalAmount}}\"}",
+              "retryable": true,
+              "compensateWith": {
+                "type": "InternalApi",
+                "requestType": "UndoOrderApprovalCommand",
+                "payloadTemplate": "{\"orderNumber\":\"{{OrderNumber}}\"}"
+              }
             }
           ]
         },
@@ -683,9 +689,10 @@
           ],
           "actions": [
             {
-              "type": "Command",
+              "type": "InternalApi",
               "requestType": "OrderSummary",
-              "payloadTemplate": "{\"orderNumber\":\"{{OrderNumber}}\"}"
+              "payloadTemplate": "{\"orderNumber\":\"{{OrderNumber}}\"}",
+              "retryable": false
             }
           ]
         },

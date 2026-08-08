@@ -548,6 +548,12 @@
         },
         "bodyTemplate": {
           "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "compensateWith": {
+          "$ref": "#/$defs/WorkflowActionModel"
         }
       },
       "additionalProperties": false

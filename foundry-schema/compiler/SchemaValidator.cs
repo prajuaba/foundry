@@ -1125,6 +1125,7 @@ namespace Foundry.Schema.Compiler
 
                 ValidateTransitions(wf, path, stateNames, targets, triggers, bag);
                 ValidateWorkflowRoles(wf, path, bag);
+                ValidateWorkflowActions(wf, path, bag);
                 ValidateChoiceNodes(wf, path, targets, bag);
             }
         }
@@ -1211,6 +1212,61 @@ namespace Foundry.Schema.Compiler
                         $"Transition '{transition.Name}' in workflow '{wf.Name}' declares no roles, so it is reachable by any authenticated caller.",
                         $"{path}/transitions/{t}/requiredRoles",
                         "Add at least one role to restrict access, or remove this property if unrestricted access is intentional.");
+                }
+            }
+        }
+
+        private static void ValidateWorkflowActions(WorkflowModel wf, string path, DiagnosticBag bag)
+        {
+            var transitions = wf.Transitions ?? new List<WorkflowTransitionModel>();
+
+            for (var t = 0; t < transitions.Count; t++)
+            {
+                var trans = transitions[t];
+                var transPath = $"{path}/transitions/{t}";
+                var actions = trans.Actions ?? new List<WorkflowActionModel>();
+
+                for (var a = 0; a < actions.Count; a++)
+                {
+                    var action = actions[a];
+                    var actionPath = $"{transPath}/actions/{a}";
+
+                    // Validate action type is recognized (case-insensitive)
+                    if (string.IsNullOrWhiteSpace(action.Type)
+                        || (!action.Type.Equals("InternalApi", StringComparison.OrdinalIgnoreCase)
+                            && !action.Type.Equals("ExternalApi", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        bag.Error(
+                            DiagnosticCatalog.WorkflowActionUnrecognizedType,
+                            $"Transition '{trans.Name}' action has unrecognized type '{action.Type ?? "(empty)"}'. "
+                            + "Supported types are 'InternalApi' and 'ExternalApi'.",
+                            $"{actionPath}/type",
+                            "Set 'type' to either 'InternalApi' or 'ExternalApi'.");
+                    }
+
+                    // Validate InternalApi has RequestType
+                    if (action.Type != null
+                        && action.Type.Equals("InternalApi", StringComparison.OrdinalIgnoreCase)
+                        && string.IsNullOrWhiteSpace(action.RequestType))
+                    {
+                        bag.Error(
+                            DiagnosticCatalog.WorkflowActionMissingRequestType,
+                            $"Transition '{trans.Name}' InternalApi action is missing 'requestType'.",
+                            $"{actionPath}/requestType",
+                            "Set 'requestType' to the name of the command to dispatch, e.g. 'SubmitOrderCommand'.");
+                    }
+
+                    // Validate ExternalApi has Url
+                    if (action.Type != null
+                        && action.Type.Equals("ExternalApi", StringComparison.OrdinalIgnoreCase)
+                        && string.IsNullOrWhiteSpace(action.Url))
+                    {
+                        bag.Error(
+                            DiagnosticCatalog.WorkflowActionMissingUrl,
+                            $"Transition '{trans.Name}' ExternalApi action is missing 'url'.",
+                            $"{actionPath}/url",
+                            "Set 'url' to the target endpoint, e.g. 'https://api.example.com/webhook'.");
+                    }
                 }
             }
         }

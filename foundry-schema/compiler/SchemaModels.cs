@@ -138,16 +138,20 @@ namespace Foundry.Schema.Compiler
     public record WorkflowActionModel
     {
         public string Type { get; init; } = string.Empty;
-        
+
         // Internal API
         public string? RequestType { get; init; }
         public string? PayloadTemplate { get; init; }
-        
+
         // External API
         public string? Method { get; init; }
         public string? Url { get; init; }
         public Dictionary<string, string>? Headers { get; init; }
         public string? BodyTemplate { get; init; }
+
+        // Retry and compensation
+        public bool Retryable { get; init; }
+        public WorkflowActionModel? CompensateWith { get; init; }
     }
 
     public record Entity

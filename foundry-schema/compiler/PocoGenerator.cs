@@ -420,16 +420,7 @@ public class {target.Name}FileService
                                 $@"new WorkflowConditionConfig {{ Type = ""{c.Type}"", Property = ""{c.Property}"", Operator = ""{c.Operator}"", Value = ""{c.Value}"" }}"))
                             : "";
                         var actionConfigs = t.Actions.Count > 0
-                            ? string.Join(", ", t.Actions.Select(a =>
-                            {
-                                var props = new List<string> { $@"Type = ""{a.Type}""" };
-                                if (a.RequestType != null) props.Add($@"RequestType = ""{a.RequestType}""");
-                                if (a.Method != null) props.Add($@"Method = ""{a.Method}""");
-                                if (a.Url != null) props.Add($@"Url = ""{a.Url}""");
-                                if (a.PayloadTemplate != null) props.Add($@"PayloadTemplate = ""{a.PayloadTemplate.Replace("\"", "\\\"")}""");
-                                if (a.BodyTemplate != null) props.Add($@"BodyTemplate = ""{a.BodyTemplate.Replace("\"", "\\\"")}""");
-                                return $"new WorkflowActionConfig {{ {string.Join(", ", props)} }}";
-                            }))
+                            ? string.Join(", ", t.Actions.Select(a => BuildActionConfigInitializer(a)))
                             : "";
                         var rolesList = t.RequiredRoles.Count > 0
                             ? string.Join(", ", t.RequiredRoles.Select(r => $@"""{r}"""))
@@ -1500,6 +1491,23 @@ public partial class {trigger}Handler : IRequestHandler<{trigger}, Unit>
     }}
 }}
 ";
+        }
+
+        /// <summary>
+        /// Builds a WorkflowActionConfig object initializer string from a WorkflowActionModel.
+        /// Recursively handles CompensateWith for nested actions.
+        /// </summary>
+        private static string BuildActionConfigInitializer(WorkflowActionModel action)
+        {
+            var props = new List<string> { $@"Type = ""{action.Type}""" };
+            if (action.RequestType != null) props.Add($@"RequestType = ""{action.RequestType}""");
+            if (action.Method != null) props.Add($@"Method = ""{action.Method}""");
+            if (action.Url != null) props.Add($@"Url = ""{action.Url}""");
+            if (action.PayloadTemplate != null) props.Add($@"PayloadTemplate = ""{action.PayloadTemplate.Replace("\"", "\\\"")}""");
+            if (action.BodyTemplate != null) props.Add($@"BodyTemplate = ""{action.BodyTemplate.Replace("\"", "\\\"")}""");
+            props.Add($@"Retryable = {action.Retryable.ToString().ToLower()}");
+            if (action.CompensateWith != null) props.Add($@"CompensateWith = {BuildActionConfigInitializer(action.CompensateWith)}");
+            return $"new WorkflowActionConfig {{ {string.Join(", ", props)} }}";
         }
     }
 }

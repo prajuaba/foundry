@@ -216,6 +216,16 @@ public class WorkflowActionConfig
     /// Gets or sets the HTTP request body template string.
     /// </summary>
     public string? BodyTemplate { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether this action can be retried on failure.
+    /// </summary>
+    public bool Retryable { get; set; }
+
+    /// <summary>
+    /// Gets or sets the compensating action to run if this action fails.
+    /// </summary>
+    public WorkflowActionConfig? CompensateWith { get; set; }
 }
 
 /// <summary>

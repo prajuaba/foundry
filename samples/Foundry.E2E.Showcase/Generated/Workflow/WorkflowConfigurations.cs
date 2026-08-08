@@ -51,7 +51,7 @@ public static class WorkflowConfigurations
                         Trigger = "ApproveReviewedOrder", UseCustomCommand = false,
                         RequiredRoles = new List<string> { "Admin" },
                         Conditions = new List<WorkflowConditionConfig> {  },
-                        Actions = new List<WorkflowActionConfig> { new WorkflowActionConfig { Type = "Webhook", Method = "POST", Url = "https://hooks.internal.example/order-approved", BodyTemplate = "{\"orderNumber\":\"{{OrderNumber}}\",\"amount\":\"{{TotalAmount}}\"}" } }
+                        Actions = new List<WorkflowActionConfig> { new WorkflowActionConfig { Type = "ExternalApi", Method = "POST", Url = "https://hooks.internal.example/order-approved", BodyTemplate = "{\"orderNumber\":\"{{OrderNumber}}\",\"amount\":\"{{TotalAmount}}\"}", Retryable = true, CompensateWith = new WorkflowActionConfig { Type = "InternalApi", RequestType = "UndoOrderApprovalCommand", PayloadTemplate = "{\"orderNumber\":\"{{OrderNumber}}\"}", Retryable = false } } }
                     },
                     new WorkflowTransitionConfig
                     {
@@ -59,7 +59,7 @@ public static class WorkflowConfigurations
                         Trigger = "ShipOrder", UseCustomCommand = false,
                         RequiredRoles = new List<string> { "Warehouse", "Admin" },
                         Conditions = new List<WorkflowConditionConfig> {  },
-                        Actions = new List<WorkflowActionConfig> { new WorkflowActionConfig { Type = "Command", RequestType = "OrderSummary", PayloadTemplate = "{\"orderNumber\":\"{{OrderNumber}}\"}" } }
+                        Actions = new List<WorkflowActionConfig> { new WorkflowActionConfig { Type = "InternalApi", RequestType = "OrderSummary", PayloadTemplate = "{\"orderNumber\":\"{{OrderNumber}}\"}", Retryable = false } }
                     },
                     new WorkflowTransitionConfig
                     {
