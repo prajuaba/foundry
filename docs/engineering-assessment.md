@@ -1999,3 +1999,53 @@ Verification: 1,146 tests, 0 failures, across 14 suites, plus the runtime smoke 
 (not inferred from CI) after the version-pin fix, specifically to confirm the failure it fixed was
 actually gone rather than trusting a second green run to mean the same thing as a first one would
 have. All 7 CI jobs green on the commit this addendum ships with.
+
+---
+
+## 10. Addendum — 2026-08-08 (third)
+
+Section 5's "Verified thinly" list, and this document's own code, named the same gap three times in
+nearly identical language: an action that fails after an earlier one succeeded leaves that effect in
+place, and nothing compensates — "a saga would be the real answer and is not what this is." That
+sentence is now wrong, and is corrected in the two places it appeared in prose
+(`WorkflowTransitionBehavior.cs`'s own comment, `docs/reference/developer-reference.md`'s compensation
+row) rather than left standing next to code that contradicts it.
+
+**What shipped is bounded, not the full answer the old sentence gestured at and declined to build.**
+An action can declare `Retryable` (up to 3 attempts, exponential backoff, every attempt logged
+individually — a retry that quietly succeeds on the third try without a record of the first two
+failing would be a smaller instance of the "silent success" pattern section 2 already names as a bug
+class) and `CompensateWith` (the same shape as any action). On a final failure, already-succeeded
+earlier actions in the same transition with a declared `CompensateWith` get it run, best-effort, in
+reverse order — one compensation failing does not stop the sweep from attempting the rest. An action
+with no `CompensateWith` is untouched, exactly as before: opt-in, not automatic undo.
+
+**What this still is not, stated as plainly as the thing it replaces was:** a saga. Nothing persists
+across a process restart — a crash mid-compensation leaves whatever hadn't run yet unattempted, known
+only from whatever the log already captured before the crash. There is no cross-transition
+coordination, no compensation of a compensation, and a compensation is neither retried nor itself
+compensatable. The bounded, in-process version was the one judged buildable; the persisted, restart-
+surviving one is not what shipped and this document should not later be read as implying otherwise.
+
+**A defect found while scoping the work, not by looking for one.** `WorkflowEngine.ExecuteActionAsync`
+only ever recognized the literal action-type strings `InternalApi`/`ExternalApi`, and
+`SchemaValidator` never inspected an action's `Type`, `RequestType`, or `Url` at all — so the showcase
+sample shipped with action types `Webhook`/`Command`, neither recognized, compiling and validating
+cleanly while unconditionally broken at runtime. Three new error diagnostics close it, and the
+showcase now uses the types the engine actually understands. This is the same shape as several
+findings in section 3 — a thing that looked fine because nothing had asked what it permitted or
+whether it had ever actually run — found this time by reading the sample against the engine's own
+dispatch logic rather than by running the sample and watching it fail.
+
+**A test-suite cost caught before it shipped, not after.** The first version of the retry tests
+called the real `Task.Delay` for backoff and took ~12 seconds each — 24 seconds added to what should
+be a millisecond-scale unit suite, for two tests. Fixed by injecting the delay function (a
+`Func<TimeSpan, CancellationToken, Task>`, defaulting to the real `Task.Delay` in production),
+found by reading the test run's own reported timings rather than only checking pass/fail — a slow
+passing test is not a failing one, and would not have been caught by asking only whether the suite
+was green.
+
+**Verification.** 1,159 tests, 0 failures, across 14 suites. All 7 CI jobs green, including the
+runtime smoke test — the one gate that has caught what unit suites alone missed twice in this
+document's history, and the gate this change's own code path (`WorkflowTransitionBehavior`) is
+already exercised by three times over.
