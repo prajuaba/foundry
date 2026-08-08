@@ -95,5 +95,5 @@ public sealed class OwnerReadExemptRolesAttribute : Attribute
 public static class GroupClaims
 {
     /// <summary>The claim types read as group memberships.</summary>
-    public static readonly string[] Types = ["groups", "group"];
+    public static string[] Types { get; set; } = ["groups", "group"];
 }

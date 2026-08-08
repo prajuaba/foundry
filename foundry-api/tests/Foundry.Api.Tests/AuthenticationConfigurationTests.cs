@@ -123,6 +123,13 @@ public class AuthenticationConfigurationTests
         Assert.True(new FoundryOidcOptions().RequireHttpsMetadata);
         Assert.True(new FoundryAuthenticationOptions().RequireHttpsMetadata);
     }
+
+    [Fact]
+    public void GroupClaimTypesDefaultsCorrectly()
+    {
+        var options = new FoundryAuthenticationOptions();
+        Assert.Equal(new[] { "groups", "group" }, options.GroupClaimTypes);
+    }
 }
 
 /// <summary>

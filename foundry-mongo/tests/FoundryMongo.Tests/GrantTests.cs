@@ -56,7 +56,7 @@ public class GrantTests : IDisposable
         public string Reference { get; set; } = string.Empty;
     }
 
-    private sealed class FixedUser(string? subject, string[] roles, string[] groups) : ICurrentUserContext
+    private sealed class FixedUser(string? subject, string[] roles, string[] groups, string? groupClaimType = null) : ICurrentUserContext
     {
         public string OperatorId => subject ?? "anonymous";
         public string? OperatorName => subject;
@@ -69,7 +69,8 @@ public class GrantTests : IDisposable
 
                 var claims = new List<Claim> { new("sub", subject) };
                 claims.AddRange(roles.Select(r => new Claim("role", r)));
-                claims.AddRange(groups.Select(g => new Claim("groups", g)));
+                var claimType = groupClaimType ?? "groups";
+                claims.AddRange(groups.Select(g => new Claim(claimType, g)));
                 return new ClaimsPrincipal(new ClaimsIdentity(claims, "Test", "sub", "role"));
             }
         }
@@ -95,8 +96,8 @@ public class GrantTests : IDisposable
         try { _client.DropDatabase(_dbName); } catch { /* cleanup is best effort */ }
     }
 
-    private Repository<Note> NotesAs(string? subject, string[]? roles = null, string[]? groups = null)
-        => new(_db, userContext: new FixedUser(subject, roles ?? [], groups ?? []));
+    private Repository<Note> NotesAs(string? subject, string[]? roles = null, string[]? groups = null, string? groupClaimType = null)
+        => new(_db, userContext: new FixedUser(subject, roles ?? [], groups ?? [], groupClaimType));
 
     private Repository<Invoice> InvoicesAs(string subject, string tenant, string[]? groups = null)
         => new(_db, userContext: new FixedUser(subject, [], groups ?? []),
@@ -410,5 +411,21 @@ public class GrantTests : IDisposable
         await SeedAsync("alice", "private");
 
         Assert.Single(await NotesAs(null).FindManyAsync());
+    }
+
+    [Fact]
+    public async Task AGroupGrantWithCustomClaimTypeIsHonored()
+    {
+        Foundry.Core.Security.GroupClaims.Types = new[] { "memberOf" };
+        try
+        {
+            var id = await SeedAsync("alice", "team-custom", "engineering");
+
+            Assert.NotNull(await NotesAs("bob", groups: ["engineering"], groupClaimType: "memberOf").GetByIdAsync(id));
+        }
+        finally
+        {
+            Foundry.Core.Security.GroupClaims.Types = new[] { "groups", "group" };
+        }
     }
 }

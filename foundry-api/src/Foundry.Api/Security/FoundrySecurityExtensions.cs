@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.IdentityModel.Tokens;
+using Foundry.Core.Security;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
@@ -68,6 +69,13 @@ public class FoundryAuthenticationOptions
     /// permissions problem rather than a configuration one.
     /// </remarks>
     public string RoleClaimType { get; set; } = "role";
+
+    /// <summary>
+    /// The claim types read as group memberships, for grant-based sharing (see <see cref="Foundry.Core.Security.ISharedResource"/>).
+    /// Configurable because a deployment whose identity provider emits a differently-named group claim
+    /// would otherwise silently grant nothing, which is indistinguishable from "correctly has no access".
+    /// </summary>
+    public string[] GroupClaimTypes { get; set; } = ["groups", "group"];
 
     /// <summary>Claim carrying the caller's identifier, used for audit attribution.</summary>
     public string NameClaimType { get; set; } = "sub";
@@ -155,6 +163,8 @@ public static class FoundrySecurityExtensions
                 + $"HS256 requires at least {MinimumSigningKeyBytes}. A short key is rejected here rather "
                 + "than deep inside token validation, where it surfaces as every token being invalid.");
         }
+
+        GroupClaims.Types = options.GroupClaimTypes;
 
         services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(jwt =>
