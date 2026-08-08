@@ -25,6 +25,8 @@ public sealed class DataArchivalWorker : BackgroundService
     private readonly IMongoDatabase _database;
     private readonly ILogger<DataArchivalWorker> _logger;
 
+    internal const int ArchivalBatchSize = 10;
+
     public DataArchivalWorker(IServiceProvider serviceProvider, IMongoDatabase database, ILogger<DataArchivalWorker> logger)
     {
         _serviceProvider = serviceProvider;
@@ -141,14 +143,15 @@ public sealed class DataArchivalWorker : BackgroundService
         // Documents older than the threshold, by the timestamp embedded in their ObjectId.
         var filter = Builders<BsonDocument>.Filter.Lt("_id", thresholdId);
 
-        var oldDocuments = await collection.Find(filter).ToListAsync(cancellationToken);
-        if (oldDocuments.Count == 0)
+        // Check if there are any documents to archive
+        var firstBatch = await collection.Find(filter).Limit(1).ToListAsync(cancellationToken);
+        if (firstBatch.Count == 0)
         {
             _logger.LogInformation("No old documents found to archive for entity: {Name}", entityType.Name);
             return;
         }
 
-        _logger.LogInformation("Archiving {Count} documents for entity: {Name}", oldDocuments.Count, entityType.Name);
+        _logger.LogInformation("Archiving documents for entity: {Name}", entityType.Name);
 
         var useTransaction = await SupportsTransactionsAsync(cancellationToken);
 
@@ -158,23 +161,42 @@ public sealed class DataArchivalWorker : BackgroundService
         // across entity types and had not applied within one. Selection filters on _id, so years
         // arrive oldest first: the abandoned ones were the *newer* years, the likeliest to matter.
         var failures = new List<Exception>();
+        var totalArchived = 0;
 
-        foreach (var group in oldDocuments.GroupBy(d => d["_id"].AsObjectId.CreationTime.Year))
+        while (true)
         {
-            try
+            var batch = await collection.Find(filter).Limit(ArchivalBatchSize).ToListAsync(cancellationToken);
+            if (batch.Count == 0)
             {
-                await ArchiveYearAsync(collection, pluralName, group.Key, group.ToList(), useTransaction, cancellationToken);
+                break;
             }
-            catch (OperationCanceledException)
+
+            totalArchived += batch.Count;
+
+            foreach (var group in batch.GroupBy(d => d["_id"].AsObjectId.CreationTime.Year))
             {
-                throw;
+                try
+                {
+                    await ArchiveYearAsync(collection, pluralName, group.Key, group.ToList(), useTransaction, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to archive {Name} for {Year}.", entityType.Name, group.Key);
+                    failures.Add(ex);
+                }
             }
-            catch (Exception ex)
+
+            if (batch.Count < ArchivalBatchSize)
             {
-                _logger.LogError(ex, "Failed to archive {Name} for {Year}.", entityType.Name, group.Key);
-                failures.Add(ex);
+                break;
             }
         }
+
+        _logger.LogInformation("Archived {Count} documents for entity: {Name}", totalArchived, entityType.Name);
 
         if (failures.Count > 0)
         {

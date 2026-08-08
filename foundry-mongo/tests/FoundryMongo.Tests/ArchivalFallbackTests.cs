@@ -378,4 +378,34 @@ public class ArchivalFallbackTests : IDisposable
         Assert.Equal(0, await CountAsync(Plural, fine));
         Assert.Equal(2, await CountAsync(Plural, blocked));
     }
+
+    // ── Batching ────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task AllDocumentsAreArchivedAcrossMultipleBatches()
+    {
+        // Verifies that the batched archival loop correctly processes documents across multiple
+        // batch iterations without stranding or double-archiving any. Seeds more documents than
+        // a single batch to ensure multiple iterations of the batching loop execute.
+        await RequireStandaloneAsync();
+
+        var batchSize = DataArchivalWorker.ArchivalBatchSize;
+        var documentCount = batchSize * 2 + 5; // Seed 2.5x the batch size
+        var ids = new List<ObjectId>();
+
+        // Seed all documents old enough to archive, spread across the batch to ensure
+        // grouping by year happens correctly across batch boundaries
+        for (int i = 0; i < documentCount; i++)
+        {
+            var id = AgedId(3);
+            ids.Add(id);
+            await SeedAsync(Plural, id, $"BATCH-{i}");
+        }
+
+        await Worker().RunSweepAsync(CancellationToken.None);
+
+        // Verify all documents are in the archive and none in the active collection
+        Assert.Equal(0, await CountAsync(Plural, ids.ToArray()));
+        Assert.Equal(documentCount, await CountAsync(ArchiveFor(ids[0]), ids.ToArray()));
+    }
 }
