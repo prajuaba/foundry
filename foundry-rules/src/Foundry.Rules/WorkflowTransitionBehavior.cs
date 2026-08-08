@@ -193,10 +193,20 @@ public class WorkflowTransitionBehavior<TRequest, TResponse> : IPipelineBehavior
         // after the handler means the cheap, local, reversible check happens before the expensive,
         // remote, irreversible one.
         //
-        // What remains is genuinely hard: an action that fails after an earlier action succeeded
-        // leaves that earlier effect in place, and no compensation is attempted. Every executed
-        // action is recorded in the activity log including on the failure path, so what happened is
-        // at least knowable. A saga would be the real answer and is not what this is.
+        // What was genuinely hard here has a bounded answer now, not the full one. A Retryable
+        // action gets a few attempts with backoff before it counts as failed -- every attempt logged
+        // individually, so a retry that quietly succeeds on the third try still leaves a record that
+        // the first two didn't. On a final failure, earlier actions in this same transition that
+        // declared a CompensateWith get it run, best-effort, in reverse order -- one compensation
+        // failing does not stop the sweep from attempting the rest. An action with no CompensateWith
+        // is untouched, exactly as before: this is opt-in, not automatic undo.
+        //
+        // What this still is not: a saga. Nothing here persists across a process restart -- a crash
+        // mid-compensation leaves whatever hadn't run yet unattempted and unrecorded beyond what the
+        // log already captured. There is no cross-transition coordination, no compensation of a
+        // compensation, and no retry of a compensation that itself fails. Every executed action,
+        // attempt, and compensation is recorded in the activity log including on the failure path, so
+        // what happened is knowable even where nothing here decided to act on it.
         TResponse response;
         try
         {
