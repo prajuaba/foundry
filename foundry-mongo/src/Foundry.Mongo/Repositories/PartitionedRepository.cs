@@ -47,6 +47,11 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
     /// </remarks>
     private readonly Foundry.Core.Tenant.ITenantContext? _tenantContext;
 
+    /// <summary>
+    /// MongoDB configuration options, retained so archive repositories get the same settings.
+    /// </summary>
+    private readonly Foundry.Mongo.DependencyInjection.FoundryMongoOptions? _mongoOptions;
+
     public IMongoCollection<T> Collection => _activeRepository.Collection;
 
     /// <inheritdoc />
@@ -61,20 +66,22 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
         IAuditSink? auditSink = null,
         ICurrentUserContext? userContext = null,
         IEncryptionProvider? encryptionProvider = null,
-        Foundry.Core.Tenant.ITenantContext? tenantContext = null)
+        Foundry.Core.Tenant.ITenantContext? tenantContext = null,
+        Foundry.Mongo.DependencyInjection.FoundryMongoOptions? mongoOptions = null)
     {
         _db = db ?? throw new ArgumentNullException(nameof(db));
         _auditSink = auditSink;
         _userContext = userContext;
         _encryptionProvider = encryptionProvider;
         _tenantContext = tenantContext;
+        _mongoOptions = mongoOptions;
 
         var partitionedAttribute = typeof(T).GetCustomAttribute<PartitionedAttribute>();
         _thresholdYears = partitionedAttribute?.ArchiveThresholdYears ?? 2;
 
         var baseCollectionName = typeof(T).Name.Pluralize();
-        _activeRepository = new Repository<T>(db, auditSink, userContext, encryptionProvider, baseCollectionName, tenantContext);
-        _deletedRepository = new Repository<T>(db, auditSink, userContext, encryptionProvider, $"{baseCollectionName}_Deleted", tenantContext);
+        _activeRepository = new Repository<T>(db, auditSink, userContext, encryptionProvider, baseCollectionName, tenantContext, mongoOptions);
+        _deletedRepository = new Repository<T>(db, auditSink, userContext, encryptionProvider, $"{baseCollectionName}_Deleted", tenantContext, mongoOptions);
     }
 
     private ObjectId ConvertId(object id)
@@ -94,7 +101,7 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
             var baseCollectionName = typeof(T).Name.Pluralize();
             var archiveCollectionName = $"{baseCollectionName}_{y}";
             return new Repository<T>(
-                _db, _auditSink, _userContext, _encryptionProvider, archiveCollectionName, _tenantContext);
+                _db, _auditSink, _userContext, _encryptionProvider, archiveCollectionName, _tenantContext, _mongoOptions);
         });
     }
 

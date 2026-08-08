@@ -34,6 +34,8 @@ public static class FoundryMongoServiceCollectionExtensions
         var options = new FoundryMongoOptions();
         configureOptions(options);
 
+        services.TryAddSingleton(options);
+
         if (string.IsNullOrWhiteSpace(options.ConnectionString))
         {
             throw new ArgumentException("ConnectionString is required to initialize MongoDB client.", nameof(configureOptions));

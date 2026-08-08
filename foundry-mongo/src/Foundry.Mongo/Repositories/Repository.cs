@@ -87,12 +87,13 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ICurrentUserContext? userContext = null,
         IEncryptionProvider? encryptionProvider = null,
         string? collectionName = null,
-        Foundry.Core.Tenant.ITenantContext? tenantContext = null)
+        Foundry.Core.Tenant.ITenantContext? tenantContext = null,
+        Foundry.Mongo.DependencyInjection.FoundryMongoOptions? mongoOptions = null)
     {
         ArgumentNullException.ThrowIfNull(db);
         _auditSink = auditSink;
         _userContext = userContext;
-        _accessPolicy = new EntityAccessPolicy<T>(tenantContext, userContext);
+        _accessPolicy = new EntityAccessPolicy<T>(tenantContext, userContext, mongoOptions?.AllowUnauthenticatedFullReads ?? false);
         _searchTranslator = new EntitySearchTranslator<T>(_accessPolicy);
 
         // Validate: if entity has properties requiring encryption, an IEncryptionProvider must be registered

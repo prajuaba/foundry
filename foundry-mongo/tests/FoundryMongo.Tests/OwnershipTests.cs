@@ -333,13 +333,32 @@ public class OwnershipTests : IDisposable
     }
 
     [Fact]
-    public async Task WithNoUserContextAtAllOwnershipIsNotApplied()
+    public async Task WithNoUserContextAtAllOwnershipIsNowApplied()
     {
-        // Deliberate, and the same accommodation tenancy makes: a repository constructed without a
-        // caller is a background job or a migration, not a request. Nothing to scope to.
+        // By default, an unauthenticated caller sees zero rows of an owner-scoped entity.
+        // Background jobs or migrations that need unscoped read must opt in explicitly via AllowUnauthenticatedFullReads.
         var note = new Note { Id = ObjectId.GenerateNewId(), Body = "seeded" };
         await new Repository<Note>(_db).InsertAsync(note);
 
-        Assert.Equal(1, await new Repository<Note>(_db).CountAsync());
+        Assert.Equal(0, await new Repository<Note>(_db).CountAsync());
+    }
+
+    [Fact]
+    public async Task AllowUnauthenticatedFullReadsRestoresOldBehavior()
+    {
+        // Escape hatch: when explicitly opted in, an unauthenticated caller sees every row
+        // of an owner-scoped entity, restoring the old pre-change behavior. Use only where
+        // the system genuinely needs unscoped unfiltered reads without a caller.
+        var note = new Note { Id = ObjectId.GenerateNewId(), Body = "seeded" };
+        await new Repository<Note>(_db).InsertAsync(note);
+
+        // With AllowUnauthenticatedFullReads = true, even with no caller context, the row is visible
+        var optionsAllowingUnauthenticatedReads = new Foundry.Mongo.DependencyInjection.FoundryMongoOptions
+        {
+            AllowUnauthenticatedFullReads = true
+        };
+        var repoWithFlag = new Repository<Note>(_db, mongoOptions: optionsAllowingUnauthenticatedReads);
+
+        Assert.Equal(1, await repoWithFlag.CountAsync());
     }
 }

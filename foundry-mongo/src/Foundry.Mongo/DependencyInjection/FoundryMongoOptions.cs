@@ -30,4 +30,13 @@ public sealed class FoundryMongoOptions
 
     /// <summary>Maximum connection pool size for MongoDB client.</summary>
     public int MaxConnectionPoolSize { get; set; } = 100;
+
+    /// <summary>
+    /// When true, a repository with no authenticated caller reads every row of an owner-scoped entity,
+    /// exactly as it always has. Off by default: an unauthenticated caller now reads zero rows of an
+    /// owner-scoped entity instead of every row. Name the trust boundary explicitly here -- only set this
+    /// where something in front of the repository genuinely needs an unauthenticated, unscoped read (a
+    /// background job constructed without a caller, for example) -- rather than assume it.
+    /// </summary>
+    public bool AllowUnauthenticatedFullReads { get; set; } = false;
 }

@@ -36,15 +36,24 @@ namespace Foundry.Mongo.Repositories;
 /// </remarks>
 internal sealed class EntityAccessPolicy<T> where T : class, IEntity<ObjectId>
 {
+    /// <summary>
+    /// A sentinel owner ID that can never match a real owner, used to filter out all rows when an
+    /// unauthenticated caller tries to read an owner-scoped entity and AllowUnauthenticatedFullReads is false.
+    /// </summary>
+    private const string UnmatchableSentinelOwnerId = " -no-authenticated-caller";
+
     private readonly Foundry.Core.Tenant.ITenantContext? _tenantContext;
     private readonly ICurrentUserContext? _userContext;
+    private readonly bool _allowUnauthenticatedFullReads;
 
     public EntityAccessPolicy(
         Foundry.Core.Tenant.ITenantContext? tenantContext,
-        ICurrentUserContext? userContext)
+        ICurrentUserContext? userContext,
+        bool allowUnauthenticatedFullReads = false)
     {
         _tenantContext = tenantContext;
         _userContext = userContext;
+        _allowUnauthenticatedFullReads = allowUnauthenticatedFullReads;
     }
 
     /// <summary>
@@ -199,7 +208,15 @@ internal sealed class EntityAccessPolicy<T> where T : class, IEntity<ObjectId>
         grantedTo = [];
 
         if (!typeof(Foundry.Core.Security.IOwnedResource).IsAssignableFrom(entityType)) return false;
-        if (_userContext is null) return false;
+
+        if (_userContext is null)
+        {
+            if (_allowUnauthenticatedFullReads) return false;   // old behavior: no filter
+            // New default: apply unmatchable filter to see zero rows
+            ownerId = UnmatchableSentinelOwnerId;
+            grantedTo = [];
+            return true;
+        }
 
         var exempt = ((Foundry.Core.Security.OwnerExemptRolesAttribute?)Attribute.GetCustomAttribute(
             entityType, typeof(Foundry.Core.Security.OwnerExemptRolesAttribute)))?.Roles
@@ -212,7 +229,14 @@ internal sealed class EntityAccessPolicy<T> where T : class, IEntity<ObjectId>
         if (HoldsAnyRole(exempt) || HoldsAnyRole(readExempt)) return false;
 
         var current = CurrentOwnerId;
-        if (current is null) return false;
+        if (current is null)
+        {
+            if (_allowUnauthenticatedFullReads) return false;   // old behavior: no filter
+            // New default: apply unmatchable filter to see zero rows
+            ownerId = UnmatchableSentinelOwnerId;
+            grantedTo = [];
+            return true;
+        }
 
         ownerId = current;
 
@@ -311,12 +335,29 @@ internal sealed class EntityAccessPolicy<T> where T : class, IEntity<ObjectId>
         grantedTo = [];
 
         if (!IsOwnerScoped) return false;
-        if (_userContext is null) return false;   // no caller concept at all: background jobs, migrations
+
+        // no caller concept at all: background jobs, migrations
+        if (_userContext is null)
+        {
+            if (_allowUnauthenticatedFullReads) return false;   // old behavior: no filter
+            // New default: apply unmatchable filter to see zero rows
+            ownerId = UnmatchableSentinelOwnerId;
+            grantedTo = [];
+            return true;
+        }
+
         if (IsOwnerExempt()) return false;
         if (!forWrite && IsOwnerReadExempt()) return false;
 
         var current = CurrentOwnerId;
-        if (current is null) return false;
+        if (current is null)
+        {
+            if (_allowUnauthenticatedFullReads) return false;   // old behavior: no filter
+            // New default: apply unmatchable filter to see zero rows
+            ownerId = UnmatchableSentinelOwnerId;
+            grantedTo = [];
+            return true;
+        }
 
         ownerId = current;
 

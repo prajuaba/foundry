@@ -399,18 +399,16 @@ public class GrantTests : IDisposable
     }
 
     [Fact]
-    public async Task AnUnauthenticatedReaderIsNotNarrowedByOwnershipOrGrants()
+    public async Task AnUnauthenticatedReaderIsNowNarrowedByOwnershipAndGrants()
     {
-        // Recorded because it surprised me while writing these, and it is pre-existing rather than
-        // introduced here: with no authenticated caller the owner filter does not apply at all, so a
-        // grant is not consulted either. That is deliberate — background jobs, migrations and the
-        // archival worker read without a caller and must see every row — and it is safe only because
-        // every generated endpoint refuses an unauthenticated request before the repository is
-        // reached. It is defence in depth that this layer does not provide, so a host that exposes a
-        // repository without authentication in front of it has no row-level filtering at all.
+        // By default, an unauthenticated caller now sees zero rows of an owner-scoped entity.
+        // Background jobs, migrations and the archival worker that need unscoped read must opt in
+        // explicitly via AllowUnauthenticatedFullReads. This improves the default safety posture:
+        // a host that exposes a repository without authentication in front of it now gets row-level
+        // filtering by default instead of complete access.
         await SeedAsync("alice", "private");
 
-        Assert.Single(await NotesAs(null).FindManyAsync());
+        Assert.Empty(await NotesAs(null).FindManyAsync());
     }
 
     [Fact]
