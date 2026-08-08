@@ -196,7 +196,7 @@ jobs:
       - name: Capture version
         id: version
         run: |
-          VERSION=$(git describe --tags --always 2>/dev/null || echo "1.0.0")
+          VERSION=$((git describe --tags --exact-match 2>/dev/null || echo "1.0.0") | sed 's/^v//')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # The script publishes and then runs the binary: version, the non-zero exit on no arguments,

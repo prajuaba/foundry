@@ -36,9 +36,11 @@ if [ -z "$RID" ]; then
   esac
 fi
 
-# Default version to git describe output or fallback to 1.0.0
+# Default version to the exact tag on HEAD (stripped of its 'v' prefix), or 1.0.0 with no tag.
+# --always would make git describe never fail, silently returning a bare commit hash instead --
+# and a bare hash is not a valid MSBuild <Version>, which is exactly what broke CI.
 if [ -z "$VERSION" ]; then
-  VERSION=$(git describe --tags --always 2>/dev/null || echo "1.0.0")
+  VERSION=$((git describe --tags --exact-match 2>/dev/null || echo "1.0.0") | sed 's/^v//')
 fi
 
 OUT="$ROOT/dist-bin"
