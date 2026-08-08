@@ -28,17 +28,27 @@ public static class WorkflowServiceCollectionExtensions
     /// workflow definition has to be resolvable to a CLR type, and guessing it from loaded assemblies
     /// is what this replaces.
     /// </param>
+    /// <param name="configureCommands">
+    /// Declares which command types are dispatched by workflow InternalApi actions. Required: the
+    /// command type named in a workflow action has to be resolvable to a CLR type, and guessing it
+    /// from loaded assemblies is what this replaces.
+    /// </param>
     public static IServiceCollection AddFoundryWorkflows(
         this IServiceCollection services,
-        Action<WorkflowEntityTypeRegistry> configureEntities)
+        Action<WorkflowEntityTypeRegistry> configureEntities,
+        Action<WorkflowCommandTypeRegistry>? configureCommands = null)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configureEntities);
 
-        var registry = new WorkflowEntityTypeRegistry();
-        configureEntities(registry);
+        var entityRegistry = new WorkflowEntityTypeRegistry();
+        configureEntities(entityRegistry);
 
-        services.TryAddSingleton(registry);
+        var commandRegistry = new WorkflowCommandTypeRegistry();
+        configureCommands?.Invoke(commandRegistry);
+
+        services.TryAddSingleton(entityRegistry);
+        services.TryAddSingleton<IWorkflowCommandTypeResolver>(commandRegistry);
         services.TryAddSingleton<IWorkflowDefinitionProvider, ApiManifestWorkflowDefinitionProvider>();
         services.TryAddSingleton<IWorkflowStateStore, MongoWorkflowStateStore>();
         services.AddTransient(typeof(IPipelineBehavior<,>), typeof(WorkflowTransitionBehavior<,>));

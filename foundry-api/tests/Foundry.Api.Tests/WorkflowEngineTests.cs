@@ -25,10 +25,10 @@ public class WorkflowEngineTests
     public WorkflowEngineTests()
     {
         var services = new ServiceCollection();
-        
+
         // Register default workflow services
         services.AddFoundryRules();
-        
+
         // Mock dependencies
         var mockSender = Substitute.For<ISender>();
         services.AddSingleton(mockSender);
@@ -90,6 +90,9 @@ public class WorkflowEngineTests
         var mockSender = Substitute.For<ISender>();
         var services = new ServiceCollection();
         services.AddSingleton(mockSender);
+
+        // Register the stub command resolver
+        services.AddSingleton<IWorkflowCommandTypeResolver>(new StubCommandResolver(typeof(DummyCommand)));
         services.AddSingleton<IWorkflowEngine, WorkflowEngine>();
         var provider = services.BuildServiceProvider();
         var engine = provider.GetRequiredService<IWorkflowEngine>();
@@ -116,7 +119,7 @@ public class WorkflowEngineTests
     {
         // Arrange
         var mockServiceProvider = Substitute.For<IServiceProvider>();
-        
+
         // 1. Stub ApiManifest
         var manifest = new ApiManifest
         {
@@ -176,7 +179,7 @@ public class WorkflowEngineTests
         };
         var mockRepo = Substitute.For<IRepository<TestWorkflowStatefulEntity>>();
         mockRepo.GetByIdAsync(Arg.Any<MongoDB.Bson.ObjectId>(), Arg.Any<MongoDB.Driver.IClientSessionHandle?>(), Arg.Any<CancellationToken>()).Returns(order);
-        
+
         mockServiceProvider.GetService(typeof(IRepository<TestWorkflowStatefulEntity>)).Returns(mockRepo);
 
         // The activity-log repository is now required rather than skipped when absent: a transition
@@ -256,5 +259,30 @@ public class WorkflowEngineTests
     public class DummyCommand : IRequest
     {
         public string Id { get; set; } = string.Empty;
+    }
+
+    /// <summary>A stub command resolver for testing.</summary>
+    private sealed class StubCommandResolver : IWorkflowCommandTypeResolver
+    {
+        private readonly Dictionary<string, Type> _registered;
+
+        public StubCommandResolver(params Type[] commandTypes)
+        {
+            _registered = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
+            foreach (var type in commandTypes)
+            {
+                _registered[type.Name] = type;
+                if (!string.IsNullOrEmpty(type.FullName)) _registered[type.FullName] = type;
+            }
+        }
+
+        public Type Resolve(string commandTypeName)
+        {
+            if (_registered.TryGetValue(commandTypeName, out var type)) return type;
+
+            var known = _registered.Keys.Count > 0 ? string.Join(", ", _registered.Keys) : "(none)";
+            throw new InvalidOperationException(
+                $"Workflow command type '{commandTypeName}' is not registered. Registered: {known}.");
+        }
     }
 }

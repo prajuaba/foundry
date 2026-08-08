@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Foundry.Rules;
+using MediatR;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
@@ -58,6 +59,31 @@ public class WorkflowActionTests
 
     /// <summary>A request payload whose values are whatever the caller sent.</summary>
     private sealed record Payload(string Reference, string Amount);
+
+    /// <summary>A stub command resolver for testing.</summary>
+    private sealed class StubCommandResolver : IWorkflowCommandTypeResolver
+    {
+        private readonly Dictionary<string, Type> _registered;
+
+        public StubCommandResolver(params Type[] commandTypes)
+        {
+            _registered = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
+            foreach (var type in commandTypes)
+            {
+                _registered[type.Name] = type;
+                if (!string.IsNullOrEmpty(type.FullName)) _registered[type.FullName] = type;
+            }
+        }
+
+        public Type Resolve(string commandTypeName)
+        {
+            if (_registered.TryGetValue(commandTypeName, out var type)) return type;
+
+            var known = _registered.Keys.Count > 0 ? string.Join(", ", _registered.Keys) : "(none)";
+            throw new InvalidOperationException(
+                $"Workflow command type '{commandTypeName}' is not registered. Registered: {known}.");
+        }
+    }
 
     private static Task<ActionExecutionDetail> ExternalAsync(
         WorkflowEngine engine,
@@ -256,7 +282,8 @@ public class WorkflowActionTests
     [Fact]
     public async Task AnUnresolvableInternalCommandIsReported()
     {
-        var engine = new WorkflowEngine(new ServiceCollection().BuildServiceProvider());
+        var resolver = new StubCommandResolver(); // Empty resolver with no registered commands
+        var engine = new WorkflowEngine(new ServiceCollection().BuildServiceProvider(), resolver);
 
         var detail = await engine.ExecuteActionAsync(
             "InternalApi", "NoSuchCommandTypeAnywhere", null, null, null, null, null,

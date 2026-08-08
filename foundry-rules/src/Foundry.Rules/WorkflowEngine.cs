@@ -17,14 +17,17 @@ namespace Foundry.Rules;
 public class WorkflowEngine : IWorkflowEngine
 {
     private readonly IServiceProvider _serviceProvider;
+    private readonly IWorkflowCommandTypeResolver? _commandResolver;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="WorkflowEngine"/> class.
     /// </summary>
     /// <param name="serviceProvider">The application's service provider container.</param>
-    public WorkflowEngine(IServiceProvider serviceProvider)
+    /// <param name="commandResolver">Resolves command types for InternalApi actions. Optional: if not provided, command resolution is disabled.</param>
+    public WorkflowEngine(IServiceProvider serviceProvider, IWorkflowCommandTypeResolver? commandResolver = null)
     {
         _serviceProvider = serviceProvider;
+        _commandResolver = commandResolver;
     }
 
     /// <inheritdoc />
@@ -98,13 +101,25 @@ public class WorkflowEngine : IWorkflowEngine
             try
             {
                 var payload = SubstituteTokens(payloadTemplate ?? "{}", requestPayload, TokenContext.Json);
-                var resolvedType = AppDomain.CurrentDomain.GetAssemblies()
-                    .SelectMany(a => {
-                        try { return a.GetTypes(); } catch { return Array.Empty<Type>(); }
-                    })
-                    .FirstOrDefault(t => t.Name.Equals(requestType, StringComparison.OrdinalIgnoreCase) || t.FullName?.Equals(requestType, StringComparison.OrdinalIgnoreCase) == true);
 
-                if (resolvedType == null)
+                if (_commandResolver == null)
+                {
+                    return new ActionExecutionDetail
+                    {
+                        ActionType = "InternalApi",
+                        ActionName = requestType,
+                        Success = false,
+                        StatusCode = 500,
+                        ResponseBody = "Workflow command type resolver is not configured. Register it with AddFoundryWorkflows(..., registry => registry.Register<YourCommandType>())."
+                    };
+                }
+
+                Type resolvedType;
+                try
+                {
+                    resolvedType = _commandResolver.Resolve(requestType);
+                }
+                catch (InvalidOperationException ex)
                 {
                     return new ActionExecutionDetail
                     {
@@ -112,7 +127,7 @@ public class WorkflowEngine : IWorkflowEngine
                         ActionName = requestType,
                         Success = false,
                         StatusCode = 404,
-                        ResponseBody = $"Internal MediatR command type '{requestType}' could not be resolved."
+                        ResponseBody = ex.Message
                     };
                 }
 
