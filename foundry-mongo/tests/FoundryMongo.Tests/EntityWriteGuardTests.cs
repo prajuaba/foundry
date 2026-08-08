@@ -204,33 +204,50 @@ public class EntityWriteGuardTests : IDisposable
     }
 
     /// <summary>
-    /// The bulk filter does not scope to the tenant. This records today's behaviour, it does not
-    /// endorse it.
+    /// The bulk filter now scopes to the tenant via the instance method OccFilter.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The two bulk paths have always built their version check without tenant or owner scoping,
-    /// three hundred lines away from the three single-document paths that do. Extracting the two
-    /// constructions into differently named members is what made the asymmetry visible; preserving it
-    /// exactly is what makes the extraction a move rather than a redesign.
-    /// </para>
-    /// <para>
-    /// It is reachable only by a concurrent write that changed a row's tenant without bumping its
-    /// version, and every write path through this repository does both together — so it is missing
-    /// depth rather than an open door. The test is here so that closing it in step 4 is a deliberate
-    /// change to a stated expectation instead of a silent one.
+    /// The bulk paths now use the scoped instance method _writeGuard.OccFilter instead of the
+    /// static UnscopedOccFilter, which means they now include tenant and owner in the filter.
+    /// This test confirms that the scoped filter matches when the row belongs to the same tenant
+    /// as the guard.
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task TheBulkFilterIsNotTenantScoped()
+    public async Task TheBulkFilterIsNowTenantScoped()
     {
+        var guard = GuardFor("globex");
         var seeded = await SeedAsync(balance: 100, tenant: "globex");
 
         var result = await ReplaceAsync(
-            EntityWriteGuard<Ledger>.UnscopedOccFilter(seeded.Id, 1),
+            guard.OccFilter(seeded.Id, 1),
             seeded with { Balance = 999, Version = 2 });
 
         Assert.Equal(1L, result.MatchedCount);
+    }
+
+    /// <summary>
+    /// A bulk write from another tenant is refused at the right version via the scoped OccFilter.
+    /// </summary>
+    /// <remarks>
+    /// The scoped OccFilter includes tenant scoping, so a write from one tenant cannot match a row
+    /// in another tenant, even at the correct version. This mirrors the single-document behavior of
+    /// AWriteFromAnotherTenantIsRefusedAtTheRightVersion but uses the instance method OccFilter
+    /// that the bulk paths now employ.
+    /// </remarks>
+    [Fact]
+    public async Task ABulkWriteFromAnotherTenantIsRefusedAtTheRightVersion()
+    {
+        var seeded = await SeedAsync(balance: 100, tenant: "globex");
+        var outsider = GuardFor(Tenant);
+
+        var result = await ReplaceAsync(
+            outsider.OccFilter(seeded.Id, 1),
+            seeded with { Balance = 999, Version = 2 });
+
+        Assert.Equal(0L, result.MatchedCount);
+        Assert.Equal(100, (await StoredAsync(seeded.Id))!.Balance);
     }
 
     /// <summary>

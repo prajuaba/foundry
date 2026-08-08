@@ -776,7 +776,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             var encrypted = EncryptEntityForWrite(entityAfter);
 
             // OCC check per entity replacement in bulk writes
-            var replaceFilter = EntityWriteGuard<T>.UnscopedOccFilter(entityAfter.Id, oldVersion);
+            var replaceFilter = _writeGuard.OccFilter(entityAfter.Id, oldVersion);
             writeModels.Add(new ReplaceOneModel<T>(replaceFilter, encrypted) { IsUpsert = false });
 
             if (entityAfter is IVersionable)
@@ -912,7 +912,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
             var encrypted = EncryptEntityForWrite(entity);
 
-            var replaceFilter = EntityWriteGuard<T>.UnscopedOccFilter(entity.Id, oldVersion);
+            var replaceFilter = _writeGuard.OccFilter(entity.Id, oldVersion);
             writeModels.Add(new ReplaceOneModel<T>(replaceFilter, encrypted) { IsUpsert = false });
 
             if (entity is IVersionable)
