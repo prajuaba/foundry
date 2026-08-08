@@ -19,13 +19,13 @@
       "version": "1.0.0",
       "isActive": true,
       "states": [
-        { "name": "Draft", "isInitial": true, "isFinal": false },
+        { "name": "Draft", "isInitial": true, "isFinal": false, "allowedRoles": ["Claimant"] },
         { "name": "Review", "isInitial": false, "isFinal": false, "allowedRoles": ["Adjuster"] },
-        { "name": "Settled", "isInitial": false, "isFinal": true },
-        { "name": "Rejected", "isInitial": false, "isFinal": true }
+        { "name": "Settled", "isInitial": false, "isFinal": true, "allowedRoles": ["Adjuster"] },
+        { "name": "Rejected", "isInitial": false, "isFinal": true, "allowedRoles": ["Adjuster"] }
       ],
       "transitions": [
-        { "id": "t1", "name": "Submit", "fromState": "Draft", "toState": "Review", "trigger": "SubmitClaimCommand" },
+        { "id": "t1", "name": "Submit", "fromState": "Draft", "toState": "Review", "trigger": "SubmitClaimCommand", "requiredRoles": ["Claimant"] },
         { "id": "t2", "name": "Settle", "fromState": "Review", "toState": "Settled", "trigger": "SettleClaimCommand", "requiredRoles": ["Adjuster"] },
         { "id": "t3", "name": "Reject", "fromState": "Review", "toState": "Rejected", "trigger": "RejectClaimCommand", "requiredRoles": ["Adjuster"] }
       ]

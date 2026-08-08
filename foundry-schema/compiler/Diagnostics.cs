@@ -290,6 +290,9 @@ namespace Foundry.Schema.Compiler
         /// <summary>A connector credential is a literal rather than a reference to where it lives.</summary>
         public const string ConnectorSecretLiteral = "FDY3020";
 
+        /// <summary>A workflow state or transition declares no roles, which means any authenticated caller can reach it.</summary>
+        public const string WorkflowEmptyRoles = "FDY3021";
+
         // ---- FDY4xxx: naming and identifier safety ----
 
         /// <summary>A name is not a valid C# identifier and cannot be emitted as code.</summary>
@@ -388,7 +391,8 @@ namespace Foundry.Schema.Compiler
             [InvalidIdentifier] = "The name cannot be emitted as C#. Use letters, digits and underscores, starting with a letter or underscore.",
             [ReservedKeyword] = "The name is a reserved C# keyword. Choose a different name.",
             [InvalidNamespace] = "The namespace must be dot-separated valid C# identifiers, e.g. 'Acme.Billing'.",
-            [UnsafeAttributeArgument] = "The attribute argument contains quote, backslash or brace characters that cannot be safely emitted."
+            [UnsafeAttributeArgument] = "The attribute argument contains quote, backslash or brace characters that cannot be safely emitted.",
+            [WorkflowEmptyRoles] = "A workflow state or transition with no roles is reachable by any authenticated caller. If this is intentional, no action is needed."
         };
     }
 }

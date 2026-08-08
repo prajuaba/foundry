@@ -1124,6 +1124,7 @@ namespace Foundry.Schema.Compiler
                 }
 
                 ValidateTransitions(wf, path, stateNames, targets, triggers, bag);
+                ValidateWorkflowRoles(wf, path, bag);
                 ValidateChoiceNodes(wf, path, targets, bag);
             }
         }
@@ -1176,6 +1177,40 @@ namespace Foundry.Schema.Compiler
                 else
                 {
                     triggers[trans.Trigger] = wf.Name;
+                }
+            }
+        }
+
+        private static void ValidateWorkflowRoles(WorkflowModel wf, string path, DiagnosticBag bag)
+        {
+            var states = wf.States ?? new List<WorkflowStateModel>();
+            var transitions = wf.Transitions ?? new List<WorkflowTransitionModel>();
+
+            // Check states for empty roles
+            for (var s = 0; s < states.Count; s++)
+            {
+                var state = states[s];
+                if (state.AllowedRoles == null || state.AllowedRoles.Count == 0)
+                {
+                    bag.Warning(
+                        DiagnosticCatalog.WorkflowEmptyRoles,
+                        $"State '{state.Name}' in workflow '{wf.Name}' declares no roles, so it is reachable by any authenticated caller.",
+                        $"{path}/states/{s}/allowedRoles",
+                        "Add at least one role to restrict access, or remove this property if unrestricted access is intentional.");
+                }
+            }
+
+            // Check transitions for empty roles
+            for (var t = 0; t < transitions.Count; t++)
+            {
+                var transition = transitions[t];
+                if (transition.RequiredRoles == null || transition.RequiredRoles.Count == 0)
+                {
+                    bag.Warning(
+                        DiagnosticCatalog.WorkflowEmptyRoles,
+                        $"Transition '{transition.Name}' in workflow '{wf.Name}' declares no roles, so it is reachable by any authenticated caller.",
+                        $"{path}/transitions/{t}/requiredRoles",
+                        "Add at least one role to restrict access, or remove this property if unrestricted access is intentional.");
                 }
             }
         }
