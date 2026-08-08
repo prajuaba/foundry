@@ -65,8 +65,29 @@ public class MaskingTests : IDisposable
         public string Note { get; set; } = string.Empty;
     }
 
-    private sealed class FixedUser(params string[] scopes) : ICurrentUserContext
+    /// <summary>Similar to Claim but properties declare Roles that entitle access.</summary>
+    public record ClaimWithRoles : BaseEntity<ObjectId>, IVersionable
     {
+        [SensitiveData(Protection = ProtectionType.Mask, MaskingType = MaskingType.Partial,
+            PreserveCount = 4, Category = "policy", Roles = ["PolicyReader"])]
+        public string PolicyNumber { get; set; } = string.Empty;
+
+        [SensitiveData(Protection = ProtectionType.Mask, MaskingType = MaskingType.Partial,
+            PreserveCount = 4, Category = "financial", Roles = ["FinanceViewer"])]
+        public string CardNumber { get; set; } = string.Empty;
+
+        public string Reference { get; set; } = string.Empty;
+    }
+
+    private sealed class FixedUser(string[] scopes, string[] roles) : ICurrentUserContext
+    {
+        public FixedUser(params string[] scopesAndRoles)
+            : this(
+                Array.FindAll(scopesAndRoles, s => s.StartsWith("view:")),
+                Array.FindAll(scopesAndRoles, r => !r.StartsWith("view:")))
+        {
+        }
+
         public string OperatorId => "tester";
         public string? OperatorName => "tester";
 
@@ -76,6 +97,7 @@ public class MaskingTests : IDisposable
             {
                 var claims = new List<System.Security.Claims.Claim> { new("sub", "tester") };
                 claims.AddRange(scopes.Select(s => new System.Security.Claims.Claim("scope", s)));
+                claims.AddRange(roles.Select(r => new System.Security.Claims.Claim("role", r)));
                 return new ClaimsPrincipal(new ClaimsIdentity(claims, "Test", "sub", "role"));
             }
         }
@@ -102,6 +124,23 @@ public class MaskingTests : IDisposable
 
     private Repository<Claim> ClaimsFor(params string[] scopes)
         => new(_db, userContext: new FixedUser(scopes));
+
+    private Repository<ClaimWithRoles> ClaimsWithRolesFor(params string[] scopesAndRoles)
+        => new(_db, userContext: new FixedUser(scopesAndRoles));
+
+    private async Task<ObjectId> SeedClaimWithRolesAsync()
+    {
+        var claim = new ClaimWithRoles
+        {
+            Id = ObjectId.GenerateNewId(),
+            PolicyNumber = "POL-000012345678",
+            CardNumber = "4111111111111234",
+            Reference = "CLM-1"
+        };
+
+        await ClaimsWithRolesFor("view:policy", "view:financial").InsertAsync(claim);
+        return claim.Id;
+    }
 
     private async Task<ObjectId> SeedClaimAsync()
     {
@@ -363,5 +402,52 @@ public class MaskingTests : IDisposable
         Assert.Single(claims);
         Assert.Equal("POL-000012345678", claims[0].PolicyNumber);
         Assert.DoesNotContain("4111", claims[0].CardNumber);
+    }
+
+    // ── Role-based masking mirrors scope-based behavior ──────────────────────
+
+    [Fact]
+    public async Task ARoleUnmasksItsOwnCategoryAndNoOther()
+    {
+        var id = await SeedClaimWithRolesAsync();
+
+        var claim = await ClaimsWithRolesFor("PolicyReader").GetByIdAsync(id);
+
+        Assert.Equal("POL-000012345678", claim!.PolicyNumber);
+        Assert.DoesNotContain("4111", claim.CardNumber);
+        Assert.EndsWith("1234", claim.CardNumber);
+    }
+
+    [Fact]
+    public async Task NotHoldingTheRoleKeepsItMasked()
+    {
+        var id = await SeedClaimWithRolesAsync();
+
+        var claim = await ClaimsWithRolesFor().GetByIdAsync(id);
+
+        Assert.DoesNotContain("000012345678", claim!.PolicyNumber);
+        Assert.DoesNotContain("4111", claim.CardNumber);
+    }
+
+    [Fact]
+    public async Task HoldingARoleForOneCategoryAndScopeForAnotherUnmasksBothIndependently()
+    {
+        var id = await SeedClaimWithRolesAsync();
+
+        var claim = await ClaimsWithRolesFor("PolicyReader", "view:financial").GetByIdAsync(id);
+
+        Assert.Equal("POL-000012345678", claim!.PolicyNumber);
+        Assert.Equal("4111111111111234", claim.CardNumber);
+    }
+
+    [Fact]
+    public async Task HoldingNeitherRoleNorScopeMasksBoth()
+    {
+        var id = await SeedClaimWithRolesAsync();
+
+        var claim = await ClaimsWithRolesFor().GetByIdAsync(id);
+
+        Assert.DoesNotContain("000012345678", claim!.PolicyNumber);
+        Assert.DoesNotContain("4111", claim.CardNumber);
     }
 }

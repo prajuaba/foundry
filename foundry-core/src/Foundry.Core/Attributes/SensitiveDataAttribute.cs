@@ -67,6 +67,13 @@ public sealed class SensitiveDataAttribute : Attribute
     public char MaskChar { get; set; } = '*';
 
     /// <summary>
+    /// Roles that also entitle a caller to see this property unmasked, in addition to holding the
+    /// <c>view:{Category}</c> scope. Empty by default — purely additive; a deployment issuing scopes
+    /// needs no changes to keep working exactly as before.
+    /// </summary>
+    public string[] Roles { get; set; } = [];
+
+    /// <summary>
     /// Masks a raw value using the configuration of this attribute.
     /// </summary>
     public string MaskValue(object? value)

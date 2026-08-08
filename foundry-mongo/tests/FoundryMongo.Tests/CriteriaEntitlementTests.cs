@@ -29,20 +29,29 @@ public class CriteriaEntitlementTests : IDisposable
     {
         public string Reference { get; set; } = string.Empty;
 
-        [SensitiveData(Category = "financial")]
+        [SensitiveData(Category = "financial", Roles = ["FinanceViewer"])]
         public string CardNumber { get; set; } = string.Empty;
 
         [PiiData(PiiType.Email)]
         public string Email { get; set; } = string.Empty;
     }
 
-    private sealed class ScopedUser(params string[] scopes) : ICurrentUserContext
+    private sealed class ScopedUser(string[] scopes, string[] roles) : ICurrentUserContext
     {
+        public ScopedUser(params string[] scopesAndRoles)
+            : this(
+                Array.FindAll(scopesAndRoles, s => s.StartsWith("view:")),
+                Array.FindAll(scopesAndRoles, r => !r.StartsWith("view:")))
+        {
+        }
+
         public string OperatorId => "someone";
         public string? OperatorName => "someone";
 
         public ClaimsPrincipal? User => new(new ClaimsIdentity(
-            scopes.Select(s => new Claim(ViewSensitiveDataScope.ClaimType, s)).ToList(),
+            scopes.Select(s => new Claim(ViewSensitiveDataScope.ClaimType, s))
+                  .Concat(roles.Select(r => new Claim("role", r)))
+                  .ToList(),
             "Test"));
     }
 
@@ -163,5 +172,33 @@ public class CriteriaEntitlementTests : IDisposable
             () => PaymentsAs().FindByCriteriaAsync(many));
 
         Assert.Contains("at most", error.Message);
+    }
+
+    // ── Role-based filter entitlement mirrors scope-based behavior ──────────
+
+    [Fact]
+    public async Task ARoleAllowsFilteringOnMaskedField()
+    {
+        await SeedAsync();
+
+        var entitled = PaymentsAs("FinanceViewer");
+
+        var hit = await entitled.FindByCriteriaAsync(CardStartsWith("4111"));
+        Assert.Single(hit);
+
+        var miss = await entitled.FindByCriteriaAsync(CardStartsWith("5555"));
+        Assert.Empty(miss);
+    }
+
+    [Fact]
+    public async Task ACallerWithoutTheRoleCannotFilter()
+    {
+        await SeedAsync();
+
+        var error = await Assert.ThrowsAsync<UnauthorizedAccessException>(
+            () => PaymentsAs().FindByCriteriaAsync(CardStartsWith("4111")));
+
+        Assert.Contains("CardNumber", error.Message);
+        Assert.Contains("view:financial", error.Message);
     }
 }

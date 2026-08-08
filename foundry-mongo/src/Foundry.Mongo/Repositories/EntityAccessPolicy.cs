@@ -552,9 +552,16 @@ internal sealed class EntityAccessPolicy<T> where T : class, IEntity<ObjectId>
     /// <c>view:pii</c> still means exactly what it meant.
     /// </remarks>
     public bool ShouldMask(Foundry.Core.Entities.SensitiveDataAttribute attribute)
-        => _userContext?.User?.HasClaim(
-               ViewSensitiveDataScope.ClaimType,
-               ViewSensitiveDataScope.For(attribute.Category)) != true;
+    {
+        // Caller is entitled to see the data if they have the required scope OR any of the required roles
+        bool hasScope = _userContext?.User?.HasClaim(
+            ViewSensitiveDataScope.ClaimType,
+            ViewSensitiveDataScope.For(attribute.Category)) == true;
+
+        bool hasRole = attribute.Roles.Length > 0 && HoldsAnyRole(attribute.Roles);
+
+        return !(hasScope || hasRole);
+    }
 
     /// <summary>
     /// Refuses to filter on a property this caller is not entitled to read.
@@ -611,7 +618,8 @@ internal sealed class EntityAccessPolicy<T> where T : class, IEntity<ObjectId>
 
             var pii = property.GetCustomAttribute<Foundry.Core.Security.PiiDataAttribute>();
             if (pii is not null && _userContext?.User?.HasClaim(
-                    ViewSensitiveDataScope.ClaimType, ViewSensitiveDataScope.ClaimValue) != true)
+                    ViewSensitiveDataScope.ClaimType, ViewSensitiveDataScope.ClaimValue) != true
+                && (pii.Roles.Length == 0 || !HoldsAnyRole(pii.Roles)))
             {
                 throw new UnauthorizedAccessException(
                     $"'{property.Name}' on '{typeof(T).Name}' is personally identifiable and this caller "
