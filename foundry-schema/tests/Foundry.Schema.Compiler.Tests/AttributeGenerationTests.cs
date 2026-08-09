@@ -131,8 +131,8 @@ public class AttributeGenerationTests
         Assert.Contains("[MaxLength(20)]", code);
         Assert.Contains("[Range(1, 10)]", code);
         Assert.Contains("[RegularExpression(\"^[a-zA-Z]+$\")]", code);
-        Assert.Contains("[EmailAddress]", code);
-        Assert.Contains("[Url]", code);
-        Assert.Contains("[Phone]", code);
+        Assert.Contains("[EmailAddressWhenPresent]", code);
+        Assert.Contains("[UrlWhenPresent]", code);
+        Assert.Contains("[PhoneWhenPresent]", code);
     }
 }

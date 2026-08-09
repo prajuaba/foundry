@@ -26,7 +26,7 @@ public class DtoGenerationTests
         // Assert
         Assert.Contains("namespace Ordering.Contracts;", code);
         Assert.Contains("public partial record OrderCheckoutRequest", code);
-        Assert.Contains("[EmailAddress]", code);
+        Assert.Contains("[EmailAddressWhenPresent]", code);
         Assert.Contains("[Required]", code);
         Assert.Contains("public required string CustomerEmail { get; init; } = string.Empty;", code);
         Assert.Contains("public required decimal TotalAmount { get; init; } = 0;", code);

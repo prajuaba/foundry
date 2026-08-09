@@ -135,9 +135,6 @@ namespace Foundry.Schema.Compiler
                         foreach (var rule in ep.BusinessRules)
                         {
                             if (string.IsNullOrWhiteSpace(rule)) continue;
-                            var rulePath = $"Rules/{rule}";
-                            result[rulePath] = GenerateCustomEndpointRuleStub(rule, ep.RequestType, schema.Namespace);
-                            scaffoldPaths.Add(rulePath);
                             ruleRegistrations.Add((rule, $"{schema.Namespace}.{ep.RequestType}"));
                         }
                     }
@@ -158,13 +155,39 @@ namespace Foundry.Schema.Compiler
                         foreach (var rule in rules)
                         {
                             if (string.IsNullOrWhiteSpace(rule)) continue;
-                            var rulePath = $"Rules/{rule}";
-                            result[rulePath] = GenerateEntityRuleStub(rule, method, entity.Name, schema.Namespace);
-                            scaffoldPaths.Add(rulePath);
                             ruleRegistrations.Add((rule, EntityRuleRequestType(method, entity.Name, schema.Namespace)));
                         }
                     }
                 }
+            }
+
+            // One stub per rule *name*, implementing IBusinessRule<T> once for every request it was
+            // named against.
+            //
+            // The stub used to be written at each usage into result["Rules/{name}"], so a name used
+            // twice -- "POST": ["XRule"], "PUT": ["XRule"], which is the obvious way to say one
+            // policy guards both -- had its file overwritten by the second usage while both
+            // registrations were still emitted. The surviving class implemented one interface and
+            // was registered for two, and the schema failed to compile with CS0311 on generated
+            // code naming types the author never wrote.
+            //
+            // A class may implement IBusinessRule<A> and IBusinessRule<B> at once, so the natural
+            // reading now works: the same rule guards both methods, with one ValidateAsync per
+            // request shape because InsertCommand<T> and UpdateCommand<T> are different types and
+            // the policy may legitimately differ between them.
+            foreach (var group in ruleRegistrations
+                         .GroupBy(r => r.Rule, StringComparer.Ordinal)
+                         .OrderBy(g => g.Key, StringComparer.Ordinal))
+            {
+                var requests = group
+                    .Select(r => r.Request)
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(r => r, StringComparer.Ordinal)
+                    .ToList();
+
+                var rulePath = $"Rules/{group.Key}";
+                result[rulePath] = GenerateRuleStub(group.Key, requests, schema.Namespace);
+                scaffoldPaths.Add(rulePath);
             }
 
             // Registrations for every rule the schema named.
@@ -800,12 +823,18 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
                         attributes.Add("[PiiData(PiiType.Email)]");
                     else if (attr == "PiiCreditCard")
                         attributes.Add("[PiiData(PiiType.CreditCard)]");
+                    // ...WhenPresent rather than the stock validators. A generated property is a
+                    // non-nullable string initialised to string.Empty, and [Url]/[Phone]/[Email]
+                    // reject "" -- so declaring one on an optional property made it mandatory, and
+                    // a POST omitting the field answered 400 naming something the schema never
+                    // said was required. Presence is [Required]'s job; these check shape only when
+                    // there is a value to check.
                     else if (attr.Equals("Email", StringComparison.OrdinalIgnoreCase))
-                        attributes.Add("[EmailAddress]");
+                        attributes.Add("[EmailAddressWhenPresent]");
                     else if (attr.Equals("Url", StringComparison.OrdinalIgnoreCase))
-                        attributes.Add("[Url]");
+                        attributes.Add("[UrlWhenPresent]");
                     else if (attr.Equals("Phone", StringComparison.OrdinalIgnoreCase))
-                        attributes.Add("[Phone]");
+                        attributes.Add("[PhoneWhenPresent]");
                     else
                         TryEmitValidationAttribute(attr, attributes);
                 }
@@ -1079,12 +1108,18 @@ namespace {CodeGen.Ns(@namespace)};
                 {
                     if (attr == "Required")
                         attributes.Add("[Required]");
+                    // ...WhenPresent rather than the stock validators. A generated property is a
+                    // non-nullable string initialised to string.Empty, and [Url]/[Phone]/[Email]
+                    // reject "" -- so declaring one on an optional property made it mandatory, and
+                    // a POST omitting the field answered 400 naming something the schema never
+                    // said was required. Presence is [Required]'s job; these check shape only when
+                    // there is a value to check.
                     else if (attr.Equals("Email", StringComparison.OrdinalIgnoreCase))
-                        attributes.Add("[EmailAddress]");
+                        attributes.Add("[EmailAddressWhenPresent]");
                     else if (attr.Equals("Url", StringComparison.OrdinalIgnoreCase))
-                        attributes.Add("[Url]");
+                        attributes.Add("[UrlWhenPresent]");
                     else if (attr.Equals("Phone", StringComparison.OrdinalIgnoreCase))
-                        attributes.Add("[Phone]");
+                        attributes.Add("[PhoneWhenPresent]");
                     else
                         TryEmitValidationAttribute(attr, attributes);
                 }
@@ -1110,6 +1145,7 @@ namespace {CodeGen.Ns(@namespace)};
             return $@"using System;
 using System.ComponentModel.DataAnnotations;
 using MongoDB.Bson;
+using Foundry.Core.Attributes;
 
 namespace {CodeGen.Ns(@namespace)};
 
@@ -1363,24 +1399,53 @@ public class {handlerName} : IRequestHandler<{ep.RequestType}, {responseType}>
 }}";
         }
 
-        private static string GenerateCustomEndpointRuleStub(string ruleName, string requestType, string ns)
+        /// <summary>
+        /// Emits one business-rule scaffold implementing <c>IBusinessRule&lt;T&gt;</c> for every
+        /// request the schema named this rule against.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// <paramref name="requestTypes"/> arrive fully qualified, because the two places that
+        /// name a rule already produce them that way -- a custom endpoint's request type and
+        /// <c>EntityRuleRequestType</c>'s <c>InsertCommand&lt;Ns.Entity&gt;</c>.
+        /// </para>
+        /// <para>
+        /// Scaffolds are written once and never overwritten, so a rule that later gains a usage
+        /// will not grow the matching interface by itself. That surfaces as CS0311 against the
+        /// developer's own file rather than against generated code, and the fix is to add the
+        /// interface and its method -- which is why the shape is stated in the file's own comment.
+        /// </para>
+        /// </remarks>
+        private static string GenerateRuleStub(string ruleName, List<string> requestTypes, string ns)
         {
+            var methods = string.Join("\n\n", requestTypes.Select(rt => $@"    public Task<RuleResult> ValidateAsync({rt} request, CancellationToken ct)
+    {{
+        // TODO: Implement the business policy this rule names.
+        return Task.FromResult(RuleResult.Success());
+    }}"));
+
+            var interfaces = string.Join(", ", requestTypes.Select(rt => $"IBusinessRule<{rt}>"));
+
+            var summary = requestTypes.Count == 1
+                ? $"Business rule validator for {requestTypes[0]}."
+                : $"Business rule validator, guarding {requestTypes.Count} requests:\n/// "
+                  + string.Join("\n/// ", requestTypes.Select(rt => "- " + rt))
+                  + "\n///\n/// One ValidateAsync per request shape: the schema named this rule against each of them,\n"
+                  + "/// and they are distinct types, so a policy that differs between them can say so.";
+
             return $@"using System.Threading;
 using System.Threading.Tasks;
 using Foundry.Rules;
+using Foundry.Api.MediatR;
 
 namespace {ns}.Rules;
 
 /// <summary>
-/// Custom business rule validator for {requestType}.
+/// {summary}
 /// </summary>
-public class {ruleName} : IBusinessRule<{ns}.{requestType}>
+public class {ruleName} : {interfaces}
 {{
-    public Task<RuleResult> ValidateAsync({ns}.{requestType} request, CancellationToken ct)
-    {{
-        // TODO: Implement custom business policy validation logic
-        return Task.FromResult(RuleResult.Success());
-    }}
+{methods}
 }}
 ";
         }
@@ -1402,31 +1467,6 @@ public class {ruleName} : IBusinessRule<{ns}.{requestType}>
                 "GET" => $"FindManyQuery<{ns}.{entityName}>",
                 _ => "object"
             };
-
-        private static string GenerateEntityRuleStub(string ruleName, string method, string entityName, string ns)
-        {
-            var requestType = EntityRuleRequestType(method, entityName, ns);
-
-            return $@"using System.Threading;
-using System.Threading.Tasks;
-using Foundry.Rules;
-using Foundry.Api.MediatR;
-
-namespace {ns}.Rules;
-
-/// <summary>
-/// Entity CRUD business rule validator for {entityName} on {method}.
-/// </summary>
-public class {ruleName} : IBusinessRule<{requestType}>
-{{
-    public Task<RuleResult> ValidateAsync({requestType} request, CancellationToken ct)
-    {{
-        // TODO: Implement custom business policy validation logic
-        return Task.FromResult(RuleResult.Success());
-    }}
-}}
-";
-        }
 
         private static string GenerateTransitionCommand(WorkflowTransitionModel transition, Entity entity, string @namespace)
         {

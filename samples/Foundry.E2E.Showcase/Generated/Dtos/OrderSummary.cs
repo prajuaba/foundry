@@ -11,6 +11,7 @@
 using System;
 using System.ComponentModel.DataAnnotations;
 using MongoDB.Bson;
+using Foundry.Core.Attributes;
 
 namespace Foundry.E2E.Showcase;
 
@@ -23,6 +24,6 @@ public partial record OrderSummary
 
     public OrderStatus Status { get; init; }
 
-    [EmailAddress]
+    [EmailAddressWhenPresent]
     public string CustomerEmail { get; init; } = string.Empty;
 }
