@@ -28,7 +28,33 @@ public class GlobalExceptionHandler : IExceptionHandler
                 Instance = httpContext.Request.Path
             };
             problemDetails.Extensions["errors"] = valEx.Errors.Select(e => new { e.PropertyName, e.ErrorMessage }).ToList();
-            
+
+            var json = JsonSerializer.Serialize(problemDetails);
+            await httpContext.Response.WriteAsync(json, cancellationToken);
+            return true;
+        }
+
+        // The *other* ValidationException. This file has `using FluentValidation;`, so the branch
+        // above binds to FluentValidation.ValidationException -- while the query-string and route
+        // binders throw System.ComponentModel.DataAnnotations.ValidationException, a different type
+        // with the same simple name, which fell through to the catch-all 500 at the bottom.
+        //
+        // A caller sending ?priority=nonsense was told the server had failed, when what happened is
+        // that they sent something the server could not read. Two types one using-directive apart,
+        // and the entire malformed-input path answered with the wrong class of status.
+        if (exception is System.ComponentModel.DataAnnotations.ValidationException dataAnnotationsEx)
+        {
+            httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+            httpContext.Response.ContentType = "application/json";
+
+            var problemDetails = new ProblemDetails
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "Validation Failed",
+                Detail = dataAnnotationsEx.Message,
+                Instance = httpContext.Request.Path
+            };
+
             var json = JsonSerializer.Serialize(problemDetails);
             await httpContext.Response.WriteAsync(json, cancellationToken);
             return true;
