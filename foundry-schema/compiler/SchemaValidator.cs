@@ -511,6 +511,37 @@ namespace Foundry.Schema.Compiler
                         $"Write it as {spec.Example}.");
                 }
             }
+
+            // Encryption and masking are alternatives, and the compiler silently picked one.
+            //
+            // Both map to [SensitiveData], whose ProtectionType is a single value rather than a
+            // set, so a property asking for both was emitted as Encrypt and the mask was dropped
+            // without a word. The value is then stored encrypted and returned *in full* to every
+            // caller entitled to read the entity -- the opposite of what declaring a mask asks for,
+            // and invisible unless someone reads the generated attribute. The showcase's own
+            // Customer.Email declared exactly this pair.
+            //
+            // An error rather than a warning: there is no reading of "encrypted and masked" that
+            // the emitted code satisfies, so continuing would ship a property whose schema and
+            // behaviour disagree about who can read it.
+            var wantsEncrypt = attributes.Any(a => a.Equals("Encrypt", StringComparison.OrdinalIgnoreCase));
+            var masks = attributes
+                .Where(a => a.Equals("Mask", StringComparison.OrdinalIgnoreCase)
+                            || a.Equals("MaskEmail", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (wantsEncrypt && masks.Count > 0)
+            {
+                bag.Error(
+                    DiagnosticCatalog.EncryptAndMaskOnOneProperty,
+                    $"'{entity.Name}.{prop.Name}' declares both 'Encrypt' and '{masks[0]}'. "
+                    + "Only the encryption would be applied.",
+                    propPath,
+                    "Keep 'Encrypt' for a value that must be unreadable in the database and is "
+                    + $"returned in full by its own API, or keep '{masks[0]}' for a value that is "
+                    + "stored readable and redacted on the way out. To have both, the value needs "
+                    + "encrypting at rest and a second, separately named property for display.");
+            }
         }
 
         private static void ValidateEntityIndexes(Entity entity, List<Property> properties, string path, DiagnosticBag bag)

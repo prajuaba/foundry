@@ -302,6 +302,9 @@ namespace Foundry.Schema.Compiler
         /// <summary>An ExternalApi workflow action is missing the required Url field.</summary>
         public const string WorkflowActionMissingUrl = "FDY3024";
 
+        /// <summary>A property declares both encryption and masking, only one of which can apply.</summary>
+        public const string EncryptAndMaskOnOneProperty = "FDY3025";
+
         // ---- FDY4xxx: naming and identifier safety ----
 
         /// <summary>A name is not a valid C# identifier and cannot be emitted as code.</summary>
@@ -394,6 +397,7 @@ namespace Foundry.Schema.Compiler
             [UnknownAttribute] = "The attribute is not in the supported vocabulary and will be ignored.",
             [UnknownType] = "The type is not in the supported vocabulary and will be emitted verbatim as a C# type name.",
             [InvalidArchiveThreshold] = "A partitioned entity's 'archiveThresholdYears' must be greater than zero.",
+            [EncryptAndMaskOnOneProperty] = "A property cannot be both encrypted and masked. ProtectionType is a single value, not a set, so the compiler honours Encrypt and drops the mask -- the value is then returned in full to every caller entitled to read the entity, which is the opposite of what declaring a mask asks for.",
             [InvalidHttpMethod] = "A custom endpoint 'method' must be one of GET, POST, PUT, PATCH, DELETE.",
             [InvalidRoute] = "A custom endpoint 'route' must begin with '/'.",
             [UnusedEnum] = "An enum is declared but no property is typed with it. Usually the property that should use it was left as a plain scalar, which loses type safety and leaves the enum dead.",

@@ -32,6 +32,7 @@ public partial record CustomerNote : BaseEntity<ObjectId>, IVersionable, ISoftDe
 
     [Required]
     [MaxLength(4000)]
+    [SensitiveData(Protection = ProtectionType.Encrypt)]
     public required string Body { get; init; } = string.Empty;
 
     [Indexed]

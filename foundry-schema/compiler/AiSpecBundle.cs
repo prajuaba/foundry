@@ -86,9 +86,10 @@ namespace Foundry.Schema.Compiler
       "properties": [
         { "name": "Id", "type": "ObjectId", "isKey": true },
         { "name": "TenantId", "type": "string", "isTenantKey": true, "attributes": ["Required", "Indexed"] },
-        { "name": "Email", "type": "string", "attributes": ["Required", "Email", "Encrypt", "MaskEmail", "PiiEmail"] },
+        { "name": "Email", "type": "string", "attributes": ["Required", "Email", "MaskEmail", "PiiEmail"] },
+        { "name": "NationalId", "type": "string", "sensitiveCategory": "government", "attributes": ["Encrypt"] },
         { "name": "DisplayName", "type": "string", "attributes": ["Required", "MaxLength(200)"] },
-        { "name": "Phone", "type": "string", "attributes": ["Phone"] }
+        { "name": "Phone", "type": "string", "sensitiveCategory": "contact", "attributes": ["Mask", "Phone"] }
       ]
     }
   ]

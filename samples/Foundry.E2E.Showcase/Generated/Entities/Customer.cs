@@ -27,14 +27,14 @@ public partial record Customer : BaseEntity<ObjectId>, IVersionable, ISoftDelete
 
     [Indexed(Unique = true)]
     [Required]
-    [SensitiveData(Protection = ProtectionType.Encrypt)]
+    [SensitiveData(Protection = ProtectionType.Mask, MaskingType = MaskingType.Email)]
     public required string Email { get; init; } = string.Empty;
 
     [Required]
     [MaxLength(120)]
     public required string FullName { get; init; } = string.Empty;
 
-    [Phone]
+    [PhoneWhenPresent]
     [SensitiveData(Protection = ProtectionType.Mask, Category = "contact")]
     public string PhoneNumber { get; init; } = string.Empty;
 

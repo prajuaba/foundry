@@ -51,6 +51,11 @@ Ranges: `FDY1xxx` document structure, `FDY2xxx` cross-reference integrity,
 | `FDY3017` | The grant set must be a property named 'SharedWith' of type 'List<string>', for the same reason the owner key must be named 'OwnerId': the data layer filters on the stored field by name. |
 | `FDY3018` | A role listed in both 'ownerExemptRoles' and 'ownerReadExemptRoles' is fully exempt; the read-only listing has no effect and reads as a restriction that is not applied. |
 | `FDY3019` | A decision gate whose branches are all conditional declares no 'defaultState', so a transition reaching it when no branch matches is refused at runtime. |
+| `FDY3021` | A workflow state or transition with no roles is reachable by any authenticated caller. If this is intentional, no action is needed. |
+| `FDY3022` | A workflow action's 'type' must be either 'InternalApi' or 'ExternalApi'. Other values like 'Webhook' or 'Command' are not supported by the workflow engine and will fail at runtime. |
+| `FDY3023` | An InternalApi action requires a 'requestType' field naming the command to dispatch internally. |
+| `FDY3024` | An ExternalApi action requires a 'url' field for the external HTTP endpoint. |
+| `FDY3025` | A property cannot be both encrypted and masked. ProtectionType is a single value, not a set, so the compiler honours Encrypt and drops the mask -- the value is then returned in full to every caller entitled to read the entity, which is the opposite of what declaring a mask asks for. |
 | `FDY4001` | The name cannot be emitted as C#. Use letters, digits and underscores, starting with a letter or underscore. |
 | `FDY4002` | The name is a reserved C# keyword. Choose a different name. |
 | `FDY4003` | The namespace must be dot-separated valid C# identifiers, e.g. 'Acme.Billing'. |

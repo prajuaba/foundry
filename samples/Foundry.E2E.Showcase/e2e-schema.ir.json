@@ -90,7 +90,6 @@
           "attributes": [
             "Unique",
             "Required",
-            "Encrypt",
             "MaskEmail"
           ]
         },
@@ -394,6 +393,7 @@
           "type": "string",
           "attributes": [
             "Required",
+            "Encrypt",
             "MaxLength(4000)"
           ]
         }
