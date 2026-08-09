@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 
 namespace Foundry.Schema.Compiler
@@ -22,9 +23,16 @@ namespace Foundry.Schema.Compiler
             string? inputPath = null;
             string? outputPath = null;
             string? manifestPath = null;
+            bool prune = true;
 
             for (int i = 0; i < args.Length; i++)
             {
+                if (args[i] == "--no-prune")
+                {
+                    prune = false;
+                    continue;
+                }
+
                 if (args[i] == "--input" || args[i] == "-i")
                 {
                     if (i + 1 < args.Length)
@@ -130,6 +138,10 @@ namespace Foundry.Schema.Compiler
                     Console.WriteLine($"{(file.Kind == EmitKind.Scaffold ? "Scaffolded" : "Generated")}: {filePath}");
                 }
 
+                var removed = prune
+                    ? PruneOrphans(outputPath!, generatedFiles)
+                    : 0;
+
                 // api-manifest.json is what makes a compiled domain serve anything: the REST surface
                 // is emitted by the Foundry.Api.SourceGenerators analyser from this file, and with no
                 // manifest the analyser emits empty registrations and every entity route answers 404.
@@ -146,7 +158,8 @@ namespace Foundry.Schema.Compiler
                 written++;
 
                 var warnings = bag.WarningCount > 0 ? $", {bag.WarningCount} warning(s)" : "";
-                Console.WriteLine($"Success: {written} file(s) written, {preserved} scaffold(s) preserved{warnings}.");
+                var pruned = removed > 0 ? $", {removed} orphan(s) removed" : "";
+                Console.WriteLine($"Success: {written} file(s) written, {preserved} scaffold(s) preserved{pruned}{warnings}.");
                 return 0;
             }
             catch (UnsafeSchemaValueException ex)
@@ -168,12 +181,116 @@ namespace Foundry.Schema.Compiler
             }
         }
 
+        /// <summary>
+        /// Deletes generated files under <paramref name="outputPath"/> that this compile did not
+        /// emit, and any directory left empty by doing so. Returns how many files were removed.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Without this, removing a construct from a schema left its C# behind, still compiling and
+        /// still wired up: a deleted entity kept its record, a renamed one had two, and moving the
+        /// emit layout under a folder left the whole previous layout in place. The compiler already
+        /// knew what it emits -- a test asserts the showcase has no orphans -- and only the person
+        /// running it was expected to act on the difference.
+        /// </para>
+        /// <para>
+        /// What it will delete is deliberately narrow: a file must carry the
+        /// <c>// &lt;auto-generated/&gt;</c> marker this compiler writes. That marker is the whole
+        /// safety argument, because a file carrying it is reproducible by definition -- anything
+        /// deleted here comes back on the next compile if the schema still calls for it.
+        /// </para>
+        /// <para>
+        /// Three things are therefore never touched, and each would be someone's lost work:
+        /// <b>scaffolds</b>, which carry the <c>&lt;foundry-scaffold/&gt;</c> marker instead and hold
+        /// the business logic a schema cannot state; <b><c>*.Custom.cs</c></b>, the documented place
+        /// for hand-written partials, which the header itself points developers to; and any file
+        /// with neither marker, which this compiler did not write and has no business removing.
+        /// </para>
+        /// </remarks>
+        static int PruneOrphans(string outputPath, IReadOnlyList<GeneratedFile> generatedFiles)
+        {
+            if (!Directory.Exists(outputPath)) return 0;
+
+            var emitted = generatedFiles
+                .Select(f => Path.GetFullPath(Path.Combine(outputPath, $"{f.Path}.cs")))
+                .ToHashSet(StringComparer.Ordinal);
+
+            var removed = 0;
+
+            foreach (var path in Directory.GetFiles(outputPath, "*.cs", SearchOption.AllDirectories))
+            {
+                var full = Path.GetFullPath(path);
+                if (emitted.Contains(full)) continue;
+
+                if (full.EndsWith(".Custom.cs", StringComparison.OrdinalIgnoreCase)) continue;
+
+                // Read only the head: enough to see a marker, and it keeps a stray large file in
+                // the output directory from being loaded in full just to be left alone.
+                string head;
+                try
+                {
+                    using var reader = new StreamReader(full);
+                    var buffer = new char[256];
+                    head = new string(buffer, 0, reader.Read(buffer, 0, buffer.Length));
+                }
+                catch (IOException)
+                {
+                    continue;
+                }
+
+                if (!head.StartsWith("// <auto-generated/>", StringComparison.Ordinal)) continue;
+
+                try
+                {
+                    File.Delete(full);
+                    removed++;
+                    Console.WriteLine($"Removed: {path} (no longer emitted by the schema)");
+                }
+                catch (IOException ex)
+                {
+                    Console.WriteLine($"Warning: could not remove orphaned '{path}'. {ex.Message}");
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    Console.WriteLine($"Warning: could not remove orphaned '{path}'. {ex.Message}");
+                }
+            }
+
+            if (removed > 0) RemoveEmptyDirectories(outputPath);
+
+            return removed;
+        }
+
+        /// <summary>
+        /// Removes directories under <paramref name="root"/> that pruning left with nothing in
+        /// them, deepest first. <paramref name="root"/> itself is kept.
+        /// </summary>
+        static void RemoveEmptyDirectories(string root)
+        {
+            foreach (var dir in Directory.GetDirectories(root, "*", SearchOption.AllDirectories)
+                         .OrderByDescending(d => d.Length))
+            {
+                try
+                {
+                    if (Directory.GetFileSystemEntries(dir).Length == 0) Directory.Delete(dir);
+                }
+                catch (IOException)
+                {
+                    // A directory that will not go is not worth failing a compile over.
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+        }
+
         static void PrintUsage()
         {
             Console.WriteLine("Usage: Foundry.Schema.Compiler --input <schema.json> --output <directory> [--manifest <file>]");
             Console.WriteLine("  --input, -i     : Path to the JSON schema file");
             Console.WriteLine("  --output, -o    : Output directory path");
             Console.WriteLine("  --manifest, -m  : Where to write api-manifest.json (default: <output>/api-manifest.json)");
+            Console.WriteLine("  --no-prune      : Keep generated files the schema no longer emits (default: remove them)");
         }
     }
 }
