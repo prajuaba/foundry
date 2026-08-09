@@ -50,7 +50,20 @@ public static class WorkflowServiceCollectionExtensions
         services.TryAddSingleton(entityRegistry);
         services.TryAddSingleton<IWorkflowCommandTypeResolver>(commandRegistry);
         services.TryAddSingleton<IWorkflowDefinitionProvider, ApiManifestWorkflowDefinitionProvider>();
-        services.TryAddSingleton<IWorkflowStateStore, MongoWorkflowStateStore>();
+
+        // Scoped, not singleton. The store resolves IRepository<T> from the IServiceProvider it was
+        // constructed with; as a singleton that provider is the root, and IRepository<T> is scoped
+        // because ICurrentUserContext is. The two failure modes were opposite and both bad: under
+        // the scope validation Development turns on, every transition on every entity threw
+        // "Cannot resolve ... from root provider" -- and Production, which does not validate,
+        // resolved a root ICurrentUserContext instead, with no HttpContext behind it. That is the
+        // wrong operator on the audit entry and no tenant on the write, silently, in the half of
+        // the framework whose whole claim is that neither can happen.
+        //
+        // Nothing holds this across requests: WorkflowTransitionBehavior is transient in the MediatR
+        // pipeline and WorkflowHistoryEndpoint takes it [FromServices]. Both are already per-request,
+        // so scoped is the lifetime its dependencies always implied.
+        services.TryAddScoped<IWorkflowStateStore, MongoWorkflowStateStore>();
         services.AddTransient(typeof(IPipelineBehavior<,>), typeof(WorkflowTransitionBehavior<,>));
 
         return services;
