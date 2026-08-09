@@ -24,12 +24,19 @@ From the repository root:
 # Build all .NET projects in the solution
 dotnet build
 
-# Run all 81 Schema Compiler Unit Tests
+# Run the schema compiler's unit tests
 $HOME/.dotnet/dotnet test foundry-schema/tests/Foundry.Schema.Compiler.Tests/Foundry.Schema.Compiler.Tests.csproj
 
-# Run all 75 Integration Tests (Requires Docker MongoDB running)
+# Run the integration tests (requires the Docker infrastructure below)
 $HOME/.dotnet/dotnet test foundry-integration-tests/Foundry.IntegrationTests.csproj
+
+# Or run every suite, which is what CI does
+bash scripts/run-tests.sh
 ```
+
+Test counts are deliberately not quoted here. They were, and they drifted by an order of
+magnitude before anyone noticed — the same failure mode as the hardcoded version string
+`foundry version` used to print. Run the suites and read the number they report.
 
 ---
 
@@ -47,6 +54,7 @@ docker compose up -d
 | **Mongo Express** | `http://localhost:8081` | Web UI database inspector |
 | **Kafka Broker** | `localhost:9092` | Event streaming broker |
 | **Kafka UI** | `http://localhost:8080` | Web UI topic inspector |
+| **OTel Collector** | `localhost:4317` (gRPC), `4318` (HTTP) | Receives traces and metrics from a running app. Development aid only — not part of any deployment. |
 
 ---
 
@@ -71,7 +79,26 @@ docker compose up -d
 
 ---
 
-## 🧪 4. Running the End-to-End Showcase
+## 📦 4. What `foundry new` Gives You
+
+A scaffolded application arrives wired for operation, not just for CRUD:
+
+| Capability | How to see it |
+| :--- | :--- |
+| **Health endpoint** | `curl localhost:5000/api/health` — unauthenticated by design, since an orchestrator's probe carries no token. Returns `200 Healthy`, or `503 Unhealthy` when MongoDB is unreachable. |
+| **Durable audit trail** | Every mutation writes an entry to the `audit_log` collection, attributed to the caller's token subject. Inspect it in Mongo Express. |
+| **Traces and metrics** | Set `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317` and watch spans arrive with `docker logs foundry-otel-collector`. Without that variable the app collects telemetry and exports nothing, deliberately. |
+| **Container image** | `dotnet publish -c Release -o publish && docker build -t myapp .` — the generated Dockerfile packages the published output. Its header explains why it does not build from source. |
+
+Tokens for local use come from the CLI, which signs with the same key the app validates against:
+
+```bash
+foundry token mint --signing-key "$(...)" --issuer MyApp --audience MyApp
+```
+
+---
+
+## 🧪 5. Running the End-to-End Showcase
 
 Run the comprehensive E2E application demonstrating all Foundry framework layers:
 

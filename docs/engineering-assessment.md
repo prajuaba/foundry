@@ -2049,3 +2049,101 @@ was green.
 runtime smoke test — the one gate that has caught what unit suites alone missed twice in this
 document's history, and the gate this change's own code path (`WorkflowTransitionBehavior`) is
 already exercised by three times over.
+
+---
+
+## 11. Addendum — 2026-08-09
+
+The first cycle in this document's history that ends with a **gate** rather than a list. That
+distinction is the point of the entry; the fixes below are ordinary.
+
+**The question that started it was not "what is broken" but "what would an internal pilot need".**
+Answering it honestly turned up four gaps, and three of them were the same defect this document has
+now recorded eleven times.
+
+**The eleventh never-executed feature.** `AddFoundryTelemetry` existed, was documented in
+`docs/reference/developer-reference.md`, and was **called by nothing** — not the scaffolder, not the
+template, not a test. It also had no exporter configured, so wiring it alone would have collected
+spans and discarded them. Both halves are now fixed and, for the first time in this document,
+verified against a real external consumer: an OTLP collector received `GET /api/health` and
+`POST /api/customers` spans carrying `service.name=TestPilotApp` and `service.version=1.0.0`.
+
+**Scaffolded applications had no audit trail at all.** Not a weak one — none. `IAuditSink` is an
+optional constructor dependency on `Repository<T>`, so an application that registers no sink audits
+to nowhere and says nothing. The scaffolder's own comment claimed its wiring "mirrors
+templates/Foundry.Api.Template/Program.cs", and that claim was false on audit, idempotency and
+outbox. A `MongoAuditSink` now ships and is registered; a live `POST` writes one `audit_log`
+document attributed to the caller's token subject.
+
+**Scaffolded applications had no health endpoint.** A reader grepping for one finds `/api/health` in
+`Foundry.Cli`'s own source and concludes it exists — it belongs to the Studio dev server. Generated
+apps now map a check that pings MongoDB and answers 503 when it cannot.
+
+**A template that had never compiled, deleted.** `templates/Foundry.Api.Template` referenced
+`Foundry.Api.GraphQL`, a namespace present nowhere in the repository. It was absent from
+`Foundry.slnx`, so no CI job had ever built it. It was also the file the scaffolder pointed at as its
+reference arrangement, and it registered a stub `ICurrentUserContext` returning no principal — which
+silently disables ownership filtering and masking. An unbuilt artifact drifted exactly as far as
+nothing checking it allows. Two scaffolding paths is how they diverged; there is now one.
+
+**An infrastructure defect that had been mistaken for flakiness.** Mid-run, `mongod` died with
+`Too many open files` (errno 24) in `__posix_directory_sync`, followed by `WT_PANIC` and a fatal
+assertion at `wiredtiger_util.cpp:741`. `docker inspect` showed no `ulimits` on either MongoDB
+service, so it inherited the Docker daemon default against MongoDB's recommended 64000. The suite
+creates a database per test class and every collection and index is a separate `.wt` file. Both
+services now set the limit, verified by reading `/proc/1/limits` inside the containers rather than
+by trusting the compose file to parse. **This is not claimed as the cause of the unexplained CI hang
+in section 9 or the audit-test flake in section 5** — but the shape matches: a server-side death
+presenting as unrelated connection-refused failures across every suite still running.
+
+### What is structurally different
+
+`ScaffoldedAppWiringTests` reflects over every public `AddFoundry*` and `MapFoundry*` registration in
+the framework and fails the build unless each is either wired into the generated application or
+listed in an exemption set with a stated reason. It would have caught telemetry, the audit sink and
+the health check — mechanically, before a human looked.
+
+Section 2 has told this project since its first draft to "change the default, not patch instances",
+and every cycle since has patched instances and written prose about them. This is the first that
+installed the check. **The gate was falsified twice before being accepted** — once by the agent that
+wrote it, once independently against a different registration — because a gate never observed failing
+is not known to be a gate, which is the same standard this document applies to features.
+
+### Two defects caught in review rather than by tests
+
+Both came from delegated work, and neither would have failed any suite:
+
+- A health check registered with `failureStatus: Degraded`. `MapHealthChecks` maps Degraded to
+  **HTTP 200**, so an application with an unreachable database would have answered every readiness
+  probe with OK. "Reports success, does nothing" in its purest form, inside the very check written to
+  detect it.
+- A health check blocking a thread-pool thread with `.GetAwaiter().GetResult()` on an endpoint
+  orchestrators poll continuously.
+
+A third correction was a name: `AuditBehavior` writes no audit entry — it opens the OpenTelemetry
+span and increments the request counter. Renamed to `RequestTelemetryBehavior`, and three documents
+that asserted it "records audit log deltas" and "emits audit entries" were corrected rather than
+merely renamed. The misnaming had propagated into the guarantees the documentation claimed.
+
+### What this addendum does not claim
+
+The OTLP path is verified against a development collector, not against any production one. The audit
+sink appends and never updates or deletes, but nothing prevents a MongoDB role holding `remove` from
+deleting entries — immutability is a deployment grant this code cannot enforce, and an audit trail
+that can be edited is a log. Nothing changed about saga durability, redaction past two levels of
+nesting, MongoDB as the only provider, or at-least-once outbox delivery.
+
+**Verification.** Full solution suite green. Runtime smoke test: 151 checks, 0 failures. The gate
+falsified and restored, `Foundry.Cli.Tests` at 58. Telemetry, audit writes, health responses in both
+states, and the generated container image each confirmed by running them, not by reading them.
+
+**Recorded and not diagnosed.** `Foundry.Schema.Compiler.Tests` ran for 15m 4s in one run and 1s in
+another on the same untouched code. Section 9 records the same suite hanging ~12 minutes in CI and
+completing in 2m25s on re-run, written off as infrastructure flake on a single data point. This is
+the second. It is written down here rather than investigated, on this document's own standard — but
+the next occurrence should not be called a flake.
+
+**A process note, because it nearly cost real work.** A delegated agent reverted a deliberate,
+user-approved file deletion by reaching for a git command during cleanup. The deletion was redone;
+had it reached `foundry-cli/src/Foundry.Cli/Program.cs` instead, it would have destroyed most of this
+cycle's uncommitted work. Agents in this repository should not run writing git commands.
