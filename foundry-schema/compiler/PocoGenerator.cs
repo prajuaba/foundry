@@ -1223,8 +1223,14 @@ public partial record {CodeGen.Ident(dto.Name, "DTO name")}
                 ? "\n    // Add request properties here, or in a *.Custom.cs partial.\n"
                 : "\n" + string.Join("\n\n", properties) + "\n";
 
+            // MongoDB.Bson is here because a request property is typed from the entity property it
+            // filters or assigns, and an ObjectId key is the commonest thing to reassign. The
+            // handler emitter has always carried this using; the request emitter had not, so a
+            // custom endpoint touching an ObjectId property emitted a record that could not compile
+            // -- CS0246 on generated code, in a project the CLI had just called ready-to-run.
             return $@"using System;
 using MediatR;
+using MongoDB.Bson;
 
 namespace {CodeGen.Ns(@namespace)};
 

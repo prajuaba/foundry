@@ -10,6 +10,7 @@
 
 using System;
 using MediatR;
+using MongoDB.Bson;
 
 namespace Foundry.E2E.Showcase;
 
