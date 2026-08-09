@@ -35,14 +35,68 @@ public sealed class CachedRepository<T> : IRepository<T> where T : class, IEntit
         set => _inner.MaxDepthCap = value;
     }
 
-    public CachedRepository(Repository<T> inner, IMemoryCache cache, CachedRepositoryOptions? options = null)
+    private readonly Foundry.Core.User.ICurrentUserContext? _userContext;
+    private readonly Foundry.Core.Tenant.ITenantContext? _tenantContext;
+
+    /// <remarks>
+    /// The two context dependencies are what make an entry belong to a caller rather than to a
+    /// record; see <see cref="GetCacheKey"/>. They are optional so a repository composed outside a
+    /// request — a background worker, a test — still constructs; such a caller fingerprints as
+    /// anonymous and shares entries only with other callers holding nothing.
+    /// </remarks>
+    public CachedRepository(
+        Repository<T> inner,
+        IMemoryCache cache,
+        CachedRepositoryOptions? options = null,
+        Foundry.Core.User.ICurrentUserContext? userContext = null,
+        Foundry.Core.Tenant.ITenantContext? tenantContext = null)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         _cache = cache ?? throw new ArgumentNullException(nameof(cache));
         _defaultTtl = options?.DefaultTtl ?? TimeSpan.FromMinutes(5);
+        _userContext = userContext;
+        _tenantContext = tenantContext;
     }
 
-    private string GetCacheKey(object id) => $"foundrymongo:cache:{CollectionName}:{id}";
+    /// <summary>
+    /// The cache key for one record <em>as one caller may see it</em>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This was <c>collection:id</c> — the identity of the record, not of the value stored against
+    /// it. <c>Repository&lt;T&gt;.GetByIdAsync</c> returns a row that has already been through the
+    /// tenant filter, the owner filter and per-category masking, so what gets cached is one
+    /// caller's view, and every later caller asking for that id was served it.
+    /// </para>
+    /// <para>
+    /// Reproduced against a live API: tenant <c>globex</c> read a project belonging to tenant
+    /// <c>acme</c> by id and got 200, because <c>acme</c> had fetched it first. A direct read
+    /// walking straight past the tenant filter is the worst shape this defect could take. In the
+    /// same run a caller holding <c>view:contact</c> read a masked phone number out of an entry a
+    /// caller with no scopes had populated; the inverse — an entry populated by a privileged caller
+    /// and then served unmasked to everyone — is the same bug pointed the other way.
+    /// </para>
+    /// </remarks>
+    private string GetCacheKey(object id)
+        => $"foundrymongo:cache:{CollectionName}:{id}:{Fingerprint()}";
+
+    private string Fingerprint()
+        => Foundry.Core.Security.CallerViewFingerprint.Compute(
+            _tenantContext?.TenantId, _userContext?.User);
+
+    /// <summary>
+    /// Tokens cancelled to evict every caller's copy of one record at once.
+    /// </summary>
+    /// <remarks>
+    /// Per-caller keys mean a write can no longer evict by recomputing one key: whoever updates a
+    /// record is generally not the only one holding a cached copy, and the others would keep
+    /// serving the old value for the rest of the TTL. Entries are therefore tied to a change token
+    /// per record, and invalidation cancels it, dropping every variant regardless of who cached it.
+    /// </remarks>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CancellationTokenSource>
+        RecordTokens = new();
+
+    private static string RecordTokenKey(string collection, object id) => collection + ":" + id;
 
     public async Task<T?> GetByIdAsync(object id, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
@@ -55,7 +109,17 @@ public sealed class CachedRepository<T> : IRepository<T> where T : class, IEntit
         var result = await _inner.GetByIdAsync(id, session, ct);
         if (result != null)
         {
-            _cache.Set(key, result, _defaultTtl);
+            var cts = RecordTokens.GetOrAdd(RecordTokenKey(CollectionName, id), _ => new CancellationTokenSource());
+
+            // Raced with an invalidation that already cancelled this token: cache nothing, rather
+            // than store an entry no future eviction will reach.
+            if (!cts.IsCancellationRequested)
+            {
+                var entryOptions = new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = _defaultTtl };
+                entryOptions.AddExpirationToken(
+                    new Microsoft.Extensions.Primitives.CancellationChangeToken(cts.Token));
+                _cache.Set(key, result, entryOptions);
+            }
         }
 
         return result;
@@ -63,8 +127,11 @@ public sealed class CachedRepository<T> : IRepository<T> where T : class, IEntit
 
     private void Invalidate(object id)
     {
-        var key = GetCacheKey(id);
-        _cache.Remove(key);
+        if (RecordTokens.TryRemove(RecordTokenKey(CollectionName, id), out var cts))
+        {
+            cts.Cancel();
+            cts.Dispose();
+        }
     }
 
     public async Task InsertAsync(T entity, IClientSessionHandle? session = null, CancellationToken ct = default)
