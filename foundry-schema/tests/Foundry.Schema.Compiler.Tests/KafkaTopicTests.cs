@@ -36,7 +36,7 @@ public class KafkaTopicTests
     };
 
     private static string EntityCode(SchemaModel schema, string entityName)
-        => PocoGenerator.Generate(schema)[entityName];
+        => PocoGenerator.Generate(schema)[$"Entities/{entityName}"];
 
     [Fact]
     public void ADeclaredTopicIsCarriedOntoTheEntity()

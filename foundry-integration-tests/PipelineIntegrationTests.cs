@@ -76,15 +76,15 @@ public class PipelineIntegrationTests : IClassFixture<WebApplicationFactory<Prog
         // Presence rather than an exact count: the generator also emits supporting files
         // (serialization context, index verification), and their number is not the subject
         // of this test.
-        Assert.True(pocoFiles.ContainsKey("Product"));
-        Assert.True(pocoFiles.ContainsKey("ProductCategory"));
+        Assert.True(pocoFiles.ContainsKey("Entities/Product"));
+        Assert.True(pocoFiles.ContainsKey("Enums/ProductCategory"));
 
-        var productCode = pocoFiles["Product"];
+        var productCode = pocoFiles["Entities/Product"];
         Assert.Contains("public partial record Product", productCode);
         Assert.Contains("using Foundry.Core.Entities;", productCode);
         Assert.Contains("namespace IntegrationTest.Domain;", productCode);
 
-        var categoryCode = pocoFiles["ProductCategory"];
+        var categoryCode = pocoFiles["Enums/ProductCategory"];
         Assert.Contains("public enum ProductCategory", categoryCode);
     }
 
@@ -146,19 +146,19 @@ public class PipelineIntegrationTests : IClassFixture<WebApplicationFactory<Prog
         // Presence rather than an exact count: the generator also emits supporting files
         // (serialization context, index verification), and their number is not the subject
         // of this test.
-        Assert.True(pocoFiles.ContainsKey("Invoice"));
-        Assert.True(pocoFiles.ContainsKey("InvoiceLine"));
-        Assert.True(pocoFiles.ContainsKey("InvoiceStatus"));
+        Assert.True(pocoFiles.ContainsKey("Entities/Invoice"));
+        Assert.True(pocoFiles.ContainsKey("Entities/InvoiceLine"));
+        Assert.True(pocoFiles.ContainsKey("Enums/InvoiceStatus"));
 
         // Invoice should have soft-delete markers
-        Assert.Contains("ISoftDelete", pocoFiles["Invoice"]);
-        Assert.Contains("IsDeleted", pocoFiles["Invoice"]);
+        Assert.Contains("ISoftDelete", pocoFiles["Entities/Invoice"]);
+        Assert.Contains("IsDeleted", pocoFiles["Entities/Invoice"]);
 
         // Invoice should have index attribute
-        Assert.Contains("[Indexed]", pocoFiles["Invoice"]);
+        Assert.Contains("[Indexed]", pocoFiles["Entities/Invoice"]);
 
         // InvoiceLine should reference Invoice (foreign key pattern)
-        Assert.Contains("InvoiceId", pocoFiles["InvoiceLine"]);
+        Assert.Contains("InvoiceId", pocoFiles["Entities/InvoiceLine"]);
     }
 
     [Fact]
@@ -200,11 +200,11 @@ public class PipelineIntegrationTests : IClassFixture<WebApplicationFactory<Prog
         var files = PocoGenerator.Generate(schema);
 
         // Assert — DTO should be generated alongside the entity
-        Assert.True(files.ContainsKey("Task"));
-        Assert.True(files.ContainsKey("CreateTaskDto"));
-        Assert.Contains("public partial record CreateTaskDto", files["CreateTaskDto"]);
-        Assert.Contains("Title", files["CreateTaskDto"]);
-        Assert.Contains("Description", files["CreateTaskDto"]);
+        Assert.True(files.ContainsKey("Entities/Task"));
+        Assert.True(files.ContainsKey("Dtos/CreateTaskDto"));
+        Assert.Contains("public partial record CreateTaskDto", files["Dtos/CreateTaskDto"]);
+        Assert.Contains("Title", files["Dtos/CreateTaskDto"]);
+        Assert.Contains("Description", files["Dtos/CreateTaskDto"]);
     }
 
     [Fact]
@@ -308,7 +308,7 @@ public class PipelineIntegrationTests : IClassFixture<WebApplicationFactory<Prog
 
         foreach (var kvp in expectedEndpoints)
         {
-            Assert.True(pocoFiles.ContainsKey(kvp.Key), $"POCO for entity '{kvp.Key}' should be generated");
+            Assert.True(pocoFiles.ContainsKey($"Entities/{kvp.Key}"), $"POCO for entity '{kvp.Key}' should be generated");
         }
     }
 
@@ -504,13 +504,13 @@ public class PipelineIntegrationTests : IClassFixture<WebApplicationFactory<Prog
         // Presence rather than an exact count: the generator also emits supporting files
         // (serialization context, index verification), and their number is not the subject
         // of this test.
-        Assert.True(pocoFiles.ContainsKey("Order"));
-        Assert.True(pocoFiles.ContainsKey("Customer"));
-        Assert.True(pocoFiles.ContainsKey("OrderItem"));
-        Assert.True(pocoFiles.ContainsKey("OrderStatus"));
+        Assert.True(pocoFiles.ContainsKey("Entities/Order"));
+        Assert.True(pocoFiles.ContainsKey("Entities/Customer"));
+        Assert.True(pocoFiles.ContainsKey("Entities/OrderItem"));
+        Assert.True(pocoFiles.ContainsKey("Enums/OrderStatus"));
 
         // Step 3: Validate generated code quality (what Studio would show to the user)
-        var orderCode = pocoFiles["Order"];
+        var orderCode = pocoFiles["Entities/Order"];
         Assert.Contains("ISoftDelete", orderCode);
         Assert.Contains("public required string OrderNumber", orderCode);
 

@@ -85,7 +85,7 @@ public class GeneratedCodeCompilesTests
             // and two of those in one project collide inside System.Text.Json's own generator. The
             // entity is what carries the IMultiTenant implementation, which is what needs compiling.
             var tenantEntity = PocoGenerator.GenerateFiles(MultiTenantSchema())
-                .Single(f => f.Path == "TenantScopedInvoice");
+                .Single(f => f.Path == "Entities/TenantScopedInvoice");
 
             File.WriteAllText(Path.Combine(work, "TenantScopedInvoice.cs"), tenantEntity.Content);
 

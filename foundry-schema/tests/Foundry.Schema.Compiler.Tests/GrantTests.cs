@@ -44,7 +44,7 @@ public class GrantTests
         ]
     };
 
-    private static string EntityCode(SchemaModel schema) => PocoGenerator.Generate(schema)["Note"];
+    private static string EntityCode(SchemaModel schema) => PocoGenerator.Generate(schema)["Entities/Note"];
 
     // ── Emission ────────────────────────────────────────────────────────────
 
@@ -183,7 +183,7 @@ public class GrantTests
     {
         // Masking was one switch: view:pii unmasked every masked property on every entity, so
         // letting someone read one field meant letting them read all of them.
-        var code = PocoGenerator.Generate(MaskedSchema("financial"))["Claim"];
+        var code = PocoGenerator.Generate(MaskedSchema("financial"))["Entities/Claim"];
 
         Assert.Contains("Category = \"financial\"", code);
     }
@@ -193,7 +193,7 @@ public class GrantTests
     {
         // Back-compatible on purpose: the attribute defaults to "pii", so every existing declaration
         // keeps answering to view:pii exactly as it did.
-        var code = PocoGenerator.Generate(MaskedSchema(null))["Claim"];
+        var code = PocoGenerator.Generate(MaskedSchema(null))["Entities/Claim"];
 
         Assert.Contains("[SensitiveData(Protection = ProtectionType.Mask)]", code);
         Assert.DoesNotContain("Category", code);
@@ -202,7 +202,7 @@ public class GrantTests
     [Fact]
     public void ACategoryContainingAQuoteCannotEscapeTheAttribute()
     {
-        var code = PocoGenerator.Generate(MaskedSchema("financial\", Evil = \"x"))["Claim"];
+        var code = PocoGenerator.Generate(MaskedSchema("financial\", Evil = \"x"))["Entities/Claim"];
 
         Assert.DoesNotContain("Evil = \"x\")]", code);
     }
