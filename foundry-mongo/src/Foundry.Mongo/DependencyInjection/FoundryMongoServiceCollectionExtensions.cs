@@ -1,6 +1,7 @@
 using System;
 using System.Reflection;
 using Foundry.Core.Attributes;
+using Foundry.Core.Audit;
 using Foundry.Core.Entities;
 using Foundry.Mongo.DependencyInjection;
 using Foundry.Mongo.Diagnostics;
@@ -8,7 +9,9 @@ using Foundry.Core.Security;
 using Foundry.Mongo.Infrastructure.Conventions;
 using Foundry.Mongo.Repositories;
 using Foundry.Mongo.UnitOfWork;
+using Foundry.Mongo.Audit;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using Foundry.Core.Outbox;
@@ -155,6 +158,55 @@ public static class FoundryMongoServiceCollectionExtensions
 
         // Register background archival worker
         services.AddHostedService<Foundry.Mongo.Services.DataArchivalWorker>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// Registers a MongoDB audit sink for durable audit trail storage.
+    /// This method is opt-in to prevent silently enabling auditing for existing consumers whose tests may not expect audit writes.
+    /// </summary>
+    /// <param name="services">The service collection to register the audit sink into.</param>
+    /// <param name="collectionName">The name of the MongoDB collection where audit entries will be stored. Defaults to "audit_log".</param>
+    /// <returns>The service collection for method chaining.</returns>
+    public static IServiceCollection AddFoundryMongoAuditSink(
+        this IServiceCollection services,
+        string collectionName = "audit_log")
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        if (string.IsNullOrWhiteSpace(collectionName))
+            throw new ArgumentException("Collection name is required and cannot be null or whitespace.", nameof(collectionName));
+
+        services.TryAddSingleton<IAuditSink>(sp =>
+            new MongoAuditSink(sp.GetRequiredService<IMongoDatabase>(), collectionName));
+
+        return services;
+    }
+
+    /// <summary>
+    /// Registers a MongoDB health check for container orchestration liveness and readiness probes.
+    /// This method is opt-in to prevent adding health check concerns to applications that do not require them.
+    /// </summary>
+    /// <param name="services">The service collection to register the health check into.</param>
+    /// <param name="name">The name to assign the health check in the health check registry. Defaults to "mongodb".</param>
+    /// <returns>The service collection for method chaining.</returns>
+    public static IServiceCollection AddFoundryMongoHealthCheck(
+        this IServiceCollection services,
+        string name = "mongodb")
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        if (string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException("Health check name is required and cannot be null or whitespace.", nameof(name));
+
+        // Register with HealthStatus.Unhealthy, not Degraded. Degraded maps to HTTP 200 by default in
+        // MapHealthChecks, meaning an unreachable database would incorrectly report 200 OK to Kubernetes
+        // readiness probes, causing the pod to keep taking traffic when it cannot serve. A database this
+        // application cannot reach is not a degradation — it is an inability to serve — so the failure
+        // status must be Unhealthy.
+        services.AddHealthChecks()
+            .AddCheck<MongoHealthCheck>(name, failureStatus: HealthStatus.Unhealthy);
 
         return services;
     }
