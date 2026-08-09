@@ -34,6 +34,16 @@ services:
       timeout: 10s
       retries: 20
       start_period: 10s
+    # Without a raised nofile limit, the test suite's per-test databases accumulate open WiredTiger
+    # files (each collection and index is a separate .wt file, and dropped databases defer table
+    # drops). Over a long run mongod eventually fails to open one more file; WiredTiger panics to
+    # avoid corruption risk -- "Too many open files" (errno 24) followed by WT_PANIC. This surfaces
+    # as spurious connection-refused failures across other tests still running. MongoDB recommends
+    # nofile: 64000 for production workloads; the test suite needs it too.
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
     networks:
       - foundry-network
 
@@ -62,6 +72,10 @@ services:
       timeout: 10s
       retries: 12
       start_period: 5s
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
     networks:
       - foundry-network
 
@@ -131,6 +145,24 @@ services:
       DYNAMIC_CONFIG_ENABLED: 'true'
       KAFKA_CLUSTERS_0_NAME: local-foundry-cluster
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    networks:
+      - foundry-network
+
+  # ─── OpenTelemetry Collector ─────────────────────────────────────────
+  # A development aid to verify that the OpenTelemetry export path actually delivers
+  # spans and metrics to a real collector. This is not part of any deployment.
+  #
+  # It listens on OTLP gRPC (4317) and HTTP (4318) and exports to a debug exporter
+  # with detailed verbosity to make trace and metric arrival visible in logs.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: foundry-otel-collector
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
     networks:
       - foundry-network
 
