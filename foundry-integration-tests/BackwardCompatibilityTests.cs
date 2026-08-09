@@ -339,9 +339,9 @@ public class BackwardCompatibilityTests : IClassFixture<AuthenticatedSampleFacto
         // Assert — should produce valid POCO without errors
         // Presence, not an exact count: the generator also emits supporting files
         // (serialization context, index verification) whose number is not what this asserts.
-        Assert.True(output.ContainsKey("LegacyItem"));
-        Assert.Contains("public partial record LegacyItem", output["LegacyItem"]);
-        Assert.Contains("namespace Legacy.Domain.Models;", output["LegacyItem"]);
+        Assert.True(output.ContainsKey("Entities/LegacyItem"));
+        Assert.Contains("public partial record LegacyItem", output["Entities/LegacyItem"]);
+        Assert.Contains("namespace Legacy.Domain.Models;", output["Entities/LegacyItem"]);
     }
 
     [Fact]
@@ -376,8 +376,8 @@ public class BackwardCompatibilityTests : IClassFixture<AuthenticatedSampleFacto
         var output = PocoGenerator.Generate(schema);
 
         // Assert — should generate with soft-delete and auditable markers
-        Assert.True(output.ContainsKey("NewBridgeItem"));
-        Assert.Contains("ISoftDelete", output["NewBridgeItem"]);
+        Assert.True(output.ContainsKey("Entities/NewBridgeItem"));
+        Assert.Contains("ISoftDelete", output["Entities/NewBridgeItem"]);
     }
 
     [Fact]
@@ -404,10 +404,10 @@ public class BackwardCompatibilityTests : IClassFixture<AuthenticatedSampleFacto
 
         // Assert — all entities + enum should be generated
         // See above: assert the domain types exist rather than counting every emitted file.
-        Assert.True(output.ContainsKey("Author"));
-        Assert.True(output.ContainsKey("Book"));
-        Assert.True(output.ContainsKey("Review"));
-        Assert.True(output.ContainsKey("BookGenre"));
+        Assert.True(output.ContainsKey("Entities/Author"));
+        Assert.True(output.ContainsKey("Entities/Book"));
+        Assert.True(output.ContainsKey("Entities/Review"));
+        Assert.True(output.ContainsKey("Enums/BookGenre"));
 
         foreach (var kvp in output)
         {

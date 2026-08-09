@@ -19,7 +19,7 @@ public static class TestHelpers
             Entities = new List<Entity> { entity }
         };
         var result = PocoGenerator.Generate(schema);
-        return result[entity.Name];
+        return result[$"Entities/{entity.Name}"];
     }
 
     /// <summary>
@@ -34,7 +34,7 @@ public static class TestHelpers
             Enums = new List<Foundry.Schema.Compiler.Enum> { enumDef }
         };
         var result = PocoGenerator.Generate(schema);
-        return result[enumDef.Name];
+        return result[$"Enums/{enumDef.Name}"];
     }
 
     /// <summary>
@@ -71,7 +71,7 @@ public static class TestHelpers
             Dtos = new List<DtoModel> { dto }
         };
         var result = PocoGenerator.Generate(schema);
-        return result[dto.Name];
+        return result[$"Dtos/{dto.Name}"];
     }
 
     /// <summary>

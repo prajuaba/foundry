@@ -17,8 +17,8 @@ public class FullSchemaTests
         var schema = BuildSampleSchema();
         var result = PocoGenerator.Generate(schema);
 
-        Assert.True(result.ContainsKey("Order"));
-        var orderCode = result["Order"];
+        Assert.True(result.ContainsKey("Entities/Order"));
+        var orderCode = result["Entities/Order"];
 
         // Class declaration
         Assert.Contains("public partial record Order : BaseEntity<ObjectId>, IVersionable, ISoftDelete", orderCode);
@@ -52,8 +52,8 @@ public class FullSchemaTests
         var schema = BuildSampleSchema();
         var result = PocoGenerator.Generate(schema);
 
-        Assert.True(result.ContainsKey("OrderStatus"));
-        var enumCode = result["OrderStatus"];
+        Assert.True(result.ContainsKey("Enums/OrderStatus"));
+        var enumCode = result["Enums/OrderStatus"];
 
         Assert.Contains("namespace Paperclip.OrderingSystem.Domain;", enumCode);
         Assert.Contains("public enum OrderStatus", enumCode);
@@ -72,8 +72,8 @@ public class FullSchemaTests
         // Asserting presence rather than an exact count: the generator also emits supporting
         // files (serialization context, index verification), and their number is not what this
         // test is about.
-        Assert.True(result.ContainsKey("Order"));
-        Assert.True(result.ContainsKey("OrderStatus"));
+        Assert.True(result.ContainsKey("Entities/Order"));
+        Assert.True(result.ContainsKey("Enums/OrderStatus"));
     }
 
     [Fact]
@@ -119,10 +119,10 @@ public class FullSchemaTests
         };
         var result = PocoGenerator.Generate(schema);
 
-        Assert.True(result.ContainsKey("Customer"));
-        Assert.True(result.ContainsKey("Product"));
-        Assert.True(result.ContainsKey("Customer"));
-        Assert.True(result.ContainsKey("Product"));
+        Assert.True(result.ContainsKey("Entities/Customer"));
+        Assert.True(result.ContainsKey("Entities/Product"));
+        Assert.True(result.ContainsKey("Entities/Customer"));
+        Assert.True(result.ContainsKey("Entities/Product"));
     }
 
     [Fact]
@@ -162,10 +162,10 @@ public class FullSchemaTests
         };
         var result = PocoGenerator.Generate(schema);
 
-        Assert.True(result.ContainsKey("Order"));
-        Assert.True(result.ContainsKey("Customer"));
-        Assert.Contains("public OrderStatus Status", result["Order"]);
-        Assert.Contains("public enum OrderStatus", result["OrderStatus"]);
+        Assert.True(result.ContainsKey("Entities/Order"));
+        Assert.True(result.ContainsKey("Entities/Customer"));
+        Assert.Contains("public OrderStatus Status", result["Entities/Order"]);
+        Assert.Contains("public enum OrderStatus", result["Enums/OrderStatus"]);
     }
 
     [Fact]

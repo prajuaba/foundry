@@ -73,13 +73,21 @@ namespace Foundry.Schema.Compiler
             // so the registrations below cannot disagree with them.
             var ruleRegistrations = new List<(string Rule, string Request)>();
 
+            // Enums, entities and DTOs are foldered by kind, as every other artefact already was.
+            // They used to be written to the output root while Commands/, Handlers/, Rules/,
+            // Services/, Kafka/, Workflow/, RealTime/, Serialization/ and Diagnostics/ all had a
+            // home, so a domain of any size buried nine directories under a flat list of types --
+            // 48 of them here. The folder is a path, not a namespace: every one of these still
+            // declares the schema's own namespace, exactly as Commands/ does, so this moves files
+            // and changes no type's full name.
+
             // Generate enums
             if (schema.Enums != null)
             {
                 foreach (var enumDef in schema.Enums)
                 {
                     var enumCode = GenerateEnum(enumDef, schema.Namespace);
-                    result[enumDef.Name] = enumCode;
+                    result[$"Enums/{enumDef.Name}"] = enumCode;
                 }
             }
 
@@ -89,7 +97,7 @@ namespace Foundry.Schema.Compiler
                 foreach (var entity in schema.Entities)
                 {
                     var entityCode = GenerateEntity(entity, schema.Namespace, schema.Workflows);
-                    result[entity.Name] = entityCode;
+                    result[$"Entities/{entity.Name}"] = entityCode;
                 }
             }
 
@@ -99,7 +107,7 @@ namespace Foundry.Schema.Compiler
                 foreach (var dto in schema.Dtos)
                 {
                     var dtoCode = GenerateDto(dto, schema.Namespace);
-                    result[dto.Name] = dtoCode;
+                    result[$"Dtos/{dto.Name}"] = dtoCode;
                 }
             }
 
