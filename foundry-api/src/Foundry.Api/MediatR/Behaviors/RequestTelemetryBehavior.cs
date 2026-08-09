@@ -9,14 +9,31 @@ using Microsoft.Extensions.Logging;
 
 namespace Foundry.Api.MediatR.Behaviors;
 
-public class AuditBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+/// <summary>
+/// MediatR pipeline behavior that provides request-level telemetry using OpenTelemetry and logging.
+/// This behavior wraps the execution of a request (including all downstream behaviors and the handler)
+/// in an OpenTelemetry Activity span, records timing metrics, and emits structured log entries with
+/// correlation and operator context. It increments a request counter on each invocation and records
+/// duration distributions for both successful and failed executions.
+/// </summary>
+/// <remarks>
+/// Despite its former name (AuditBehavior), this behavior does NOT write any audit trail data to storage.
+/// Audit entries are exclusively handled by the repository layer's IAuditSink implementation, which is invoked
+/// via domain events or direct persistence within use cases. This telemetry-only behavior exists solely for
+/// observability, debugging, and operational monitoring—not compliance auditing. The name was changed to avoid
+/// confusion: if searching for "AuditBehavior", note that this class was previously named AuditBehavior and has
+/// been renamed to RequestTelemetryBehavior to clarify that it handles telemetry only, not audit persistence.
+/// </remarks>
+/// <typeparam name="TRequest">The type of request being handled.</typeparam>
+/// <typeparam name="TResponse">The type of response returned by the handler.</typeparam>
+public class RequestTelemetryBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
     where TRequest : IRequest<TResponse>
 {
-    private readonly ILogger<AuditBehavior<TRequest, TResponse>> _logger;
+    private readonly ILogger<RequestTelemetryBehavior<TRequest, TResponse>> _logger;
     private readonly ICurrentUserContext _currentUserContext;
 
-    public AuditBehavior(
-        ILogger<AuditBehavior<TRequest, TResponse>> logger,
+    public RequestTelemetryBehavior(
+        ILogger<RequestTelemetryBehavior<TRequest, TResponse>> logger,
         ICurrentUserContext currentUserContext)
     {
         _logger = logger;
@@ -65,7 +82,7 @@ public class AuditBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TR
                 stopwatch.ElapsedMilliseconds);
 
             Diagnostics.Diagnostics.RequestDuration.Record(elapsedSeconds, new KeyValuePair<string, object?>("request_type", requestTypeName));
-            
+
             if (activity != null)
             {
                 activity.SetStatus(ActivityStatusCode.Ok);

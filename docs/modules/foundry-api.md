@@ -9,15 +9,14 @@
 ```text
 Inbound HTTP Request
   │
-  ├── 1. LoggingBehavior (Trace ID, W3C headers)
-  ├── 2. IdempotencyBehavior (409 Conflict deduplication)
-  ├── 3. SecurityBehavior (RBAC claim checks)
-  ├── 4. ValidationBehavior (FluentValidation)
-  ├── 5. BusinessRulesBehavior (Microsoft.RulesEngine evaluation)
+  ├── 1. RequestTelemetryBehavior (OpenTelemetry span, metrics, logging)
+  ├── 2. SecurityBehavior (RBAC claim checks)
+  ├── 3. ValidationBehavior (FluentValidation)
+  ├── 4. BusinessRulesBehavior (Microsoft.RulesEngine evaluation)
+  ├── 5. IdempotencyBehavior (409 Conflict deduplication)
   ├── 6. CachingBehavior (MemoryCache / DistributedCache)
-  ├── 7. AuditBehavior (Emits audit events to RealTime/Outbox)
   │
-  └── Handler Execution (Repository Invocation)
+  └── Handler Execution (Repository Invocation → IAuditSink writes audit trail)
 ```
 
 ---

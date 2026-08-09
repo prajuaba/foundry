@@ -36,19 +36,27 @@ All dynamic routing requests dispatch through a unified MediatR CQRS pipeline. T
 
 ```mermaid
 sequenceDiagram
-    Caller->>MediatR: Dispatch Request
-    MediatR->>SecurityBehavior: Validate RBAC roles
-    SecurityBehavior->>ValidationBehavior: Stage 1: Check validation rules
-    ValidationBehavior->>BusinessRuleBehavior: Stage 2: Verify business rules
-    BusinessRuleBehavior->>CachingBehavior: Read cache (L1/L2)?
-    alt Cache Hit
-        CachingBehavior-->>Caller: Return Cached Data
-    else Cache Miss
-        CachingBehavior->>Handler: Execute Handler
-        Handler->>AuditBehavior: Record audit log delta
-        AuditBehavior->>ConsoleAuditSink: Emit JSON log
-        Handler-->>Caller: Return Result
+    Caller->>MediatR: Dispatch request
+    MediatR->>RequestTelemetryBehavior: Start span
+    RequestTelemetryBehavior->>SecurityBehavior: Validate roles
+    SecurityBehavior-->>RequestTelemetryBehavior: OK
+    RequestTelemetryBehavior->>ValidationBehavior: Check validation
+    ValidationBehavior-->>RequestTelemetryBehavior: Valid
+    RequestTelemetryBehavior->>BusinessRuleBehavior: Verify rules
+    BusinessRuleBehavior-->>RequestTelemetryBehavior: Passed
+    RequestTelemetryBehavior->>CachingBehavior: Check cache
+    alt Cache miss
+        CachingBehavior->>Handler: Execute handler
+        Handler->>Repository: Save changes
+        Repository->>IAuditSink: Write audit entry
+        IAuditSink-->>Repository: OK
+        Repository-->>Handler: Result
+        Handler-->>CachingBehavior: Result
+    else Cache hit
+        CachingBehavior-->>RequestTelemetryBehavior: Cached result
     end
+    RequestTelemetryBehavior-->>MediatR: End span & return result
+    MediatR-->>Caller: Return response
 ```
 
 ### A. Security Validation (`SecurityBehavior`)
@@ -68,9 +76,11 @@ sequenceDiagram
 - Utilizes L1 (In-Memory) and L2 (Distributed Cache e.g. Redis) caches for query endpoints.
 - Evicts keys matching affected collections upon command mutations (Insert, Update, Delete) to guarantee consistency.
 
-### E. Audit Trail Telemetry (`AuditBehavior`)
-- Post-execution wrapper capturing transaction outcomes.
-- Invokes registered `IAuditSink` (e.g., `ConsoleAuditSink`) to output structured JSON mutation records.
+### E. Request Telemetry (`RequestTelemetryBehavior`)
+- Starts an OpenTelemetry Activity that wraps all downstream behaviors and the handler in a single span.
+- Records request-level timing metrics and emits structured log entries with correlation and operator context.
+- Increments a request counter for observability and operational monitoring.
+- Does NOT write audit entries; the durable audit trail is exclusively the repository layer's `IAuditSink` responsibility, invoked during data mutations.
 
 ---
 

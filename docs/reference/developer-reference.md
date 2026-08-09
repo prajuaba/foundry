@@ -1211,7 +1211,7 @@ Registration order is the execution order.
 | `WorkflowTransitionBehavior<,>` | State machine gate for `IWorkflowTransitionRequest` |
 | `IdempotencyBehavior<,>` | Replays a stored response for a repeated idempotency key |
 | `CachingBehavior<,>` | Reads/writes the response cache; tracked by `EntityCacheTracker` |
-| `AuditBehavior<,>` | Emits audit entries |
+| `RequestTelemetryBehavior<,>` | Opens OpenTelemetry span, records metrics and logs; does NOT write audit entries (repository layer's `IAuditSink` does that) |
 | `OutboxDomainEventBehavior<,>` | Enqueues domain events to `IOutboxQueue` |
 
 ### 7.5 Manifest model
