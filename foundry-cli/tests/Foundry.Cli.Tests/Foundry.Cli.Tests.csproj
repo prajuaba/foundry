@@ -16,12 +16,12 @@
     </PackageReference>
   </ItemGroup>
 
-  <!-- Referenced for build ordering only: these tests invoke the built CLI as a process, because
-       exit codes and stdio framing are the contract that CI and the VS Code extension depend on,
-       and neither can be observed by calling into the assembly. -->
+  <!-- Foundry.Cli is referenced to ensure its dependencies (the framework assemblies) are
+       available for reflection discovery. The tests invoke the CLI as a subprocess for exit code
+       testing, but referencing it ensures the framework assemblies are loaded into the test process. -->
   <ItemGroup>
     <ProjectReference Include="../../src/Foundry.Cli/Foundry.Cli.csproj"
-                      ReferenceOutputAssembly="false"
+                      ReferenceOutputAssembly="true"
                       SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
 
