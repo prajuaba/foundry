@@ -972,6 +972,60 @@ volumes:
         File.WriteAllText(Path.Combine(targetDir, "docker-compose.yml"), dockerContent);
         Console.WriteLine("  ✓ Generated docker-compose.yml (MongoDB, Mongo Express, Kafka UI)");
 
+        // 5b. Emit Dockerfile and .dockerignore
+        //
+        // The project references the Foundry framework by relative path outside this directory, so
+        // a multi-stage SDK build inside the image would need the entire framework tree as context.
+        // Instead, we emit a runtime-only image over a pre-published output: this is the operator's
+        // responsibility after `dotnet publish -c Release -o publish`.
+        var dockerfilePath = Path.Combine(targetDir, "Dockerfile");
+        var dockerfileContent = $@"# This Dockerfile packages a pre-published application output rather than building from source.
+# Because the project references the Foundry framework by relative path outside this directory,
+# a two-stage build inside the image would require the entire framework tree as Docker build context.
+# Instead, publish and then containerize:
+#
+#   dotnet publish -c Release -o publish
+#   docker build -t {projectName.ToLowerInvariant()} .
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+
+WORKDIR /app
+
+COPY publish/ .
+
+USER app
+
+EXPOSE 8080
+
+ENV ASPNETCORE_URLS=http://+:8080
+
+# Kubernetes probes (readiness and liveness) should target /api/health.
+# The ASP.NET base image does not include curl or wget to keep the attack surface small;
+# Kubernetes on your cluster can run the probe without a shell, or you can add these tools to your image.
+# Uncomment the next line only if you have added curl or wget to this Dockerfile:
+# HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD curl -f http://localhost:8080/api/health || exit 1
+
+# Environment variables the application reads:
+# - MONGODB_CONNECTION: connection string, defaults to mongodb://localhost:27017
+# - MONGODB_DATABASE: database name, defaults to {projectName}Db
+# - Authentication__Jwt__SigningKey: symmetric HS256 signing key, for tokens this system issues
+#   itself (see `foundry token mint`). Not needed when Authentication__Jwt__Authority points at an
+#   external OIDC provider instead. NEVER hardcode it here; inject it from a secret store.
+
+ENTRYPOINT [""dotnet"", ""{projectName}.dll""]
+";
+        File.WriteAllText(dockerfilePath, dockerfileContent);
+
+        var dockerignorePath = Path.Combine(targetDir, ".dockerignore");
+        var dockerignoreContent = @"bin/
+obj/
+.git/
+appsettings.Development.json
+Dockerfile
+";
+        File.WriteAllText(dockerignorePath, dockerignoreContent);
+        Console.WriteLine("  ✓ Generated Dockerfile and .dockerignore (pre-published runtime image)");
+
         // 6. Automatically compile domain schema into ./Generated
         var generatedDir = Path.Combine(targetDir, "Generated");
         Console.WriteLine("  ➜ Compiling domain schema into C# POCOs and Handlers...");
@@ -1085,8 +1139,23 @@ volumes:
         // This previously called AddControllers()/MapControllers(), but the compiler emits no
         // controllers -- the REST surface comes from the analyser's AddGeneratedHandlers() and
         // MapGeneratedEndpoints(manifest). The scaffolded app therefore started successfully and
-        // served nothing, while the CLI advertised "full REST CRUD". The wiring below mirrors
-        // templates/Foundry.Api.Template/Program.cs, which is the arrangement the API tests cover.
+        // served nothing, while the CLI advertised "full REST CRUD".
+        //
+        // This is now the ONLY scaffolding path. A second one lived at templates/Foundry.Api.Template
+        // and was deleted: it was absent from Foundry.slnx so no CI job ever built it, it had stopped
+        // compiling at some unknown point, and it registered a stub ICurrentUserContext that returned
+        // no principal -- which silently disables ownership filtering and masking, the opposite of
+        // what a reference arrangement should do. Two scaffolding paths is how they diverged; one is
+        // the fix.
+        //
+        // What verifies this arrangement is scripts/runtime-smoke-test.sh, which scaffolds an
+        // application and drives it over HTTP, plus ScaffoldedAppWiringTests, which fails the build
+        // if a framework AddFoundry* registration is not wired in below.
+        //
+        // Deliberately NOT registered here: IdempotencyBehavior and OutboxDomainEventBehavior. So a
+        // retried request with a repeated idempotency key is executed twice rather than deduplicated,
+        // and domain events are never written to the outbox, which is why a scaffolded app publishes
+        // nothing to Kafka until an adopter adds that behavior themselves.
         var programContent = $@"using System.Text.Json;
 using MediatR;
 using FluentValidation;
@@ -1133,11 +1202,24 @@ builder.Services.AddFoundryMongo(options =>
         ?? ""{projectName}Db"";
 }});
 
+// Durable audit trail. IAuditSink is an optional dependency on the repository layer, so without
+// this registration every mutation is audited to nowhere and nothing says so.
+builder.Services.AddFoundryMongoAuditSink();
+
+// Health check that actually validates the database connection. This endpoint is deliberately
+// unauthenticated: an orchestrator's liveness probe has no token, and a health endpoint that
+// answers 401 reads as ""down"" to every probe that matters.
+builder.Services.AddFoundryMongoHealthCheck();
+
 // 2. Real-time audit broker (SignalR, WebSockets, SSE)
 builder.Services.AddFoundryRealTime();
 
 // 3. Business rules engine
 builder.Services.AddFoundryRules();
+
+// OpenTelemetry tracing and metrics. Exports only when an endpoint is configured -- set
+// OTEL_EXPORTER_OTLP_ENDPOINT to ship spans and metrics to a collector.
+builder.Services.AddFoundryTelemetry(o => o.ServiceName = ""{projectName}"");
 
 // Bearer authentication. The generated endpoints call RequireAuthorization, so without a scheme
 // registered the application refuses to start rather than serving 500s. Configuration decides the
@@ -1167,10 +1249,18 @@ builder.Services.AddMediatR(cfg =>
 // Generated request handlers, one per entity method in the manifest.
 builder.Services.AddGeneratedHandlers();
 {ruleRegistration}{kafkaRegistration}{graphQlRegistration}{workflowRegistration}
+// MediatR pipeline behaviors run in registration order, before and after the handler.
+//
+// RequestTelemetryBehavior is first, opening the span that wraps every other behavior and the handler.
+// It starts the OpenTelemetry activity and increments the request counter, so every downstream behavior
+// and the handler execute inside one span. Without it the telemetry above collects HTTP spans and nothing
+// about the work they did.
+//
 // SecurityBehavior re-checks the manifest's roles inside the pipeline, against the same
 // EndpointConfig metadata the endpoint's own RequireAuthorization uses, so the two cannot disagree.
 // The template registered it and the scaffolder did not -- so `foundry new` produced an application
 // with one fewer security check than the template it was meant to mirror, and nothing compared them.
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(RequestTelemetryBehavior<,>));
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(SecurityBehavior<,>));
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(BusinessRuleBehavior<,>));
@@ -1208,6 +1298,9 @@ app.UseMiddleware<Foundry.Api.Middleware.TenantContextMiddleware>();
 // Generated REST endpoints for every entity in the manifest.
 app.MapGeneratedEndpoints(manifest);
 
+// Health check endpoint for Kubernetes probes
+app.MapHealthChecks(""/api/health"");
+
 // GET {{entity}}/{{id}}/history for every entity with a workflow.
 app.MapWorkflowHistory(manifest);
 
@@ -1217,11 +1310,11 @@ app.MapFoundryRealTime();
 app.Run();
 ";
         File.WriteAllText(Path.Combine(targetDir, "Program.cs"), programContent);
-        Console.WriteLine("  ✓ Generated Program.cs (REST endpoints from api-manifest.json, rules, real-time)");
+        Console.WriteLine("  ✓ Generated Program.cs (audit trail, health checks, telemetry, REST endpoints)");
 
         Console.ForegroundColor = ConsoleColor.Green;
         Console.WriteLine("\n=================================================================");
-        Console.WriteLine($"  🎉 READY-TO-RUN FOUNDRY PROJECT CREATED: {projectName}");
+        Console.WriteLine($"  READY-TO-RUN FOUNDRY PROJECT CREATED: {projectName}");
         Console.WriteLine("=================================================================");
         Console.ResetColor();
         Console.WriteLine("To start your ready-to-run API:\n");
@@ -1230,7 +1323,11 @@ app.Run();
         Console.WriteLine("  docker compose up -d");
         Console.WriteLine("  dotnet run");
         Console.ResetColor();
-        Console.WriteLine("\nYour API will be live with full REST CRUD, Encryption & WebSockets!");
+        Console.WriteLine("\nYour API includes:");
+        Console.WriteLine("  * Durable audit trail (MongoDB-backed)");
+        Console.WriteLine("  * Health checks at /api/health (Kubernetes-ready)");
+        Console.WriteLine("  * OpenTelemetry tracing and metrics");
+        Console.WriteLine("  * Full REST CRUD, field-level encryption, real-time WebSockets");
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("=================================================================\n");
         Console.ResetColor();
