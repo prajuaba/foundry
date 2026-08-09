@@ -410,7 +410,12 @@ namespace Foundry.Api.SourceGenerators
                 {
                     sb.AppendLine($"            var builder_{localSuffix} = endpoints.MapMethods(\"{customEp.Route}\", new[] {{ \"{method}\" }}, async (HttpContext context, ISender sender) =>");
                     sb.AppendLine("            {");
-                    sb.AppendLine($"                var command = new {ns}.{customEp.RequestType}();");
+                    // Bound from the route and query string. This was `new TRequest()` and nothing
+                    // else: GET and DELETE carry no body, so every property held its type default
+                    // and the handler filtered on whatever that was rather than on what the caller
+                    // asked for. The endpoints answered 200 with the wrong rows -- a declared
+                    // `GreaterThan MinimumUtilizationPercent` ran as `> 0` and returned everything.
+                    sb.AppendLine($"                var command = Foundry.Api.Endpoints.CustomRequestBinder.Bind<{ns}.{customEp.RequestType}>(context);");
                     sb.AppendLine("                var result = await sender.Send(command, context.RequestAborted);");
                     sb.AppendLine("                if (result == null) return Results.NoContent();");
                     sb.AppendLine("                return Results.Text(JsonSerializer.Serialize(result, Foundry.Core.Serialization.FoundryJsonDefaults.Options), \"application/json\");");

@@ -49,53 +49,18 @@ public static class DynamicEndpointRouteBuilder
             var prop = properties.FirstOrDefault(p => p.Name.Equals(key, StringComparison.OrdinalIgnoreCase));
             if (prop == null) continue;
 
-            object? val = null;
-            // Declared outside the try so the failure message can quote the offending value.
+            // Rejected, not skipped -- and converted by the same table the custom endpoints' own
+            // binder uses, so one query value cannot be legal on a generated list route and
+            // illegal on a declared one.
+            //
+            // The rejection is the older lesson: this logged to Debug.WriteLine, which is compiled
+            // out entirely in Release, and then `continue`d. A query parameter the caller could not
+            // have known was unparseable was dropped from the filter, so the request returned 200
+            // with a *wider* result set than asked for and nothing recorded that a filter had been
+            // discarded. Silently widening a result set is the worst direction to fail in a
+            // framework whose main claim is tenant isolation.
             var strVal = item.Value.ToString();
-            try
-            {
-                if (prop.PropertyType == typeof(ObjectId))
-                {
-                    val = ObjectId.Parse(strVal);
-                }
-                else if (prop.PropertyType == typeof(int))
-                {
-                    val = int.Parse(strVal);
-                }
-                else if (prop.PropertyType == typeof(decimal))
-                {
-                    val = decimal.Parse(strVal);
-                }
-                else if (prop.PropertyType == typeof(bool))
-                {
-                    val = bool.Parse(strVal);
-                }
-                else if (prop.PropertyType.IsEnum)
-                {
-                    val = Enum.Parse(prop.PropertyType, strVal, true);
-                }
-                else
-                {
-                    val = Convert.ChangeType(strVal, prop.PropertyType);
-                }
-            }
-            catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException or ArgumentException)
-            {
-                // Rejected, not skipped.
-                //
-                // This logged to Debug.WriteLine -- which is compiled out entirely in Release -- and
-                // then `continue`d, so a query parameter the caller could not have known was
-                // unparseable was silently dropped from the filter. The request returned 200 with a
-                // *wider* result set than asked for, and nothing recorded that a filter had been
-                // discarded. Silently widening a result set is the worst direction to fail in a
-                // framework whose main claim is tenant isolation.
-                //
-                // ValidationException maps to 400 in GlobalExceptionHandler, which is what an
-                // unparseable query value is.
-                throw new ValidationException(
-                    $"Query parameter '{key}' has value '{strVal}', which is not valid for "
-                    + $"{prop.Name} ({prop.PropertyType.Name}).");
-            }
+            var val = QueryValueBinder.Convert(strVal, prop.PropertyType, key, prop.Name);
 
             var propExpr = Expression.Property(parameter, prop);
             var valExpr = Expression.Constant(val, prop.PropertyType);
