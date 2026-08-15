@@ -81,7 +81,7 @@ services:
 
   # ─── Mongo Express (Web UI for MongoDB) ──────────────────────────────
   mongo-express:
-    image: mongo-express:latest
+    image: mongo-express:1.0.2
     container_name: foundry-mongo-express
     depends_on:
       - mongodb
@@ -134,13 +134,19 @@ services:
       - foundry-network
 
   # ─── Kafka UI (Web UI for Kafka Broker) ──────────────────────────────
+  #
+  # Published on 8090, not 8080. 8080 is the most contended port on a developer machine, and when
+  # something else already holds it `docker compose up -d` fails for the whole command -- so the
+  # stack reads as broken when the only thing that could not start is an optional web UI. The
+  # template this repository scaffolds was moved off 8080 for that reason; leaving the framework's
+  # own stack on it meant the fix reached adopters and not the people building the framework.
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
+    image: provectuslabs/kafka-ui:v0.7.2
     container_name: foundry-kafka-ui
     depends_on:
       - kafka
     ports:
-      - "8080:8080"
+      - "8090:8080"
     environment:
       DYNAMIC_CONFIG_ENABLED: 'true'
       KAFKA_CLUSTERS_0_NAME: local-foundry-cluster
@@ -155,7 +161,7 @@ services:
   # It listens on OTLP gRPC (4317) and HTTP (4318) and exports to a debug exporter
   # with detailed verbosity to make trace and metric arrival visible in logs.
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
+    image: otel/opentelemetry-collector-contrib:0.158.0
     container_name: foundry-otel-collector
     ports:
       - "4317:4317"
