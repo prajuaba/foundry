@@ -288,4 +288,286 @@ public class SdkGeneratorTests
         // The control: a property the schema marks Required stays required.
         Assert.Contains("Reference: string;", sdk);
     }
+
+    // ── Descriptions ────────────────────────────────────────────────────────
+
+    [Fact]
+    public void CsharpSdkEmitsXmlDocOnlyForAuthoredEntityDescriptions()
+    {
+        var schemaWithDescription = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Order",
+                    Description = "Represents a customer order",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var sdk = CsharpSdkGenerator.Generate(schemaWithDescription);
+
+        Assert.Contains("/// <summary>", sdk);
+        Assert.Contains("Represents a customer order", sdk);
+        Assert.Contains("/// </summary>", sdk);
+
+        // Without description, should not have summary block for model
+        var schemaWithout = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Order",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var sdkWithout = CsharpSdkGenerator.Generate(schemaWithout);
+        var lines = sdkWithout.Split('\n');
+
+        // Find the OrderModel class line
+        var modelLine = Array.FindIndex(lines, l => l.Contains("public class OrderModel"));
+        Assert.True(modelLine > 0);
+
+        // Line before should not be a summary tag (no invented prose)
+        if (modelLine > 0)
+        {
+            Assert.False(lines[modelLine - 1].Trim().StartsWith("/// <summary>List all"));
+        }
+    }
+
+    [Fact]
+    public void CsharpSdkXmlDocEscapesSpecialCharactersExactlyOnce()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Record",
+                    Description = "Contains <tag> & reference",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var sdk = CsharpSdkGenerator.Generate(schema);
+
+        // Should be escaped exactly once
+        Assert.Contains("&lt;tag&gt;", sdk);
+        Assert.Contains("&amp; reference", sdk);
+
+        // Should not be double-escaped
+        Assert.DoesNotContain("&amp;lt;", sdk);
+        Assert.DoesNotContain("&amp;amp;", sdk);
+    }
+
+    [Fact]
+    public void TypeScriptSdkEmitsJsDocOnlyForAuthoredDescriptions()
+    {
+        var schemaWithDescription = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Order",
+                    Description = "Represents a customer order",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var sdk = TypeScriptSdkGenerator.Generate(schemaWithDescription);
+
+        Assert.Contains("/**", sdk);
+        Assert.Contains("Represents a customer order", sdk);
+        Assert.Contains("*/", sdk);
+
+        // Without description, no JSDoc should be emitted for the interface
+        var schemaWithout = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Order",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var sdkWithout = TypeScriptSdkGenerator.Generate(schemaWithout);
+        var lines = sdkWithout.Split('\n');
+
+        // Find the Order interface line
+        var interfaceLine = Array.FindIndex(lines, l => l.Contains("export interface Order {"));
+        Assert.True(interfaceLine > 0);
+
+        // Line before should not be JSDoc opening (no invented prose)
+        if (interfaceLine > 0)
+        {
+            Assert.False(lines[interfaceLine - 1].Trim().StartsWith("/**List all"));
+        }
+    }
+
+    [Fact]
+    public void TypeScriptSdkEscapesCommentTerminatorInDescription()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Comment",
+                    Description = "This ends with */ comment terminator",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var sdk = TypeScriptSdkGenerator.Generate(schema);
+
+        // The */ should be escaped to *\/ to prevent JSDoc termination
+        Assert.Contains("*\\/", sdk);
+
+        // The emitted text should still contain the original description (escaped)
+        Assert.Contains("This ends with", sdk);
+        Assert.Contains("comment terminator", sdk);
+
+        // Count */ occurrences: one for the JSDoc close at the end, but the escaped one inside
+        var closeCount = Regex.Matches(sdk, @"(?<!\\)\*/").Count;
+        Assert.True(closeCount > 0);
+    }
+
+    [Fact]
+    public void PythonSdkEmitsEntityDescriptionAsCommentLines()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Widget",
+                    Description = "A widget entity for testing",
+                    ApiEnabledMethods = ["GET", "POST"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var sdk = PythonSdkGenerator.Generate(schema);
+
+        // Entity description should appear as comment lines after the endpoints line
+        Assert.Contains("# Widget endpoints. Serves: GET, POST\n    # A widget entity for testing", sdk);
+    }
+
+    [Fact]
+    public void PythonSdkMultilineDescriptionEmitsOneCommentLinePerInputLine()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Widget",
+                    Description = "Line one\nLine two\nLine three",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var sdk = PythonSdkGenerator.Generate(schema);
+
+        // Each line should be a separate comment line
+        Assert.Contains("    # Line one\n    # Line two\n    # Line three", sdk);
+    }
+
+    [Fact]
+    public void PythonSdkDescriptionWithSpecialCharsNeedsNoEscaping()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Widget",
+                    Description = "Contains special: \"\"\" triple quotes and */ and backslash \\",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var sdk = PythonSdkGenerator.Generate(schema);
+
+        // Should contain the description verbatim as a comment - no escaping applied
+        Assert.Contains("# Contains special: \"\"\" triple quotes and */ and backslash \\", sdk);
+
+        // Verify no escape sequences in the generated code
+        Assert.DoesNotContain("\\\"", sdk);  // No escaped quotes
+        Assert.DoesNotContain("*\\/", sdk);  // No escaped comment terminator
+    }
+
+    [Fact]
+    public void PythonSdkSilenceWhenNoDescriptions()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Order",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var sdk = PythonSdkGenerator.Generate(schema);
+
+        // Should have the comment line
+        Assert.Contains("# Order endpoints", sdk);
+
+        // Should NOT have entity docstring (only FoundryClient class docstring should be present)
+        var orderIndex = sdk.IndexOf("# Order endpoints");
+        Assert.True(orderIndex > 0);
+
+        var afterComment = sdk.Substring(orderIndex);
+        var nextMethod = afterComment.IndexOf("\n    def");
+
+        if (nextMethod > 0)
+        {
+            var betweenCommentAndMethod = afterComment.Substring(0, nextMethod);
+            // Should not have docstring between comment and method
+            Assert.False(betweenCommentAndMethod.Contains("\"\"\""));
+        }
+    }
 }

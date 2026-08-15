@@ -42,10 +42,24 @@ public static class CsharpSdkGenerator
                 // The route the application actually serves, from the one producer of that contract.
                 var route = ApiManifestGenerator.RouteFor(entity.Name);
 
-                sb.AppendLine($"\npublic class {entity.Name}Model");
+                // Only emit description if authored in IR
+                if (!string.IsNullOrEmpty(entity.Description))
+                {
+                    sb.Append(CodeGen.XmlDoc(entity.Description, 0));
+                    sb.AppendLine($"public class {entity.Name}Model");
+                }
+                else
+                {
+                    sb.AppendLine($"\npublic class {entity.Name}Model");
+                }
                 sb.AppendLine("{");
                 foreach (var prop in entity.Properties)
                 {
+                    // Only emit description if authored in IR
+                    if (!string.IsNullOrEmpty(prop.Description))
+                    {
+                        sb.Append(CodeGen.XmlDoc(prop.Description, 4));
+                    }
                     sb.AppendLine($"    public {MapClientType(prop, schema)} {prop.Name} {{ get; set; }}");
                 }
                 sb.AppendLine("}");

@@ -363,6 +363,17 @@ namespace Foundry.Schema.Compiler
                 case "Entity.ArchiveThresholdYears":
                     schema["minimum"] = 1;
                     break;
+
+                case "Entity.Description":
+                case "Property.Description":
+                case "DtoModel.Description":
+                case "DtoProperty.Description":
+                case "CustomEndpoint.Description":
+                case "Enum.Description":
+                case "WorkflowModel.Description":
+                case "ConnectorModel.Description":
+                    schema["description"] = "Optional prose: free-form text authored in the schema, carried through to generated code and published API documentation. No effect on behavior.";
+                    break;
             }
 
             return schema;

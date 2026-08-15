@@ -10,6 +10,9 @@
 
 namespace Foundry.E2E.Showcase;
 
+/// <summary>
+/// Tier level for customer classification
+/// </summary>
 public enum CustomerTier
 {
     Standard,

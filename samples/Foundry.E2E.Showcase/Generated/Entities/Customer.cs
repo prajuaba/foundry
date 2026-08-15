@@ -19,6 +19,9 @@ using Foundry.Core.Security;
 
 namespace Foundry.E2E.Showcase;
 
+/// <summary>
+/// Represents a customer in the system
+/// </summary>
 [RealTime(false)]
 public partial record Customer : BaseEntity<ObjectId>, IVersionable, ISoftDelete, IMultiTenant
 {
