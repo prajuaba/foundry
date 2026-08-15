@@ -28,8 +28,8 @@ public class ScaffoldedAppWiringTests : IDisposable
     {
         "AddFoundryOIDC", // Alternative to AddFoundryAuthentication; user chooses one or the other, not both
         "AddFoundryRateLimiter", // Optional performance tuning; not every API needs it
-        "AddFoundryKafka", // Only wired when the schema declares a Kafka outbox publisher
-        "AddFoundryKafkaProducer", // Specialized producer-only shape; full AddFoundryKafka is the standard
+        "AddFoundryKafka", // Never wired: it also starts a consumer host, which requires a GroupId and fails startup without one
+        "AddFoundryKafkaProducer", // Wired, but only for a schema declaring enableKafkaOutbox, which this minimal schema does not
         "AddFoundryKafkaConsumerBridge", // Specialized consumer-bridge shape; full AddFoundryKafka is the standard
         "AddFoundryWorkflows", // Only wired when the schema declares at least one workflow entity
     };

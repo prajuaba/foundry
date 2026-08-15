@@ -49,7 +49,7 @@ public class Program
         new("export", "export -i <f> -f <format>", "Exports openapi | asyncapi | postman | mermaid.",
             args => Task.FromResult(HandleExportCommand(args))),
 
-        new("sdk", "sdk -i <f> -l <lang>", "Generates a client SDK: ts | csharp | python.",
+        new("sdk", "sdk -i <f> -l <lang> [-o <path>]", "Generates a client SDK: ts | csharp | python.",
             args => Task.FromResult(HandleSdkCommand(args))),
 
         new("test", "test -i <f> -o <dir>", "Generates xUnit suites from a schema (does not run them).",
@@ -679,6 +679,40 @@ public class Program
         }
     }
 
+    /// <summary>
+    /// Lowercases a project name and reduces it to characters that are legal everywhere the
+    /// scaffolder uses it as an identifier — a MongoDB database name, a Docker container name.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The scaffolder derived the default database name as <c>{ProjectName}Db</c>. A dot is legal
+    /// and idiomatic in a .NET project name and illegal in a MongoDB database name, so
+    /// <c>foundry new Contoso.Orders.Api</c> produced an application that threw
+    /// <c>ArgumentException: Database names must be non-empty and not contain '.'</c> out of
+    /// <c>AddFoundryMongo</c> before serving a single request. The generated code was correct, the
+    /// build succeeded, the CLI printed READY-TO-RUN, and `dotnet run` could not start — for the
+    /// naming convention nearly every real .NET service follows.
+    /// </para>
+    /// <para>
+    /// MongoDB additionally forbids <c>/ \ . " $ * &lt; &gt; : | ?</c> and the null character, and
+    /// Docker container names admit only <c>[a-zA-Z0-9_.-]</c>. Reducing to lowercase alphanumerics
+    /// and underscores satisfies both without needing a separate rule per consumer.
+    /// </para>
+    /// </remarks>
+    public static string SanitizeIdentifier(string projectName)
+    {
+        var chars = projectName
+            .ToLowerInvariant()
+            .Select(c => char.IsLetterOrDigit(c) ? c : '_')
+            .ToArray();
+
+        var collapsed = new string(chars).Trim('_');
+
+        // A name of nothing but separators would otherwise produce an empty database name, which
+        // MongoDB rejects for a second reason and with a less obvious message.
+        return collapsed.Length == 0 ? "foundry" : collapsed;
+    }
+
     private static int CreateNewProject(string projectName, string? customSchemaPath = null)
     {
         var targetDir = Path.Combine(Directory.GetCurrentDirectory(), projectName);
@@ -698,6 +732,11 @@ public class Program
         Console.WriteLine($"➜ Creating directory: {targetDir}");
 
         Directory.CreateDirectory(targetDir);
+
+        // Identifiers derived from the project name, reduced to characters every consumer accepts.
+        // See SanitizeIdentifier: a dot is legal in a .NET project name and illegal in a MongoDB
+        // database name, which is what stopped a conventionally named project from starting.
+        var databaseName = SanitizeIdentifier(projectName) + "_db";
 
         // 1. Create .csproj
         //
@@ -838,6 +877,12 @@ public class Program
     ""MongoDb"": ""mongodb://localhost:27017"",
     ""Kafka"": ""localhost:9092""
   },
+  ""MongoDbSettings"": {
+    ""DatabaseName"": """ + databaseName + @"""
+  },
+  ""Kafka"": {
+    ""BootstrapServers"": ""localhost:9092""
+  },
   ""Authentication"": {
     ""Jwt"": {
       ""Issuer"": """ + projectName + @""",
@@ -854,18 +899,55 @@ public class Program
         // A signing key for local development only, generated per project so two scaffolded
         // projects never share one and no key is ever baked into the CLI.
         var devSigningKey = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(48));
+
+        // A field-encryption key for local development, on the same terms as the signing key above.
+        // Exactly 32 bytes, because that is what AesEncryptionProvider requires; it is written
+        // unconditionally so that adding an Encrypt attribute to the schema later does not also
+        // require finding out that a key was needed.
+        var devEncryptionKey = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+
         var devSettingsContent = @"{
   ""Authentication"": {
     ""Jwt"": {
       ""SigningKey"": """ + devSigningKey + @"""
     }
+  },
+  ""MongoDbSettings"": {
+    ""EncryptionKey"": """ + devEncryptionKey + @"""
   }
 }";
         File.WriteAllText(Path.Combine(targetDir, "appsettings.Development.json"), devSettingsContent);
         File.WriteAllText(
             Path.Combine(targetDir, ".gitignore"),
-            "bin/\nobj/\n\n# Holds a local JWT signing key. Never commit it.\nappsettings.Development.json\n");
-        Console.WriteLine("  ✓ Generated appsettings.Development.json (local JWT signing key, gitignored)");
+            "bin/\nobj/\n\n# Holds local JWT signing and field-encryption keys. Never commit it.\nappsettings.Development.json\n");
+        Console.WriteLine("  ✓ Generated appsettings.Development.json (local JWT + encryption keys, gitignored)");
+
+        // Properties/launchSettings.json, which sets ASPNETCORE_ENVIRONMENT=Development.
+        //
+        // Without it `dotnet run` -- the command this very command prints as step 3 -- runs in the
+        // Production environment, never loads appsettings.Development.json, and fails at startup
+        // with "No bearer token validation is configured at 'Authentication:Jwt'". The scaffolder
+        // generated a signing key into a file and then left the app unable to read it, so the
+        // quickstart could not complete on a clean machine and the error pointed at configuration
+        // rather than at the missing environment.
+        var propertiesDir = Path.Combine(targetDir, "Properties");
+        Directory.CreateDirectory(propertiesDir);
+        var launchSettingsContent = @"{
+  ""$schema"": ""https://json.schemastore.org/launchsettings.json"",
+  ""profiles"": {
+    """ + projectName + @""": {
+      ""commandName"": ""Project"",
+      ""dotnetRunMessages"": true,
+      ""launchBrowser"": false,
+      ""applicationUrl"": ""http://localhost:5080"",
+      ""environmentVariables"": {
+        ""ASPNETCORE_ENVIRONMENT"": ""Development""
+      }
+    }
+  }
+}";
+        File.WriteAllText(Path.Combine(propertiesDir, "launchSettings.json"), launchSettingsContent);
+        Console.WriteLine("  ✓ Generated Properties/launchSettings.json (ASPNETCORE_ENVIRONMENT=Development)");
 
         // 4. Create or copy domain schema manifest (domain.foundry.json)
         string schemaContent;
@@ -918,19 +1000,34 @@ public class Program
         Console.WriteLine("  ✓ Generated domain.foundry.json");
 
         // 5. Create docker-compose.yml with MongoDB, Mongo Express, Kafka Broker & Kafka UI
-        var dockerContent = @"version: '3.8'
-services:
+        //
+        // Every image is pinned. This file used to pin all four to `:latest`, and it stopped coming
+        // up when Bitnami withdrew `bitnami/kafka:latest`: `docker compose up -d` -- step 2 of the
+        // three lines this command prints on success -- failed with `manifest unknown`, and because
+        // Compose aborts the whole pull set on a failure, MongoDB never started either. The
+        // quickstart could not reach step 3 on a clean machine, and a `:latest` tag means the day
+        // that happens is decided by an upstream registry rather than by this repository.
+        //
+        // Kafka is the official apache/kafka image rather than Bitnami's: it is what Bitnami's own
+        // deprecation notice points at, and its KRaft configuration is the same shape.
+        var containerPrefix = SanitizeIdentifier(projectName);
+        var dockerContent = @"services:
   mongodb:
-    image: mongo:latest
-    container_name: " + projectName.ToLowerInvariant() + @"_mongodb
+    image: mongo:7.0
+    container_name: " + containerPrefix + @"_mongodb
     ports:
       - ""27017:27017""
     volumes:
       - mongodb_data:/data/db
+    healthcheck:
+      test: [""CMD"", ""mongosh"", ""--quiet"", ""--eval"", ""db.adminCommand('ping')""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   mongo-express:
-    image: mongo-express:latest
-    container_name: " + projectName.ToLowerInvariant() + @"_mongo_express
+    image: mongo-express:1.0.2
+    container_name: " + containerPrefix + @"_mongo_express
     ports:
       - ""8081:8081""
     environment:
@@ -939,26 +1036,33 @@ services:
       - mongodb
 
   kafka:
-    image: bitnami/kafka:latest
-    container_name: " + projectName.ToLowerInvariant() + @"_kafka
+    image: apache/kafka:3.9.0
+    container_name: " + containerPrefix + @"_kafka
     ports:
       - ""9092:9092""
     environment:
-      KAFKA_CFG_NODE_ID: 1
-      KAFKA_CFG_PROCESS_ROLES: broker,controller
-      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: 5L6g3nShT_eMCtK5rDUqDg
     volumes:
-      - kafka_data:/bitnami/kafka
+      - kafka_data:/var/lib/kafka/data
 
+  # Port 8090, not 8080: 8080 is the single most contended port on a developer machine, and a
+  # quickstart that fails to bind it reads as the framework being broken.
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    container_name: " + projectName.ToLowerInvariant() + @"_kafka_ui
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: " + containerPrefix + @"_kafka_ui
     ports:
-      - ""8080:8080""
+      - ""8090:8080""
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
@@ -1085,16 +1189,72 @@ Dockerfile
             || (manifestSchema.CustomEndpoints ?? new List<Foundry.Schema.Compiler.CustomEndpoint>())
                 .Any(ep => ep.BusinessRules?.Any(r => !string.IsNullOrWhiteSpace(r)) == true);
 
+        // Field-level encryption needs a key, and the schema is what says whether any field is
+        // encrypted. Without this the compiler emitted the encrypted mapping for every Encrypt
+        // property and the host wired no provider, so the application started and then answered 500
+        // to every write touching that entity -- discoverable only by hitting it.
+        var hasEncryptedProperties =
+            (manifestSchema.Entities ?? new List<Foundry.Schema.Compiler.Entity>())
+                .Any(e => e.Properties.Any(p =>
+                    p.Attributes != null
+                    && p.Attributes.Any(a => string.Equals(a, "Encrypt", StringComparison.OrdinalIgnoreCase))));
+
+        var encryptionKeyWiring = hasEncryptedProperties
+            ? @"
+    // This schema declares Encrypt on at least one property, so the repository layer needs a key:
+    // without one every write to that entity fails at runtime. AesEncryptionProvider expects 32
+    // bytes, base64 encoded.
+    //
+    // The development fallback is generated per project and lives in appsettings.Development.json
+    // beside the JWT signing key. Supply MONGODB_ENCRYPTION_KEY (or MongoDbSettings:EncryptionKey)
+    // in every other environment -- and note that rotating it makes existing ciphertext unreadable,
+    // so treat it as durable state, not as configuration.
+    options.EncryptionKey = Environment.GetEnvironmentVariable(""MONGODB_ENCRYPTION_KEY"")
+        ?? builder.Configuration[""MongoDbSettings:EncryptionKey""]
+        ?? throw new InvalidOperationException(
+            ""This schema encrypts at least one field, so a 32-byte base64 encryption key is ""
+            + ""required. Set MONGODB_ENCRYPTION_KEY or MongoDbSettings:EncryptionKey. ""
+            + ""Development uses the key in appsettings.Development.json."");
+"
+            : "";
+
         var extraUsings = new List<string>();
         if (hasRules) extraUsings.Add($"using {projectName}.Domain.Rules;");
         if (hasKafka) extraUsings.Add($"using {projectName}.Domain.Kafka;");
         if (hasServices) extraUsings.Add($"using {projectName}.Domain.Services;");
+        if (Directory.Exists(Path.Combine(generatedDir, "RealTime")))
+            extraUsings.Add($"using {projectName}.Domain.RealTime;");
+        // AddFoundryKafkaProducer lives here rather than in Microsoft.Extensions.DependencyInjection.
+        if (hasKafka) extraUsings.Add("using Foundry.Kafka;");
         // No using for GraphQL: AddDynamicGraphQL is declared in
         // Microsoft.Extensions.DependencyInjection, which the Web SDK already imports implicitly.
 
         var extraUsingsStr = extraUsings.Count > 0 ? string.Join("\n", extraUsings) + "\n" : "";
 
-        var kafkaRegistration = hasKafka ? "\n// Register generated Kafka consumer handlers\nbuilder.Services.AddGeneratedKafkaHandlers();\n" : "";
+        // Consumers *and* a producer.
+        //
+        // Only the consumer handlers were registered, so a schema declaring kafkaOutboxEnabled got an
+        // application that could receive events and could not send any: nothing resolved
+        // IKafkaProducer, and the outbox rows the behavior below writes had no publisher to drain
+        // them. AddFoundryKafkaProducer rather than AddFoundryKafka, because the latter also starts a
+        // consumer host that requires a GroupId and fails startup when the section does not set one.
+        var kafkaRegistration = hasKafka
+            ? "\n// Generated Kafka consumer handlers, plus the producer that publishes outbox rows.\n"
+              + "builder.Services.AddGeneratedKafkaHandlers();\n"
+              + "builder.Services.AddFoundryKafkaProducer(builder.Configuration.GetSection(\"Kafka\"));\n"
+            : "";
+
+        // The write half of the transactional outbox, emitted only for a schema that asked for
+        // Kafka. OutboxDomainEventBehavior is what turns a mutation into an outbox row; without it
+        // the collection is never created, the topics the schema names stay empty, and the generated
+        // consumers wait on messages that are never produced. It was previously left out on purpose,
+        // documented as an adopter's choice -- but the choice the schema already made was
+        // kafkaOutboxEnabled, and honouring half of it is not a neutral default.
+        var outboxRegistration = hasKafka
+            ? "\n// The write half of the transactional outbox: turns each mutation into an outbox row\n"
+              + "// for the publisher to drain. Without it nothing is ever enqueued.\n"
+              + "builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(OutboxDomainEventBehavior<,>));\n"
+            : "";
 
         // Every business rule the schema named, bound to the request it validates. Without this the
         // rules are compiled into the application and never run: AddFoundryRules registers the
@@ -1112,6 +1272,33 @@ Dockerfile
             : "";
 
         var graphQlMapping = hasGraphQL ? "\napp.MapGraphQL();\n" : "";
+
+        // The compiler emits RealTime/RealTimeConfiguration.cs with the per-entity channels the
+        // schema declared, and nothing called it. MapFoundryRealTime maps the framework's own audit
+        // broker, which is a different surface -- so the channels a schema asked for were compiled
+        // into the application and never routed.
+        var hasRealTime = Directory.Exists(Path.Combine(generatedDir, "RealTime"));
+        var realTimeMapping = hasRealTime
+            ? "\n// Per-entity real-time channels declared by the schema.\n"
+              + "app.MapGeneratedRealTimeEndpoints();\n"
+            : "";
+
+        // Index creation, likewise generated and likewise never invoked. Unique, Indexed and
+        // TextIndex are declarations about the database, and until this runs they exist only in the
+        // schema: a Unique property admitted duplicates, and the queries meant to be index-backed
+        // were collection scans. It runs before app.Run() so the guarantees hold from the first
+        // request rather than from whenever someone remembered to create them.
+        var hasIndexVerification = Directory.Exists(Path.Combine(generatedDir, "Diagnostics"));
+        var indexVerification = hasIndexVerification
+            ? $@"
+// Creates every Unique / Indexed / TextIndex the schema declared. Without it those declarations
+// never reach MongoDB: uniqueness is unenforced and the indexed queries are collection scans.
+using (var indexScope = app.Services.CreateScope())
+{{
+    await {projectName}.Domain.Diagnostics.IndexVerification.EnsureIndexesAsync(indexScope.ServiceProvider);
+}}
+"
+            : "";
 
         // Workflow wiring, emitted only when the schema declares a workflow.
         //
@@ -1197,10 +1384,14 @@ builder.Services.AddFoundryMongo(options =>
     // Overridable, as the template and the sample already were. Hardcoding the name meant a
     // scaffolded application could not be pointed at another database without editing its code --
     // so two deployments of it, or two test runs, shared one set of collections.
+    //
+    // The fallback is derived from the project name with the characters MongoDB forbids removed.
+    // It used to be ""{projectName}Db"" verbatim, and a dot is legal in a .NET project name and
+    // illegal in a MongoDB database name, so a conventionally named project threw on startup.
     options.DatabaseName = Environment.GetEnvironmentVariable(""MONGODB_DATABASE"")
         ?? builder.Configuration[""MongoDbSettings:DatabaseName""]
-        ?? ""{projectName}Db"";
-}});
+        ?? ""{databaseName}"";
+{encryptionKeyWiring}}});
 
 // Durable audit trail. IAuditSink is an optional dependency on the repository layer, so without
 // this registration every mutation is audited to nowhere and nothing says so.
@@ -1265,6 +1456,7 @@ builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(SecurityBehav
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(BusinessRuleBehavior<,>));
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(CachingBehavior<,>));
+{outboxRegistration}
 
 builder.Services.AddExceptionHandler<Foundry.Api.Middleware.GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
@@ -1306,7 +1498,7 @@ app.MapWorkflowHistory(manifest);
 
 // Real-time channels.
 app.MapFoundryRealTime();
-{graphQlMapping}
+{realTimeMapping}{graphQlMapping}{indexVerification}
 app.Run();
 ";
         File.WriteAllText(Path.Combine(targetDir, "Program.cs"), programContent);
@@ -1741,13 +1933,29 @@ jobs:
 
         if (string.IsNullOrEmpty(outputPath))
         {
+            // Named after the schema rather than after the framework. The default was a flat
+            // "foundryClient.ts" for every project, so generating SDKs for two services into one
+            // directory silently overwrote the first, and the file said nothing about what it was a
+            // client for. The namespace's first segment is the application's own name.
+            var clientName = schema.Namespace?.Split('.').FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(clientName)) clientName = "foundry";
+
+            var camel = char.ToLowerInvariant(clientName[0]) + clientName[1..];
+            var snake = string.Concat(clientName.Select((c, i) =>
+                char.IsUpper(c) && i > 0 ? "_" + char.ToLowerInvariant(c) : char.ToLowerInvariant(c).ToString()));
+
             outputPath = lang switch
             {
-                "cs" or "csharp" => "FoundryClient.cs",
-                "py" or "python" => "foundry_client.py",
-                _ => "foundryClient.ts"
+                "cs" or "csharp" => $"{clientName}Client.cs",
+                "py" or "python" => $"{snake}_client.py",
+                _ => $"{camel}Client.ts"
             };
         }
+
+        // An -o naming a directory that does not exist yet used to fail with a
+        // DirectoryNotFoundException from File.WriteAllText, naming the path but not the fix.
+        var outputDir = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+        if (!string.IsNullOrEmpty(outputDir)) Directory.CreateDirectory(outputDir);
 
         File.WriteAllText(outputPath, code);
         Console.ForegroundColor = ConsoleColor.Green;

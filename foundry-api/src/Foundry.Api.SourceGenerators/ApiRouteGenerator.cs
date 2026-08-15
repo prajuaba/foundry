@@ -417,8 +417,12 @@ namespace Foundry.Api.SourceGenerators
                     // `GreaterThan MinimumUtilizationPercent` ran as `> 0` and returned everything.
                     sb.AppendLine($"                var command = Foundry.Api.Endpoints.CustomRequestBinder.Bind<{ns}.{customEp.RequestType}>(context);");
                     sb.AppendLine("                var result = await sender.Send(command, context.RequestAborted);");
-                    sb.AppendLine("                if (result == null) return Results.NoContent();");
-                    sb.AppendLine("                return Results.Text(JsonSerializer.Serialize(result, Foundry.Core.Serialization.FoundryJsonDefaults.Options), \"application/json\");");
+                    // Response-shape aware. This was `if (result == null) return NoContent();` for
+                    // every endpoint regardless of what the handler returned, which is dead code for
+                    // the bool and Unit returns the scaffolds emit -- and it discarded the `false`
+                    // those scaffolds use to mean "no such record", answering 200 for a missing id
+                    // where generated CRUD answers 404.
+                    sb.AppendLine("                return Foundry.Api.Endpoints.CustomEndpointResult.From(result);");
                     sb.AppendLine("            });");
                 }
                 else
@@ -426,8 +430,7 @@ namespace Foundry.Api.SourceGenerators
                     sb.AppendLine($"            var builder_{localSuffix} = endpoints.MapMethods(\"{customEp.Route}\", new[] {{ \"{method}\" }}, async ({ns}.{customEp.RequestType} command, HttpContext context, ISender sender) =>");
                     sb.AppendLine("            {");
                     sb.AppendLine("                var result = await sender.Send(command, context.RequestAborted);");
-                    sb.AppendLine("                if (result == null) return Results.NoContent();");
-                    sb.AppendLine("                return Results.Text(JsonSerializer.Serialize(result, Foundry.Core.Serialization.FoundryJsonDefaults.Options), \"application/json\");");
+                    sb.AppendLine("                return Foundry.Api.Endpoints.CustomEndpointResult.From(result);");
                     sb.AppendLine("            });");
                 }
 
@@ -446,6 +449,9 @@ namespace Foundry.Api.SourceGenerators
                 sb.AppendLine("                         .Produces(400, typeof(Microsoft.AspNetCore.Mvc.ProblemDetails))");
                 sb.AppendLine("                         .Produces(401)");
                 sb.AppendLine("                         .Produces(403, typeof(Microsoft.AspNetCore.Mvc.ProblemDetails))");
+                // A handler returning false -- the scaffold's "no such record" -- answers 404, so the
+                // contract has to say so or a generated client will not model the case.
+                sb.AppendLine("                         .Produces(404)");
                 sb.AppendLine("                         .Produces(500, typeof(Microsoft.AspNetCore.Mvc.ProblemDetails));");
             }
 

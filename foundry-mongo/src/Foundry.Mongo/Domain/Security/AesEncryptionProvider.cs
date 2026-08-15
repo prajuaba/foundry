@@ -13,11 +13,29 @@ public sealed class AesEncryptionProvider : IEncryptionProvider
 
     public AesEncryptionProvider(string base64Key)
     {
-        _key = Convert.FromBase64String(base64Key);
-        if (_key.Length != 32)
+        // Decoded through TryFromBase64String rather than letting Convert throw. A raw 32-character
+        // passphrase is the obvious thing to supply here, and it produced a bare FormatException --
+        // "The input is not a valid Base-64 string as it contains a non-base 64 character" -- raised
+        // from inside DI resolution during startup, naming neither the option that was wrong nor the
+        // encoding it wanted.
+        var buffer = new byte[((base64Key?.Length ?? 0) / 4 + 1) * 3];
+        if (base64Key is null || !Convert.TryFromBase64String(base64Key, buffer, out var decodedLength))
         {
-            throw new ArgumentException("Symmetric key must be exactly 256 bits (32 bytes) base64 encoded.", nameof(base64Key));
+            throw new ArgumentException(
+                "The field encryption key must be base64 encoded; this value is not valid base64. "
+                + "Generate one with: openssl rand -base64 32",
+                nameof(base64Key));
         }
+
+        if (decodedLength != 32)
+        {
+            throw new ArgumentException(
+                $"The field encryption key must decode to exactly 32 bytes (AES-256); this one decodes to {decodedLength}. "
+                + "Generate one with: openssl rand -base64 32",
+                nameof(base64Key));
+        }
+
+        _key = buffer[..decodedLength];
     }
 
     public string Encrypt(string plainText)

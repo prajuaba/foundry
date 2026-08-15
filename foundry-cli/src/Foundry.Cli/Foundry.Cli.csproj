@@ -6,12 +6,25 @@
     <Nullable>enable</Nullable>
     <AssemblyName>foundry</AssemblyName>
     <RootNamespace>Foundry.Cli</RootNamespace>
-    
-    <!-- Single-File Self-Contained Binary Configuration for Publish -->
-    <PublishSingleFile>true</PublishSingleFile>
-    <PublishSelfContained>true</PublishSelfContained>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+
+    <!-- Shipped as a .NET tool. See docs/modules/foundry-cli.md for the install commands.
+
+         This replaced a single-file self-contained publish configuration that could not build in
+         ANY configuration, so there was no way to obtain the CLI at all except by running it out
+         of a source checkout. Self-contained requires every referenced project to be
+         self-contained too, and Foundry.Schema.Compiler is a non-self-contained Exe with a
+         documented standalone entry point, which fails NETSDK1150. Removing self-contained then
+         failed NETSDK1176, because single-file compression requires it. The two settings
+         contradicted each other, and no CI job ever ran a publish on this project to notice.
+
+         A tool package needs neither setting, and is how a developer CLI is normally shipped. -->
+    <!-- Directory.Build.props disables packing repository-wide; the CLI is the one project meant
+         to leave it, so it opts back in. -->
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>foundry</ToolCommandName>
+    <PackageId>Foundry.Cli</PackageId>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)../../../artifacts/tool</PackageOutputPath>
   </PropertyGroup>
 
   <!-- Embed Studio IDE Web UI Singlefile Asset.

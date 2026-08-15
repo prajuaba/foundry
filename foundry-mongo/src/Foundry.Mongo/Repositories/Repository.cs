@@ -156,6 +156,26 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         entity.UpdatedAtUtc = now;
         entity.Version = 1;
 
+        // Assign the id here rather than letting the driver generate one during InsertOneAsync.
+        //
+        // The driver stamps the generated id on the instance it is handed, and when any property is
+        // encrypted or masked that instance is a clone produced by EncryptEntityForWrite -- so the
+        // id landed on the copy and the caller's entity kept ObjectId.Empty. Everything downstream
+        // read the caller's copy: the POST response returned an id of all zeroes for a record that
+        // had in fact been stored under a real one, and the revision snapshot and audit entry below
+        // were both keyed to 000000000000000000000000, so the audit trail could not tell one insert
+        // of an encrypted entity from another.
+        //
+        // Generating it before the clone is taken means both instances carry the same id and there
+        // is nothing to copy back afterwards -- which matters because Id is init-only and cannot be
+        // assigned after construction. Entities with no encrypted properties were never affected,
+        // because EncryptEntityForWrite returns the same reference for them; that is why this went
+        // unnoticed.
+        if (entity.Id == ObjectId.Empty)
+        {
+            SetProperty(entity, nameof(entity.Id), ObjectId.GenerateNewId());
+        }
+
         var encrypted = EncryptEntityForWrite(entity);
 
         if (session != null)
