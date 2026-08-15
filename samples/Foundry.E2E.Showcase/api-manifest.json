@@ -184,21 +184,33 @@
       "Route": "/api/v1/orders/submit",
       "Method": "POST",
       "RequestType": "SubmitOrderCommand",
-      "Roles": [],
-      "BusinessRules": []
+      "Roles": [
+        "Customer",
+        "Admin"
+      ],
+      "BusinessRules": [
+        "SubmitOrderRule"
+      ]
     },
     {
       "Route": "/api/v1/orders/{id}/cancel",
       "Method": "PUT",
       "RequestType": "CancelOrderCommand",
-      "Roles": [],
+      "Roles": [
+        "Admin",
+        "Sales"
+      ],
       "BusinessRules": []
     },
     {
       "Route": "/api/v1/products/in-stock",
       "Method": "GET",
       "RequestType": "InStockProductsQuery",
-      "Roles": [],
+      "Roles": [
+        "Admin",
+        "Sales",
+        "Warehouse"
+      ],
       "BusinessRules": []
     },
     {

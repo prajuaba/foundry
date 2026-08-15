@@ -45,6 +45,9 @@ public class ApiManifestGeneratorTests
     private static JsonElement[] Endpoints(SchemaModel schema) =>
         [.. Generate(schema).GetProperty("Endpoints").EnumerateArray()];
 
+    private static JsonElement[] CustomEndpoints(SchemaModel schema) =>
+        [.. Generate(schema).GetProperty("CustomEndpoints").EnumerateArray()];
+
     // ---- routes ----
 
     [Theory]
@@ -229,5 +232,138 @@ public class ApiManifestGeneratorTests
     {
         // The manifest is committed alongside a project and read in diffs.
         Assert.Contains("\n", ApiManifestGenerator.Generate(Schema(EntityWith("Customer", "GET"))));
+    }
+
+    // ---- custom endpoint access ----
+
+    /// <summary>
+    /// A schema-declared role that does not reach the manifest is not enforced.
+    /// </summary>
+    [Fact]
+    public void CustomEndpointWithDeclaredRolesCarriesThemInOrder()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            CustomEndpoints =
+            [
+                new CustomEndpoint { Route = "/test", Roles = ["Admin", "Manager"] }
+            ]
+        };
+
+        var custom = Assert.Single(CustomEndpoints(schema));
+
+        Assert.Equal(["Admin", "Manager"], custom.GetProperty("Roles").EnumerateArray().Select(r => r.GetString()).ToList());
+    }
+
+    /// <summary>
+    /// The manifest's record of which rules guard an endpoint must match the schema's.
+    /// </summary>
+    /// <remarks>
+    /// Unlike <c>Roles</c>, this field is descriptive: rules bind by request type through DI, and
+    /// <c>BusinessRuleBehavior</c> evaluates whatever is registered for the request — so a rule
+    /// missing here was still enforced. Nothing reads this list today, which is exactly why it has
+    /// to stay faithful: a field that quietly disagrees with the schema is worse than no field.
+    /// </remarks>
+    [Fact]
+    public void CustomEndpointWithBusinessRulesCarriesThem()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            CustomEndpoints =
+            [
+                new CustomEndpoint { Route = "/test", BusinessRules = ["rule1", "rule2"] }
+            ]
+        };
+
+        var custom = Assert.Single(CustomEndpoints(schema));
+
+        Assert.Equal(["rule1", "rule2"], custom.GetProperty("BusinessRules").EnumerateArray().Select(r => r.GetString()).ToList());
+    }
+
+    /// <summary>
+    /// Both keys are always present, so declaring nothing is stated rather than absent.
+    /// </summary>
+    /// <remarks>
+    /// The source generator reads these keys off every entry. Omitting them when a schema declares
+    /// none would make "no policy" and "no key" indistinguishable to the reader, and would break any
+    /// consumer that indexes them directly.
+    /// </remarks>
+    [Fact]
+    public void CustomEndpointWithNoRolesDeclaredStillEmitsEmptyArrays()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            CustomEndpoints =
+            [
+                new CustomEndpoint { Route = "/test" }
+            ]
+        };
+
+        var custom = Assert.Single(CustomEndpoints(schema));
+
+        Assert.Equal(JsonValueKind.Array, custom.GetProperty("Roles").ValueKind);
+        Assert.Equal(0, custom.GetProperty("Roles").EnumerateArray().Count());
+
+        Assert.Equal(JsonValueKind.Array, custom.GetProperty("BusinessRules").ValueKind);
+        Assert.Equal(0, custom.GetProperty("BusinessRules").EnumerateArray().Count());
+    }
+
+    /// <summary>
+    /// A blank role name never reaches the authorization attribute.
+    /// </summary>
+    /// <remarks>
+    /// Roles are joined with commas into <c>AuthorizeAttribute.Roles</c>, so a blank entry would
+    /// produce an empty segment — a role no principal can hold, silently narrowing access.
+    /// </remarks>
+    [Fact]
+    public void BlankEntriesInRoleListAreFiltered()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            CustomEndpoints =
+            [
+                new CustomEndpoint { Route = "/test", Roles = ["Admin", "", "  ", "Manager"] }
+            ]
+        };
+
+        var custom = Assert.Single(CustomEndpoints(schema));
+
+        Assert.Equal(["Admin", "Manager"], custom.GetProperty("Roles").EnumerateArray().Select(r => r.GetString()).ToList());
+    }
+
+    /// <summary>
+    /// Workflow transition endpoints are emitted as custom endpoints; their declared roles must be preserved.
+    /// </summary>
+    [Fact]
+    public void WorkflowTransitionEndpointsCarryTheirRequiredRoles()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Workflows =
+            [
+                new WorkflowModel
+                {
+                    Name = "TestWorkflow",
+                    Entity = "Order",
+                    Transitions =
+                    [
+                        new WorkflowTransitionModel
+                        {
+                            Trigger = "Approve",
+                            RequiredRoles = ["Admin", "Manager"]
+                        }
+                    ]
+                }
+            ]
+        };
+
+        var custom = Assert.Single(CustomEndpoints(schema));
+
+        Assert.Equal(["Admin", "Manager"], custom.GetProperty("Roles").EnumerateArray().Select(r => r.GetString()).ToList());
     }
 }
