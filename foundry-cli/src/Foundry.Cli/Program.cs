@@ -1222,8 +1222,6 @@ Dockerfile
         if (hasRules) extraUsings.Add($"using {projectName}.Domain.Rules;");
         if (hasKafka) extraUsings.Add($"using {projectName}.Domain.Kafka;");
         if (hasServices) extraUsings.Add($"using {projectName}.Domain.Services;");
-        if (Directory.Exists(Path.Combine(generatedDir, "RealTime")))
-            extraUsings.Add($"using {projectName}.Domain.RealTime;");
         // AddFoundryKafkaProducer lives here rather than in Microsoft.Extensions.DependencyInjection.
         if (hasKafka) extraUsings.Add("using Foundry.Kafka;");
         // No using for GraphQL: AddDynamicGraphQL is declared in
@@ -1273,15 +1271,19 @@ Dockerfile
 
         var graphQlMapping = hasGraphQL ? "\napp.MapGraphQL();\n" : "";
 
-        // The compiler emits RealTime/RealTimeConfiguration.cs with the per-entity channels the
-        // schema declared, and nothing called it. MapFoundryRealTime maps the framework's own audit
-        // broker, which is a different surface -- so the channels a schema asked for were compiled
-        // into the application and never routed.
-        var hasRealTime = Directory.Exists(Path.Combine(generatedDir, "RealTime"));
-        var realTimeMapping = hasRealTime
-            ? "\n// Per-entity real-time channels declared by the schema.\n"
-              + "app.MapGeneratedRealTimeEndpoints();\n"
-            : "";
+        // Deliberately NOT emitted: app.MapGeneratedRealTimeEndpoints().
+        //
+        // RealTime/RealTimeConfiguration.cs looks like an unwired entry point -- the compiler emits
+        // it and Program.cs never names it -- but its whole body is a call to MapFoundryRealTime(),
+        // which Program.cs already makes directly. Adding the call registers /realtime/sse twice and
+        // the duplicate route match answers 500 where an anonymous caller should get 401, which is
+        // how the runtime smoke test caught it.
+        //
+        // It is a redundant wrapper, in the same way WorkflowConfigurations.GetConfigurations() is:
+        // Program.cs builds the workflow registry inline instead. Left here as a comment because
+        // "generated and never called" is otherwise indistinguishable from a defect on inspection,
+        // and this one was reported as a defect twice.
+        var realTimeMapping = "";
 
         // Index creation, likewise generated and likewise never invoked. Unique, Indexed and
         // TextIndex are declarations about the database, and until this runs they exist only in the

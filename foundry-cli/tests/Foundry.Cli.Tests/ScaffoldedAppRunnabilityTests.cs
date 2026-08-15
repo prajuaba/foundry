@@ -176,11 +176,36 @@ public class ScaffoldedAppRunnabilityTests : IDisposable
     }
 
     [Fact]
-    public void GeneratedRealTimeChannelsAreMapped()
+    public void TheRealTimeSurfaceIsMappedExactlyOnce()
     {
-        // MapFoundryRealTime maps the framework's own audit broker, which is a different surface.
-        // The per-entity channels the schema declared were compiled in and never routed.
-        Assert.Contains("MapGeneratedRealTimeEndpoints", Read("Program.cs"), StringComparison.Ordinal);
+        // RealTime/RealTimeConfiguration.cs reads like an unwired entry point -- generated, and
+        // never named by Program.cs -- and it is not one: its whole body is a call to
+        // MapFoundryRealTime(), which Program.cs already makes directly. Calling both registers
+        // /realtime/sse twice, and the duplicate route match answers 500 where an anonymous caller
+        // must get 401.
+        //
+        // That mistake was made, shipped to CI, and caught by the runtime smoke test. This asserts
+        // the count rather than the presence of a name, so either half going missing fails.
+        var program = Read("Program.cs");
+
+        var mappings =
+            CountOccurrences(program, "MapFoundryRealTime")
+            + CountOccurrences(program, "MapGeneratedRealTimeEndpoints");
+
+        Assert.Equal(1, mappings);
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        for (var i = haystack.IndexOf(needle, StringComparison.Ordinal);
+             i >= 0;
+             i = haystack.IndexOf(needle, i + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 
     [Fact]
@@ -208,11 +233,16 @@ public class ScaffoldedAppRunnabilityTests : IDisposable
         // produced -- a schema declaring no business rules should not be required to call
         // AddGeneratedBusinessRules, and demanding it would make the gate wrong in the other
         // direction.
+        //
+        // RealTime/RealTimeConfiguration.cs is deliberately absent from this list. It is generated
+        // and never called, and that is correct: its body only calls MapFoundryRealTime(), which
+        // Program.cs already calls directly, so wiring it too would double-register the route. Not
+        // every uncalled generated file is a defect, which is exactly what makes this class of bug
+        // hard to see -- and why the entry point is named per file rather than inferred.
         var entryPoints = new Dictionary<string, string>
         {
             [Path.Combine("Rules", "RuleRegistrations.cs")] = "AddGeneratedBusinessRules",
             [Path.Combine("Kafka", "KafkaRegistrations.cs")] = "AddGeneratedKafkaHandlers",
-            [Path.Combine("RealTime", "RealTimeConfiguration.cs")] = "MapGeneratedRealTimeEndpoints",
             [Path.Combine("Diagnostics", "IndexVerification.cs")] = "EnsureIndexesAsync",
         };
 
@@ -222,8 +252,8 @@ public class ScaffoldedAppRunnabilityTests : IDisposable
 
         // If the schema stopped producing any of them the gate would pass while checking nothing,
         // which is the failure mode this whole class exists to prevent.
-        Assert.True(emitted.Count >= 3,
-            $"Expected this schema to emit at least three registration files; found {emitted.Count}.");
+        Assert.True(emitted.Count >= 2,
+            $"Expected this schema to emit at least two registration files; found {emitted.Count}.");
 
         var missing = emitted
             .Where(e => !program.Contains(e.Value, StringComparison.Ordinal))
