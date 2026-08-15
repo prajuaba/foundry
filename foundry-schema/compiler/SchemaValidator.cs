@@ -114,7 +114,14 @@ namespace Foundry.Schema.Compiler
         }
 
         /// <summary>Whether a value names a secret rather than being one.</summary>
-        private static bool IsSecretReference(string value)
+        /// <remarks>
+        /// Internal because other Foundry tools need the answer. When they could not ask for it, they
+        /// reimplemented the rule. The ReferenceExporter reimplemented it stricter with a regex restricting
+        /// characters to [A-Z0-9_], incorrectly reporting correctly-configured references like
+        /// "${ENV:ACME_API_KEY}" as literal credentials. A rule kept private is a rule that gets
+        /// reimplemented wrongly.
+        /// </remarks>
+        internal static bool IsSecretReference(string value)
         {
             var text = value.Trim();
             return text.StartsWith("${", StringComparison.Ordinal)

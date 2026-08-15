@@ -3,7 +3,10 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -46,7 +49,7 @@ public class Program
         new("migrate", "migrate <canvas.json>", "Converts a Studio canvas document to normative IR.",
             args => Task.FromResult(HandleMigrateCommand(args))),
 
-        new("export", "export -i <f> -f <format>", "Exports openapi | asyncapi | postman | mermaid.",
+        new("export", "export -i <f> -f <format> [-m <f>] [-o <f>]", "Exports openapi | asyncapi | postman | mermaid | reference.",
             args => Task.FromResult(HandleExportCommand(args))),
 
         new("sdk", "sdk -i <f> -l <lang> [-o <path>]", "Generates a client SDK: ts | csharp | python.",
@@ -1768,17 +1771,37 @@ app.Run();
         return process.ExitCode;
     }
 
+    private static string ComputeSha256(string filePath)
+    {
+        using (var sha256 = SHA256.Create())
+        using (var fileStream = File.OpenRead(filePath))
+        {
+            var hash = sha256.ComputeHash(fileStream);
+            return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+        }
+    }
+
     private static int HandleExportCommand(string[] args)
     {
         string inputPath = "domain.foundry.json";
         string format = "openapi";
         string? outputPath = null;
+        string? manifestPath = null;
 
         for (int i = 0; i < args.Length; i++)
         {
             if ((args[i] == "--input" || args[i] == "-i") && i + 1 < args.Length) inputPath = args[i + 1];
             else if ((args[i] == "--format" || args[i] == "-f") && i + 1 < args.Length) format = args[i + 1].ToLowerInvariant();
             else if ((args[i] == "--output" || args[i] == "-o") && i + 1 < args.Length) outputPath = args[i + 1];
+            else if ((args[i] == "--manifest" || args[i] == "-m") && i + 1 < args.Length) manifestPath = args[i + 1];
+        }
+
+        // Validate manifest flag usage
+        if (!string.IsNullOrEmpty(manifestPath) && format != "reference")
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("[Warning] --manifest is only meaningful with --format reference. It will be ignored.");
+            Console.ResetColor();
         }
 
         if (!File.Exists(inputPath))
@@ -1790,9 +1813,9 @@ app.Run();
         }
 
         var schemaContent = File.ReadAllText(inputPath);
-        var schema = System.Text.Json.JsonSerializer.Deserialize<Foundry.Schema.Compiler.SchemaModel>(
-            schemaContent, 
-            new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        var schema = JsonSerializer.Deserialize<Foundry.Schema.Compiler.SchemaModel>(
+            schemaContent,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
         if (schema == null)
         {
@@ -1802,31 +1825,79 @@ app.Run();
             return 1;
         }
 
-        string exportedContent = format switch
+        try
         {
-            "openapi" or "swagger" => Foundry.Schema.Compiler.Exporters.OpenApiExporter.ExportJson(schema),
-            "asyncapi" or "kafka" => Foundry.Schema.Compiler.Exporters.AsyncApiExporter.ExportJson(schema),
-            "postman" => Foundry.Schema.Compiler.Exporters.PostmanExporter.ExportJson(schema),
-            "mermaid" => Foundry.Schema.Compiler.Exporters.MermaidExporter.ExportMermaid(schema),
-            _ => throw new NotSupportedException($"Export format '{format}' is not supported. Choose openapi, asyncapi, postman, or mermaid.")
-        };
+            string exportedContent;
 
-        if (string.IsNullOrEmpty(outputPath))
-        {
-            outputPath = format switch
+            if (format == "reference")
             {
-                "mermaid" => "schema-diagram.mmd",
-                "postman" => "postman_collection.json",
-                "asyncapi" => "asyncapi_spec.json",
-                _ => "openapi_spec.json"
-            };
-        }
+                // Compute IR SHA256
+                var irSha256 = ComputeSha256(inputPath);
 
-        File.WriteAllText(outputPath, exportedContent);
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.WriteLine($"✓ Exported {format.ToUpper()} spec to '{outputPath}'");
-        Console.ResetColor();
-        return 0;
+                // Load and parse manifest if provided
+                JsonNode? manifestNode = null;
+                string? manifestSha256 = null;
+                if (!string.IsNullOrEmpty(manifestPath))
+                {
+                    if (!File.Exists(manifestPath))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[Error] Manifest file '{manifestPath}' not found.");
+                        Console.ResetColor();
+                        return 1;
+                    }
+
+                    var manifestContent = File.ReadAllText(manifestPath);
+                    manifestNode = JsonNode.Parse(manifestContent);
+                    manifestSha256 = ComputeSha256(manifestPath);
+                }
+
+                // Create ReferenceSource
+                var refSource = new Foundry.Schema.Compiler.Exporters.ReferenceSource(
+                    Path.GetFileName(inputPath),
+                    irSha256,
+                    string.IsNullOrEmpty(manifestPath) ? null : Path.GetFileName(manifestPath),
+                    manifestSha256);
+
+                exportedContent = Foundry.Schema.Compiler.Exporters.ReferenceExporter.ExportMarkdown(schema, manifestNode, refSource);
+            }
+            else
+            {
+                exportedContent = format switch
+                {
+                    "openapi" or "swagger" => Foundry.Schema.Compiler.Exporters.OpenApiExporter.ExportJson(schema),
+                    "asyncapi" or "kafka" => Foundry.Schema.Compiler.Exporters.AsyncApiExporter.ExportJson(schema),
+                    "postman" => Foundry.Schema.Compiler.Exporters.PostmanExporter.ExportJson(schema),
+                    "mermaid" => Foundry.Schema.Compiler.Exporters.MermaidExporter.ExportMermaid(schema),
+                    _ => throw new NotSupportedException($"Export format '{format}' is not supported. Choose openapi, asyncapi, postman, mermaid, or reference.")
+                };
+            }
+
+            if (string.IsNullOrEmpty(outputPath))
+            {
+                outputPath = format switch
+                {
+                    "mermaid" => "schema-diagram.mmd",
+                    "postman" => "postman_collection.json",
+                    "asyncapi" => "asyncapi_spec.json",
+                    "reference" => "TECHNICAL-REFERENCE.md",
+                    _ => "openapi_spec.json"
+                };
+            }
+
+            File.WriteAllText(outputPath, exportedContent);
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine($"✓ Exported {format.ToUpper()} spec to '{outputPath}'");
+            Console.ResetColor();
+            return 0;
+        }
+        catch (Foundry.Schema.Compiler.Exporters.ReferenceExportException ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"[Error] {ex.Message}");
+            Console.ResetColor();
+            return 1;
+        }
     }
 
     /// <summary>Runs the environment checks in <see cref="Doctor"/> and prints them.</summary>
