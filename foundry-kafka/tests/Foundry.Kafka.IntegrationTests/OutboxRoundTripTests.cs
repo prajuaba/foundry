@@ -58,6 +58,27 @@ public sealed class OutboxRoundTripTests : IDisposable
     /// <summary>Deliberately unlike anything the default naming would produce from the type name.</summary>
     private const string DeclaredTopic = "billing.invoices.v2";
 
+    /// <summary>
+    /// A subject carrying a real <see cref="ObjectId"/> and a real enum, rather than strings.
+    /// </summary>
+    /// <remarks>
+    /// Every other fixture here declares its id as <c>string</c>, which is why this suite proved the
+    /// chain end to end and still missed what was travelling down it: the outbox serialized payloads
+    /// with stock System.Text.Json, so an ObjectId arrived as {"Timestamp":…,"CreationTime":…} --
+    /// two members derived from the same four bytes, with the random and counter bytes absent, so
+    /// the id could not be reconstructed by anyone consuming it.
+    /// </remarks>
+    public sealed record ShipmentDispatched(ShipmentDispatched.ShipmentBody Entity)
+    {
+        public sealed record ShipmentBody(ObjectId Id, ObjectId CarrierId, Carrier Mode, string Reference);
+    }
+
+    public enum Carrier
+    {
+        Ground = 0,
+        Air = 1,
+    }
+
     public OutboxRoundTripTests()
     {
         Foundry.Mongo.Infrastructure.Conventions.MongoDbConventions.Register();
@@ -192,6 +213,56 @@ public sealed class OutboxRoundTripTests : IDisposable
     }
 
     // ── The round trip ──────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task AnObjectIdSurvivesTheTripToATopic()
+    {
+        // The encoding, asserted where it actually matters: on a real broker, at the far end of the
+        // real worker loop. The unit test pins MongoOutboxQueue's output; this proves nothing between
+        // there and the topic re-encodes it.
+        RequireInfrastructure();
+
+        using var consumer = Subscribe("shipment-dispatched-events");
+
+        var services = BuildHost();
+        var reference = $"SHP-{Guid.NewGuid():N}";
+        var entityId = ObjectId.GenerateNewId();
+        var carrierId = ObjectId.GenerateNewId();
+
+        using (var scope = services.CreateScope())
+        {
+            var queue = scope.ServiceProvider.GetRequiredService<IOutboxQueue>();
+            await queue.EnqueueAsync(
+                new ShipmentDispatched(
+                    new ShipmentDispatched.ShipmentBody(entityId, carrierId, Carrier.Air, reference)),
+                CancellationToken.None);
+        }
+
+        var worker = new OutboxPublisherWorker(services, NullLogger<OutboxPublisherWorker>.Instance);
+        using var cts = new CancellationTokenSource(RoundTripTimeout);
+        await worker.StartAsync(cts.Token);
+
+        try
+        {
+            var message = ConsumeMatching(
+                consumer, r => r.Message.Value.Contains(reference), RoundTripTimeout);
+
+            Assert.NotNull(message);
+            var value = message!.Message.Value;
+
+            // Both ids readable as ids, not as the struct's innards.
+            Assert.Contains(entityId.ToString(), value, StringComparison.Ordinal);
+            Assert.Contains(carrierId.ToString(), value, StringComparison.Ordinal);
+            Assert.DoesNotContain("CreationTime", value, StringComparison.Ordinal);
+
+            // And the enum by name, so the meaning does not depend on declaration order.
+            Assert.Contains("\"Air\"", value, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
 
     [Fact]
     public async Task AnEnqueuedEventReachesKafka()
