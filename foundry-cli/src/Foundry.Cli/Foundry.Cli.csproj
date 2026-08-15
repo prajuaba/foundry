@@ -7,18 +7,44 @@
     <AssemblyName>foundry</AssemblyName>
     <RootNamespace>Foundry.Cli</RootNamespace>
 
-    <!-- Shipped as a .NET tool. See docs/modules/foundry-cli.md for the install commands.
+    <!-- Single file, but neither self-contained nor compressed *here*.
 
-         This replaced a single-file self-contained publish configuration that could not build in
-         ANY configuration, so there was no way to obtain the CLI at all except by running it out
-         of a source checkout. Self-contained requires every referenced project to be
-         self-contained too, and Foundry.Schema.Compiler is a non-self-contained Exe with a
-         documented standalone entry point, which fails NETSDK1150. Removing self-contained then
-         failed NETSDK1176, because single-file compression requires it. The two settings
-         contradicted each other, and no CI job ever ran a publish on this project to notice.
+         Three settings have to agree and each breaks a different consumer if it does not:
 
-         A tool package needs neither setting, and is how a developer CLI is normally shipped. -->
-    <!-- Directory.Build.props disables packing repository-wide; the CLI is the one project meant
+           PublishSingleFile      stays. scripts/build-distro.sh publishes to dist-bin/ and CI
+                                  uploads exactly one path from it, dist-bin/foundry. Without this
+                                  the publish spreads across a directory and that single uploaded
+                                  file is a bare apphost of 78 KB that cannot run, because
+                                  foundry.dll and every dependency were left behind. The build
+                                  still passes, because it verifies the binary where its
+                                  dependencies are; only the artifact anyone downloads is broken.
+
+           PublishSelfContained   removed. It does not flow to referenced projects, and
+                                  Foundry.Schema.Compiler is a non-self-contained Exe with a
+                                  documented standalone entry point, so a plain `dotnet publish`
+                                  fails NETSDK1150. build-distro.sh passes SelfContained=true as a
+                                  *global* property instead, which is what makes the whole project
+                                  graph agree.
+
+           EnableCompressionInSingleFile  removed. It requires self-contained, so with the line
+                                  above gone a plain publish failed NETSDK1176. The two settings
+                                  contradicted each other and publish worked in no configuration
+                                  at all.
+
+         So: `dotnet publish` produces a framework-dependent single file, build-distro.sh produces
+         a self-contained one, and `dotnet pack` produces the tool package. All three are exercised
+         below and none of them silently ships a binary that cannot start. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+
+    <!-- Stated rather than left to inference. PublishSingleFile makes the SDK infer self-contained,
+         which brings NETSDK1150 straight back for a plain `dotnet publish`. build-distro.sh passes
+         SelfContained=true as a global property, and a global property beats a project one, so the
+         distro build still produces the standalone binary CI uploads. -->
+    <SelfContained>false</SelfContained>
+
+    <!-- Shipped as a .NET tool as well. See docs/modules/foundry-cli.md for the install commands.
+         Directory.Build.props disables packing repository-wide; the CLI is the one project meant
          to leave it, so it opts back in. -->
     <IsPackable>true</IsPackable>
     <PackAsTool>true</PackAsTool>
