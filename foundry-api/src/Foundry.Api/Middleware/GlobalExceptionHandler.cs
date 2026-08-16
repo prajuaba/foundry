@@ -27,7 +27,14 @@ public class GlobalExceptionHandler : IExceptionHandler
                 Detail = "One or more validation errors occurred.",
                 Instance = httpContext.Request.Path
             };
-            problemDetails.Extensions["errors"] = valEx.Errors.Select(e => new { e.PropertyName, e.ErrorMessage }).ToList();
+            // ErrorCode is projected deliberately. BusinessRuleBehavior sets it from
+            // RuleResult.RuleCode, and this line used to drop it -- so a rule could declare a stable
+            // code, the pipeline could carry it faithfully, and the caller would never see it. A
+            // client branching on a failure was left matching the human-readable message, which is
+            // the one part of an error meant to change freely.
+            problemDetails.Extensions["errors"] = valEx.Errors
+                .Select(e => new { e.PropertyName, e.ErrorMessage, e.ErrorCode })
+                .ToList();
 
             var json = JsonSerializer.Serialize(problemDetails);
             await httpContext.Response.WriteAsync(json, cancellationToken);
