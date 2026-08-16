@@ -16,7 +16,16 @@ public static class RulesServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddFoundryRules(this IServiceCollection services)
     {
-        services.TryAddSingleton<IBusinessRuleEngine, BusinessRuleEngine>();
+        // IMPORTANT: BusinessRuleEngine must be scoped, not singleton. It injects IServiceProvider and
+        // resolves rules from it using GetServices<IBusinessRule<TRequest>>. If registered as singleton,
+        // it receives the root provider, which cannot resolve scoped dependencies like repositories and
+        // ICurrentUserContext. Registering as scoped ensures each request gets its own engine instance
+        // that can resolve from the request's scoped provider. This is safe because MediatR behaviors
+        // (including BusinessRuleBehavior that consumes this) are transient or scoped. Do not "optimize"
+        // this to IServiceScopeFactory with manual scope creation inside EvaluateAsync -- that would
+        // create a fresh scope with a different ICurrentUserContext, breaking rule evaluation for the
+        // original caller. Rules must see the request's own scope.
+        services.TryAddScoped<IBusinessRuleEngine, BusinessRuleEngine>();
         services.TryAddSingleton<IWorkflowEngine, WorkflowEngine>();
         services.TryAddSingleton<IDynamicRuleStore, InMemoryDynamicRuleStore>();
         services.AddTransient(typeof(IBusinessRule<>), typeof(DynamicRulesEngineRule<>));

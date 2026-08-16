@@ -110,4 +110,173 @@ public class BusinessRuleEngineTests
 
         Assert.Empty(failures);
     }
+
+    // === Tests for scoped engine fix ===
+
+    [Fact]
+    public void Engine_IsRegisteredAsScoped_NotSingleton()
+    {
+        // The engine must be scoped so it receives the request's scoped provider, allowing rules
+        // to resolve scoped dependencies like repositories and ICurrentUserContext.
+        var services = new ServiceCollection();
+        services.AddFoundryRules();
+
+        var descriptor = services.FirstOrDefault(d => d.ServiceType == typeof(IBusinessRuleEngine));
+        Assert.NotNull(descriptor);
+        Assert.Equal(ServiceLifetime.Scoped, descriptor!.Lifetime);
+    }
+
+    [Fact]
+    public async Task RuleWithScopedDependency_ResolvesAndExecutesFromRequestScope()
+    {
+        // Scoped dependency interface
+        var interface_scoped = typeof(IScopedDependency);
+
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddFoundryRules();
+
+        // Register the scoped dependency and the rule that uses it
+        services.AddScoped<IScopedDependency, ScopedDependency>();
+        services.AddScoped<IBusinessRule<OrderRequest>, RuleWithScopedDependency>();
+
+        // Build with ValidateScopes to catch scoped-in-singleton violations
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions
+        {
+            ValidateOnBuild = true,
+            ValidateScopes = true
+        });
+
+        // Create a scope and resolve the engine from within it (like a request would)
+        using var scope = provider.CreateScope();
+        var engine = scope.ServiceProvider.GetRequiredService<IBusinessRuleEngine>();
+
+        // This should not throw -- the engine should resolve the rule and the rule should resolve
+        // its scoped dependency from the same scope
+        var failures = (await engine.EvaluateAsync(new OrderRequest(10m), default)).ToList();
+
+        Assert.Empty(failures);
+    }
+
+    [Fact]
+    public async Task RuleSeesTheSameScopedInstance_AsTheSurroundingScope()
+    {
+        // This test proves that rules see the request's own scoped context, not a fresh one.
+        // If we (wrongly) created a new scope inside EvaluateAsync, this test would fail.
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddFoundryRules();
+
+        // Register the scoped dependency and the rule
+        services.AddScoped<IScopedDependency, ScopedDependency>();
+        services.AddScoped<IBusinessRule<OrderRequest>, RuleCapturingScopedDependency>();
+
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions
+        {
+            ValidateScopes = true
+        });
+
+        using var scope = provider.CreateScope();
+
+        // Get the engine and the scoped dependency from the same scope
+        var engine = scope.ServiceProvider.GetRequiredService<IBusinessRuleEngine>();
+        var directDependency = scope.ServiceProvider.GetRequiredService<IScopedDependency>();
+
+        // Evaluate a rule that captures the dependency's identity
+        var failures = (await engine.EvaluateAsync(new OrderRequest(10m), default)).ToList();
+
+        // The rule should have captured the dependency that came from this scope
+        Assert.Empty(failures);
+        Assert.True(RuleCapturingScopedDependency.LastCapturedId == directDependency.Id,
+            $"Rule captured dependency Id {RuleCapturingScopedDependency.LastCapturedId} but the scope's dependency has Id {directDependency.Id}");
+    }
+
+    [Fact]
+    public async Task TwoDifferentScopes_GiveRulesTwoDifferentScopedInstances()
+    {
+        // This test ensures that scoped dependencies are truly scoped to the request, not shared
+        // across requests.
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddFoundryRules();
+
+        services.AddScoped<IScopedDependency, ScopedDependency>();
+        services.AddScoped<IBusinessRule<OrderRequest>, RuleCapturingScopedDependency>();
+
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions
+        {
+            ValidateScopes = true
+        });
+
+        // First scope
+        using var scope1 = provider.CreateScope();
+        RuleCapturingScopedDependency.LastCapturedId = -1; // Reset
+        var engine1 = scope1.ServiceProvider.GetRequiredService<IBusinessRuleEngine>();
+        await engine1.EvaluateAsync(new OrderRequest(10m), default);
+        var id1 = RuleCapturingScopedDependency.LastCapturedId;
+
+        // Second scope
+        using var scope2 = provider.CreateScope();
+        RuleCapturingScopedDependency.LastCapturedId = -1; // Reset
+        var engine2 = scope2.ServiceProvider.GetRequiredService<IBusinessRuleEngine>();
+        await engine2.EvaluateAsync(new OrderRequest(10m), default);
+        var id2 = RuleCapturingScopedDependency.LastCapturedId;
+
+        // The two scopes should have provided different instances of the scoped dependency
+        Assert.NotEqual(id1, id2);
+    }
+
+    // === Scoped dependency and rules for testing ===
+
+    private interface IScopedDependency
+    {
+        int Id { get; }
+    }
+
+    private sealed class ScopedDependency : IScopedDependency
+    {
+        private static int _nextId = 1;
+        public int Id { get; }
+
+        public ScopedDependency()
+        {
+            Id = _nextId++;
+        }
+    }
+
+    private sealed class RuleWithScopedDependency : IBusinessRule<OrderRequest>
+    {
+        private readonly IScopedDependency _dependency;
+
+        public RuleWithScopedDependency(IScopedDependency dependency)
+        {
+            _dependency = dependency;
+        }
+
+        public Task<RuleResult> ValidateAsync(OrderRequest request, CancellationToken ct = default)
+        {
+            // The fact that this rule was instantiated with a scoped dependency means
+            // the engine was able to resolve it from the scoped provider.
+            return Task.FromResult(RuleResult.Success());
+        }
+    }
+
+    private sealed class RuleCapturingScopedDependency : IBusinessRule<OrderRequest>
+    {
+        private readonly IScopedDependency _dependency;
+
+        // Static field to capture the dependency Id for assertion
+        public static int LastCapturedId { get; set; }
+
+        public RuleCapturingScopedDependency(IScopedDependency dependency)
+        {
+            _dependency = dependency;
+        }
+
+        public Task<RuleResult> ValidateAsync(OrderRequest request, CancellationToken ct = default)
+        {
+            LastCapturedId = _dependency.Id;
+            return Task.FromResult(RuleResult.Success());
+        }
+    }
 }

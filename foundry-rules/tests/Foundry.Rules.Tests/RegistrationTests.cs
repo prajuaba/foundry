@@ -42,7 +42,9 @@ public class RegistrationTests
     public void BusinessRuleEngine_Resolves()
     {
         using var provider = Build();
-        Assert.NotNull(provider.GetRequiredService<IBusinessRuleEngine>());
+        // Engine is registered as scoped, so it must be resolved from a scope, not the root provider
+        using var scope = provider.CreateScope();
+        Assert.NotNull(scope.ServiceProvider.GetRequiredService<IBusinessRuleEngine>());
     }
 
     [Fact]
