@@ -60,6 +60,11 @@ public static class TypeScriptSdkGenerator
 
         foreach (var entity in schema.Entities ?? new List<Entity>())
         {
+            // Only emit JSDoc if entity has authored description
+            if (!string.IsNullOrEmpty(entity.Description))
+            {
+                EmitJsDoc(sb, entity.Description, 0);
+            }
             sb.AppendLine($"export interface {entity.Name} {{");
 
             foreach (var prop in entity.Properties ?? new List<Property>())
@@ -71,13 +76,19 @@ public static class TypeScriptSdkGenerator
                 // keys the server stamps from their token and refuses to take from a body.
                 var optional = SdkSurface.IsRequired(prop) ? "" : "?";
 
+                // Only emit JSDoc if property has authored description
+                if (!string.IsNullOrEmpty(prop.Description))
+                {
+                    EmitJsDoc(sb, prop.Description, 2);
+                }
+
                 // Emitted exactly as declared. These were lower-cased, and the API applies no naming
                 // policy -- it serialises "FullName", not "fullname" -- so every field on every
                 // generated interface read back as undefined. TypeScript compiled it happily.
                 sb.AppendLine($"  {prop.Name}{optional}: {propType};");
             }
 
-            sb.AppendLine("}\n");
+            sb.AppendLine("}\n"); // Note: \n is already in the string literal for spacing
         }
 
         foreach (var entity in schema.Entities ?? new List<Entity>())
@@ -152,6 +163,27 @@ public static class TypeScriptSdkGenerator
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Emits a JSDoc comment, handling multi-line text and escaping `*/` to prevent comment termination.
+    /// </summary>
+    private static void EmitJsDoc(StringBuilder sb, string? text, int indentSpaces)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+
+        var indent = new string(' ', indentSpaces);
+        var lines = text!.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+
+        sb.AppendLine($"{indent}/**");
+        foreach (var line in lines)
+        {
+            // Escape */ to *\/ to prevent comment termination
+            var escaped = line.Replace("*/", "*\\/");
+            sb.AppendLine($"{indent} * {escaped}");
+        }
+        sb.AppendLine($"{indent} */");
     }
 
     private static string MapTypeScriptType(string type)

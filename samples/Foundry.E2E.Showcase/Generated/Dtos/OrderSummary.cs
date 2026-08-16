@@ -15,6 +15,9 @@ using Foundry.Core.Attributes;
 
 namespace Foundry.E2E.Showcase;
 
+/// <summary>
+/// Summary data transfer object for customers
+/// </summary>
 public partial record OrderSummary
 {
     [Required]

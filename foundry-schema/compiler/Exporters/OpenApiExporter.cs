@@ -68,6 +68,12 @@ public static class OpenApiExporter
                 ["responses"] = new JsonObject { ["200"] = Response("Success") }
             };
 
+            // Add description if present
+            if (!string.IsNullOrEmpty(custom.Description))
+            {
+                operation["description"] = custom.Description;
+            }
+
             AddOperation(paths, custom.Route, (custom.Method ?? "GET").ToLowerInvariant(), operation);
         }
 
@@ -110,11 +116,24 @@ public static class OpenApiExporter
             if (property.IsKey)
             {
                 // The key is assigned by the server, so it is the one property a caller never sends.
-                node["description"] = "Primary key";
+                // If property has an authored description, it wins. Otherwise use the default.
+                if (!string.IsNullOrEmpty(property.Description))
+                {
+                    node["description"] = property.Description;
+                }
+                else
+                {
+                    node["description"] = "Primary key";
+                }
                 node["readOnly"] = true;
             }
             else
             {
+                // Add authored description if present
+                if (!string.IsNullOrEmpty(property.Description))
+                {
+                    node["description"] = property.Description;
+                }
                 required.Add(property.Name);
             }
 
@@ -128,6 +147,12 @@ public static class OpenApiExporter
         };
 
         if (required.Count > 0) result["required"] = required;
+
+        // Add entity description if present
+        if (!string.IsNullOrEmpty(entity.Description))
+        {
+            result["description"] = entity.Description;
+        }
 
         return result;
     }

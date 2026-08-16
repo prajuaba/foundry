@@ -193,6 +193,197 @@ public class ExporterTests
         Assert.All(documented, path => Assert.Contains(path, declared));
     }
 
+    [Fact]
+    public void OpenApiEmitsEntityDescriptions()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Customer",
+                    Description = "A customer record",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var doc = Json(OpenApiExporter.ExportJson(schema));
+        var customerSchema = doc.GetProperty("components").GetProperty("schemas").GetProperty("Customer");
+
+        Assert.True(customerSchema.TryGetProperty("description", out var desc));
+        Assert.Equal("A customer record", desc.GetString());
+    }
+
+    [Fact]
+    public void OpenApiEmitsPropertyDescriptions()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Customer",
+                    ApiEnabledMethods = ["GET"],
+                    Properties =
+                    [
+                        new Property { Name = "Id", Type = "ObjectId", IsKey = true },
+                        new Property { Name = "Name", Type = "string", Description = "Customer full name" }
+                    ]
+                }
+            ]
+        };
+
+        var doc = Json(OpenApiExporter.ExportJson(schema));
+        var nameProperty = doc.GetProperty("components").GetProperty("schemas").GetProperty("Customer")
+            .GetProperty("properties").GetProperty("Name");
+
+        Assert.True(nameProperty.TryGetProperty("description", out var desc));
+        Assert.Equal("Customer full name", desc.GetString());
+    }
+
+    [Fact]
+    public void OpenApiPrimaryKeyHasDefaultDescriptionWhenNotAuthorEd()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Customer",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var doc = Json(OpenApiExporter.ExportJson(schema));
+        var idProperty = doc.GetProperty("components").GetProperty("schemas").GetProperty("Customer")
+            .GetProperty("properties").GetProperty("Id");
+
+        Assert.Equal("Primary key", idProperty.GetProperty("description").GetString());
+    }
+
+    [Fact]
+    public void OpenApiPrimaryKeyUsesAuthoredDescriptionWhenPresent()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Customer",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true, Description = "Unique identifier" }]
+                }
+            ]
+        };
+
+        var doc = Json(OpenApiExporter.ExportJson(schema));
+        var idProperty = doc.GetProperty("components").GetProperty("schemas").GetProperty("Customer")
+            .GetProperty("properties").GetProperty("Id");
+
+        Assert.Equal("Unique identifier", idProperty.GetProperty("description").GetString());
+    }
+
+    [Fact]
+    public void OpenApiEmitsCustomEndpointDescriptions()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            CustomEndpoints =
+            [
+                new CustomEndpoint
+                {
+                    Route = "/api/checkout",
+                    Method = "POST",
+                    Description = "Process a checkout request"
+                }
+            ]
+        };
+
+        var doc = Json(OpenApiExporter.ExportJson(schema));
+        var checkout = doc.GetProperty("paths").GetProperty("/api/checkout").GetProperty("post");
+
+        Assert.True(checkout.TryGetProperty("description", out var desc));
+        Assert.Equal("Process a checkout request", desc.GetString());
+    }
+
+    [Fact]
+    public void OpenApiJsonRoundTripWithSpecialCharactersInDescription()
+    {
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Customer",
+                    Description = "A customer with \"quotes\" and \\backslash",
+                    ApiEnabledMethods = ["GET"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }]
+                }
+            ]
+        };
+
+        var json = OpenApiExporter.ExportJson(schema);
+        var doc = Json(json);
+        var desc = doc.GetProperty("components").GetProperty("schemas").GetProperty("Customer")
+            .GetProperty("description").GetString();
+
+        // Round-trip should preserve the original text
+        Assert.Equal("A customer with \"quotes\" and \\backslash", desc);
+    }
+
+    [Fact]
+    public void OpenApiSilenceWhenNoDescriptions()
+    {
+        // A schema with no descriptions must produce output without description keys
+        var schema = new SchemaModel
+        {
+            Namespace = "Test.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Customer",
+                    ApiEnabledMethods = ["GET"],
+                    Properties =
+                    [
+                        new Property { Name = "Id", Type = "ObjectId", IsKey = true },
+                        new Property { Name = "Name", Type = "string" }
+                    ]
+                }
+            ]
+        };
+
+        var json = OpenApiExporter.ExportJson(schema);
+
+        // Should not have null or empty descriptions
+        Assert.DoesNotContain("\"description\": null", json);
+        Assert.DoesNotContain("\"description\": \"\"", json);
+
+        // Entity should not have description key when not authored
+        var doc = Json(json);
+        var customerSchema = doc.GetProperty("components").GetProperty("schemas").GetProperty("Customer");
+        Assert.False(customerSchema.TryGetProperty("description", out _));
+
+        // Property without description should not have description key
+        var nameProperty = customerSchema.GetProperty("properties").GetProperty("Name");
+        Assert.False(nameProperty.TryGetProperty("description", out _));
+    }
+
     // ── Postman ─────────────────────────────────────────────────────────────
 
     [Fact]

@@ -77,13 +77,17 @@ namespace Foundry.Schema.Compiler
             {
                 if (string.IsNullOrWhiteSpace(custom.Route)) continue;
 
+                // These were hardcoded empty, so roles declared in the schema never reached the
+                // manifest. The manifest is the only channel between the compiler and the runtime, so
+                // an absent role list reaches RequireAuthorization() without a role guard, and every
+                // custom endpoint is served to any authenticated caller regardless of the schema.
                 customEndpoints.Add(new JsonObject
                 {
                     ["Route"] = custom.Route,
                     ["Method"] = (custom.Method ?? "GET").ToUpperInvariant(),
                     ["RequestType"] = custom.RequestType ?? string.Empty,
-                    ["Roles"] = new JsonArray(),
-                    ["BusinessRules"] = new JsonArray()
+                    ["Roles"] = ToArray(custom.Roles),
+                    ["BusinessRules"] = ToArray(custom.BusinessRules)
                 });
             }
 

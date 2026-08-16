@@ -41,6 +41,9 @@ namespace Foundry.Schema.Compiler
         /// <inheritdoc cref="Password"/>
         public string? Token { get; init; }
 
+        /// <inheritdoc cref="Entity.Description"/>
+        public string? Description { get; init; }
+
         public string? SoapAction { get; init; }
         public int TimeoutSeconds { get; init; } = 30;
         public int MaxRetries { get; init; } = 3;
@@ -58,6 +61,9 @@ namespace Foundry.Schema.Compiler
         public List<WorkflowStateModel> States { get; init; } = new();
         public List<WorkflowTransitionModel> Transitions { get; init; } = new();
         public List<WorkflowChoiceNodeModel> ChoiceNodes { get; init; } = new();
+
+        /// <inheritdoc cref="Entity.Description"/>
+        public string? Description { get; init; }
     }
 
     public record WorkflowChoiceNodeModel
@@ -223,6 +229,11 @@ namespace Foundry.Schema.Compiler
         [JsonPropertyName("ownerReadExemptRoles")]
         public List<string> OwnerReadExemptRoles { get; init; } = new();
 
+        /// <summary>
+        /// Prose the schema author writes, carried through to generated code and published API documentation, so the reason a thing exists lives in the same document as its shape.
+        /// </summary>
+        public string? Description { get; init; }
+
         public Dictionary<string, List<string>> ApiBusinessRules { get; init; } = new();
 
         /// <summary>
@@ -299,6 +310,9 @@ namespace Foundry.Schema.Compiler
         [JsonPropertyName("sensitiveCategory")]
         public string? SensitiveCategory { get; init; }
 
+        /// <inheritdoc cref="Entity.Description"/>
+        public string? Description { get; init; }
+
         public List<string> Attributes { get; init; } = new();
     }
 
@@ -315,12 +329,16 @@ namespace Foundry.Schema.Compiler
     public record Enum
     {
         public string Name { get; init; } = string.Empty;
+        /// <inheritdoc cref="Entity.Description"/>
+        public string? Description { get; init; }
         public List<string> Values { get; init; } = new();
     }
 
     public record DtoModel
     {
         public string Name { get; init; } = string.Empty;
+        /// <inheritdoc cref="Entity.Description"/>
+        public string? Description { get; init; }
         public List<DtoProperty> Properties { get; init; } = new();
 
         [JsonPropertyName("enableKafkaOutbox")]
@@ -343,6 +361,8 @@ namespace Foundry.Schema.Compiler
         public string? SourceEntity { get; init; }
         public string? SourceProperty { get; init; }
         public bool IsRequired { get; init; }
+        /// <inheritdoc cref="Entity.Description"/>
+        public string? Description { get; init; }
         public List<string> Attributes { get; init; } = new();
     }
 
@@ -370,6 +390,8 @@ namespace Foundry.Schema.Compiler
         public List<AssignmentRule>? Assignments { get; init; }
         public List<string>? Roles { get; init; }
         public List<string>? BusinessRules { get; init; }
+        /// <inheritdoc cref="Entity.Description"/>
+        public string? Description { get; init; }
     }
 
     public record AssignmentRule

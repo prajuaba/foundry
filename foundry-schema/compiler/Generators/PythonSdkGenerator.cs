@@ -8,11 +8,24 @@ namespace Foundry.Schema.Compiler.Generators;
 /// Generates a Python client for a Foundry domain schema.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Every generated endpoint calls <c>RequireAuthorization()</c>, and this client sent no
 /// <c>Authorization</c> header, so every call it made answered 401 — which <c>raise_for_status()</c>
 /// then reported as an HTTP error rather than as "you did not authenticate". It also offered
 /// <c>delete_*</c> for entities that declare no DELETE, and no <c>update_*</c> at all for the ones
 /// that declare PUT. <see cref="SdkSurface"/> answers both questions for all three languages.
+/// </para>
+/// <para>
+/// Entity descriptions are emitted as comment lines adjacent to the existing entity group comment
+/// because they describe the entity itself, not any individual operation. Python has no entity type in
+/// this SDK surface, so a docstring on an operation would misrepresent the scope of the documentation.
+/// Comments cannot be terminated by any content — no escaping is needed or applied.
+/// </para>
+/// <para>
+/// Property descriptions are not representable in this SDK's current shape — it generates no model
+/// types, so there is no natural place to attach them. If property documentation is needed, add model
+/// types to the SDK surface.
+/// </para>
 /// </remarks>
 public static class PythonSdkGenerator
 {
@@ -57,6 +70,12 @@ public static class PythonSdkGenerator
 
                 sb.AppendLine($"    # {name} endpoints. Serves: {string.Join(", ", SdkSurface.MethodsFor(entity))}");
 
+                // Emit entity description as comment lines if authored in IR
+                if (!string.IsNullOrEmpty(entity.Description))
+                {
+                    EmitCommentLines(sb, entity.Description, 4);
+                }
+
                 if (SdkSurface.HasList(entity))
                 {
                     sb.AppendLine($"    def get_all_{lower}(self) -> List[Dict[str, Any]]:");
@@ -99,5 +118,30 @@ public static class PythonSdkGenerator
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Emits entity description as comment lines. Each line is prefixed with # and proper indentation.
+    /// Strips \r to avoid control characters in output.
+    /// </summary>
+    private static void EmitCommentLines(StringBuilder sb, string? text, int indentSpaces)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+
+        var indent = new string(' ', indentSpaces);
+
+        // Normalize newlines and strip \r to avoid control characters
+        var normalized = text!.Replace("\r\n", "\n").Replace("\r", "\n");
+        var lines = normalized.Split('\n');
+
+        foreach (var line in lines)
+        {
+            // Trim trailing whitespace on each line, then emit as comment. A blank line becomes a
+            // bare '#': '# ' would itself carry the trailing space that flake8 reports as W291,
+            // so a description with a paragraph break would lint dirty in every generated SDK.
+            var trimmed = line.TrimEnd();
+            sb.AppendLine(trimmed.Length == 0 ? $"{indent}#" : $"{indent}# {trimmed}");
+        }
     }
 }

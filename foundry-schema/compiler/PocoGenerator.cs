@@ -667,9 +667,10 @@ public static class RealTimeConfiguration
         private static string GenerateEnum(Enum enumDef, string @namespace)
         {
             var values = string.Join(",\n    ", enumDef.Values.Select(v => CodeGen.Ident(v, "Enum value")));
+            var xmlDoc = CodeGen.XmlDoc(enumDef.Description);
             return $@"namespace {CodeGen.Ns(@namespace)};
 
-public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
+{xmlDoc}public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
 {{
     {values}
 }}";
@@ -877,7 +878,8 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
                     // throw inside the query rather than simply matching nothing.
                     defaultValue = " = new();";
 
-                properties.Add($"{attributeLine}    public {requiredKeyword}{type} {CodeGen.Ident(prop.Name, "Property name")} {{ {initKeyword}; }}{defaultValue}");
+                var propXmlDoc = CodeGen.XmlDoc(prop.Description, 4);
+                properties.Add($"{propXmlDoc}{attributeLine}    public {requiredKeyword}{type} {CodeGen.Ident(prop.Name, "Property name")} {{ {initKeyword}; }}{defaultValue}");
             }
 
             if (entity.SoftDelete)
@@ -980,6 +982,7 @@ public enum {CodeGen.Ident(enumDef.Name, "Enum name")}
             if (isShareable)
                 extraImports += "\nusing System.Collections.Generic;";
 
+            var xmlDoc = CodeGen.XmlDoc(entity.Description);
             return $@"using System;
 using System.ComponentModel.DataAnnotations;
 using System.Text.Json.Serialization;
@@ -988,7 +991,7 @@ using Foundry.Core.Entities;{extraImports}
 
 namespace {CodeGen.Ns(@namespace)};
 
-{partitionAttribute}{realTimeAttribute}{ownerExemptAttribute}{compoundIndexAttribute}{kafkaTopicAttribute}public partial record {CodeGen.Ident(entity.Name, "Entity name")} : {interfaceList}
+{xmlDoc}{partitionAttribute}{realTimeAttribute}{ownerExemptAttribute}{compoundIndexAttribute}{kafkaTopicAttribute}public partial record {CodeGen.Ident(entity.Name, "Entity name")} : {interfaceList}
 {{{propertyLines}}}";
         }
 
@@ -1135,13 +1138,15 @@ namespace {CodeGen.Ns(@namespace)};
                 else if (type == "int" || type == "decimal" || type == "double" || type == "float")
                     defaultValue = " = 0;";
 
-                properties.Add($"{attributeLine}    public {requiredKeyword}{type} {CodeGen.Ident(prop.Name, "DTO property name")} {{ {initKeyword}; }}{defaultValue}");
+                var propXmlDoc = CodeGen.XmlDoc(prop.Description, 4);
+                properties.Add($"{propXmlDoc}{attributeLine}    public {requiredKeyword}{type} {CodeGen.Ident(prop.Name, "DTO property name")} {{ {initKeyword}; }}{defaultValue}");
             }
 
             var propertyLines = string.Join("\n\n", properties);
             if (!string.IsNullOrEmpty(propertyLines))
                 propertyLines = "\n" + propertyLines + "\n";
 
+            var xmlDoc = CodeGen.XmlDoc(dto.Description);
             return $@"using System;
 using System.ComponentModel.DataAnnotations;
 using MongoDB.Bson;
@@ -1149,7 +1154,7 @@ using Foundry.Core.Attributes;
 
 namespace {CodeGen.Ns(@namespace)};
 
-public partial record {CodeGen.Ident(dto.Name, "DTO name")}
+{xmlDoc}public partial record {CodeGen.Ident(dto.Name, "DTO name")}
 {{{propertyLines}}}";
         }
 

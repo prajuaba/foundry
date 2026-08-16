@@ -78,6 +78,10 @@
             "type": "string"
           }
         },
+        "description": {
+          "type": "string",
+          "description": "Optional prose: free-form text authored in the schema, carried through to generated code and published API documentation. No effect on behavior."
+        },
         "apiBusinessRules": {
           "type": "object",
           "additionalProperties": {
@@ -171,6 +175,10 @@
         "sensitiveCategory": {
           "type": "string"
         },
+        "description": {
+          "type": "string",
+          "description": "Optional prose: free-form text authored in the schema, carried through to generated code and published API documentation. No effect on behavior."
+        },
         "attributes": {
           "type": "array",
           "items": {
@@ -214,6 +222,10 @@
           "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "description": "PascalCase C# identifier. No spaces or punctuation."
         },
+        "description": {
+          "type": "string",
+          "description": "Optional prose: free-form text authored in the schema, carried through to generated code and published API documentation. No effect on behavior."
+        },
         "values": {
           "type": "array",
           "items": {
@@ -236,6 +248,10 @@
           "type": "string",
           "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "description": "PascalCase C# identifier. No spaces or punctuation."
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional prose: free-form text authored in the schema, carried through to generated code and published API documentation. No effect on behavior."
         },
         "properties": {
           "type": "array",
@@ -285,6 +301,10 @@
         },
         "isRequired": {
           "type": "boolean"
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional prose: free-form text authored in the schema, carried through to generated code and published API documentation. No effect on behavior."
         },
         "attributes": {
           "type": "array",
@@ -362,6 +382,10 @@
           "items": {
             "type": "string"
           }
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional prose: free-form text authored in the schema, carried through to generated code and published API documentation. No effect on behavior."
         }
       },
       "additionalProperties": false,
@@ -428,6 +452,10 @@
           "items": {
             "$ref": "#/$defs/WorkflowChoiceNodeModel"
           }
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional prose: free-form text authored in the schema, carried through to generated code and published API documentation. No effect on behavior."
         }
       },
       "additionalProperties": false
@@ -640,6 +668,10 @@
         },
         "token": {
           "type": "string"
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional prose: free-form text authored in the schema, carried through to generated code and published API documentation. No effect on behavior."
         },
         "soapAction": {
           "type": "string"

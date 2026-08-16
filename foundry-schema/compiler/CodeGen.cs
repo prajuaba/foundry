@@ -261,5 +261,66 @@ namespace Foundry.Schema.Compiler
             var pad = new string(' ', spaces);
             return string.Join("\n", text.Split('\n').Select(l => string.IsNullOrEmpty(l) ? l : pad + l));
         }
+
+        /// <summary>
+        /// Processes a string for safe XML documentation emission as a summary element.
+        /// </summary>
+        /// <param name="text">The raw text to process.</param>
+        /// <param name="indentSpaces">Number of spaces to indent all output lines (0 or more).</param>
+        /// <returns>XML-escaped and properly formatted documentation comment, or string.Empty for invalid input.</returns>
+        /// <remarks>
+        /// Tabs within descriptions are preserved as-is. While tabs render unpredictably in XML comments
+        /// depending on the viewer, stripping them would lose information the author deliberately included.
+        /// </remarks>
+        public static string XmlDoc(string? text, int indentSpaces = 0)
+        {
+            // Return empty for null, empty, or whitespace-only input
+            if (string.IsNullOrWhiteSpace(text))
+                return string.Empty;
+
+            // Split on newline sequences FIRST: \r\n, \r, then \n
+            // This must happen before control-character stripping so newlines aren't consumed
+            var lines = text!.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+
+            // Strip C0 control characters (except tab) from each line
+            string StripControls(string line)
+            {
+                var sb = new StringBuilder();
+                foreach (var c in line)
+                {
+                    // Keep printable chars (>=32), tab (9), and newlines (already split, so won't appear here)
+                    if (c >= 32 || c == '\t')
+                        sb.Append(c);
+                }
+                return sb.ToString();
+            }
+
+            // Escape XML special characters: & first, then < and >
+            string EscapeXml(string s)
+            {
+                return s.Replace("&", "&amp;")
+                        .Replace("<", "&lt;")
+                        .Replace(">", "&gt;");
+            }
+
+            // Prepare indentation prefix
+            var indent = new string(' ', indentSpaces);
+            var commentPrefix = $"{indent}/// ";
+
+            // Build the summary content with control-stripped and XML-escaped text on each line
+            var linesOutput = new List<string>();
+            foreach (var line in lines)
+            {
+                var cleaned = StripControls(line);
+                linesOutput.Add(commentPrefix + EscapeXml(cleaned));
+            }
+
+            // Wrap with <summary> and </summary>
+            var startSummary = $"{commentPrefix}<summary>";
+            var endSummary = $"{commentPrefix}</summary>";
+
+            // Join all parts, ensuring trailing newline
+            return string.Join("\n", new[] { startSummary }.Concat(linesOutput).Append(endSummary)) + "\n";
+        }
     }
 }
