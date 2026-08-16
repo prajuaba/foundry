@@ -16,14 +16,43 @@ namespace Foundry.Cli.Tests;
 public class VerifyCommandTests
 {
     /// <summary>
+    /// Locates the repository root by walking up from the test binary directory
+    /// until it finds Foundry.slnx. Fails loudly if not found (unlike ShowcaseCoverageTests.cs:41,
+    /// which silently returns null).
+    /// </summary>
+    /// <remarks>
+    /// Pattern derived from ShowcaseCoverageTests.cs:41. Unlike that implementation,
+    /// we do not silently skip when the root cannot be found, because these tests
+    /// verify exit codes for a CI gate. Silent skips would ship untested code.
+    /// </remarks>
+    private static string RepositoryRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Foundry.slnx")))
+        {
+            dir = dir.Parent;
+        }
+
+        return dir?.FullName ?? throw new InvalidOperationException(
+            "Could not locate repository root (Foundry.slnx not found walking up from " +
+            $"{AppContext.BaseDirectory}). Tests require being run from within the repository.");
+    }
+
+    private static string ShowcaseSchemaPath(string root)
+        => Path.Combine(root, "samples", "Foundry.E2E.Showcase", "e2e-schema.ir.json");
+
+    private static string ShowcaseManifestPath(string root)
+        => Path.Combine(root, "samples", "Foundry.E2E.Showcase", "api-manifest.json");
+    /// <summary>
     /// Test 1: Matching IR and manifest → exit 0, summary names the counts.
     /// </summary>
     [Fact]
     public async Task VerifyWithMatchingIrAndManifest_ReturnsZero()
     {
+        var root = RepositoryRoot();
         // Use the showcase which has matching IR and manifest
-        var irPath = "/home/neo/Workspace/foundry/samples/Foundry.E2E.Showcase/e2e-schema.ir.json";
-        var manifestPath = "/home/neo/Workspace/foundry/samples/Foundry.E2E.Showcase/api-manifest.json";
+        var irPath = ShowcaseSchemaPath(root);
+        var manifestPath = ShowcaseManifestPath(root);
 
         var result = await Cli.RunAsync(null, "verify", "-i", irPath, "-m", manifestPath);
 
@@ -39,8 +68,9 @@ public class VerifyCommandTests
     [Fact]
     public async Task VerifyWithEmptiedRolesOnEntity_ReturnsOne()
     {
-        var irPath = "/home/neo/Workspace/foundry/samples/Foundry.E2E.Showcase/e2e-schema.ir.json";
-        var originalManifestPath = "/home/neo/Workspace/foundry/samples/Foundry.E2E.Showcase/api-manifest.json";
+        var root = RepositoryRoot();
+        var irPath = ShowcaseSchemaPath(root);
+        var originalManifestPath = ShowcaseManifestPath(root);
 
         // Copy manifest to /tmp and modify it
         var tempManifestPath = Path.Combine(Path.GetTempPath(), $"manifest_{Guid.NewGuid()}.json");
@@ -77,7 +107,8 @@ public class VerifyCommandTests
     [Fact]
     public async Task VerifyWithoutManifestArgument_ReturnsTwo()
     {
-        var irPath = "/home/neo/Workspace/foundry/samples/Foundry.E2E.Showcase/e2e-schema.ir.json";
+        var root = RepositoryRoot();
+        var irPath = ShowcaseSchemaPath(root);
 
         var result = await Cli.RunAsync(null, "verify", "-i", irPath);
 
@@ -91,7 +122,8 @@ public class VerifyCommandTests
     [Fact]
     public async Task VerifyWithNonexistentManifestFile_ReturnsTwo()
     {
-        var irPath = "/home/neo/Workspace/foundry/samples/Foundry.E2E.Showcase/e2e-schema.ir.json";
+        var root = RepositoryRoot();
+        var irPath = ShowcaseSchemaPath(root);
         var fakePath = "/tmp/nonexistent_manifest_xyz.json";
 
         var result = await Cli.RunAsync(null, "verify", "-i", irPath, "-m", fakePath);
@@ -106,8 +138,9 @@ public class VerifyCommandTests
     [Fact]
     public async Task VerifyWithBusinessRuleDifference_ExitZeroByDefault()
     {
-        var irPath = "/home/neo/Workspace/foundry/samples/Foundry.E2E.Showcase/e2e-schema.ir.json";
-        var originalManifestPath = "/home/neo/Workspace/foundry/samples/Foundry.E2E.Showcase/api-manifest.json";
+        var root = RepositoryRoot();
+        var irPath = ShowcaseSchemaPath(root);
+        var originalManifestPath = ShowcaseManifestPath(root);
 
         var tempManifestPath = Path.Combine(Path.GetTempPath(), $"manifest_{Guid.NewGuid()}.json");
         File.Copy(originalManifestPath, tempManifestPath, overwrite: true);
@@ -144,7 +177,8 @@ public class VerifyCommandTests
     [Fact]
     public async Task VerifyWithUnparseableManifest_ReturnsTwo()
     {
-        var irPath = "/home/neo/Workspace/foundry/samples/Foundry.E2E.Showcase/e2e-schema.ir.json";
+        var root = RepositoryRoot();
+        var irPath = ShowcaseSchemaPath(root);
         var tempManifestPath = Path.Combine(Path.GetTempPath(), $"manifest_{Guid.NewGuid()}.json");
 
         try
@@ -170,7 +204,8 @@ public class VerifyCommandTests
     [Fact]
     public async Task VerifyWithoutIrArgument_ReturnsTwo()
     {
-        var manifestPath = "/home/neo/Workspace/foundry/samples/Foundry.E2E.Showcase/api-manifest.json";
+        var root = RepositoryRoot();
+        var manifestPath = ShowcaseManifestPath(root);
 
         var result = await Cli.RunAsync(null, "verify", "-m", manifestPath);
 
@@ -184,8 +219,9 @@ public class VerifyCommandTests
     [Fact]
     public async Task VerifyWithNonexistentIrFile_ReturnsTwo()
     {
+        var root = RepositoryRoot();
         var fakeIr = "/tmp/nonexistent_schema_xyz.json";
-        var manifestPath = "/home/neo/Workspace/foundry/samples/Foundry.E2E.Showcase/api-manifest.json";
+        var manifestPath = ShowcaseManifestPath(root);
 
         var result = await Cli.RunAsync(null, "verify", "-i", fakeIr, "-m", manifestPath);
 
