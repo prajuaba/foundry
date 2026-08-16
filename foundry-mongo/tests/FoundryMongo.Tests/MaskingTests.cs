@@ -253,15 +253,15 @@ public class MaskingTests : IDisposable
         Assert.Equal("nothing to hide", read!.Note);
     }
 
-    // ── Writing back a masked read is refused, not persisted ────────────────
+    // ── Writing back a masked read is now preserved, not persisted ───────────
 
     [Fact]
-    public async Task WritingBackAMaskedEntityIsRefused()
+    public async Task WritingBackAMaskedEntityPreservesIt()
     {
-        // The hazard masking creates, and the reason it is worth guarding rather than documenting:
-        // read-modify-write is an ordinary pattern, and persisting the masked clone would replace a
-        // real email with "j***e@example.com" silently and irreversibly. A change made to protect
-        // data would have destroyed it.
+        // The hazard masking creates: read-modify-write is an ordinary pattern, and persisting the
+        // masked clone would replace a real email with "j***e@example.com" silently and irreversibly.
+        // Now instead of refusing and throwing, we preserve: a caller who cannot read the field
+        // cannot change it either.
         var id = await SeedAsync();
         var repository = PeopleFor(mayViewPii: false);
 
@@ -269,14 +269,12 @@ public class MaskingTests : IDisposable
 
         // `with` produces a new instance, which is exactly how a caller modifies a record -- so the
         // guard compares against the stored value rather than tracking the objects handed out.
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => repository.UpdateAsync(masked! with { FullName = "Johnny Doe" }));
-
-        Assert.Contains("masked form", error.Message);
-        Assert.Contains("view:pii", error.Message);
+        // With the fix, this succeeds instead of throwing, and the masked field is preserved.
+        await repository.UpdateAsync(masked! with { FullName = "Johnny Doe" });
 
         var stored = await PeopleFor(mayViewPii: true).GetByIdAsync(id);
-        Assert.Equal("john.doe@example.com", stored!.Email);
+        Assert.Equal("john.doe@example.com", stored!.Email); // Preserved, not corrupted
+        Assert.Equal("Johnny Doe", stored.FullName); // Other field was updated
     }
 
     [Fact]
@@ -295,10 +293,11 @@ public class MaskingTests : IDisposable
     }
 
     [Fact]
-    public async Task AFreshlyConstructedEntityIsNotRefused()
+    public async Task AFreshlyConstructedEntityPreservesMaskedFields()
     {
-        // The guard fires only on the mask of the value currently stored, so an entity built from a
-        // request body -- which is what a generated PUT binds -- is unaffected.
+        // A caller without view:pii constructs a fresh entity with new values for masked fields.
+        // With the fix, masked fields the caller cannot read are preserved regardless of what
+        // was supplied -- even in a freshly constructed entity from a request body.
         var id = await SeedAsync();
 
         await PeopleFor(mayViewPii: false).UpdateAsync(new Person
@@ -311,7 +310,9 @@ public class MaskingTests : IDisposable
         });
 
         var reread = await PeopleFor(mayViewPii: true).GetByIdAsync(id);
-        Assert.Equal("new.address@example.com", reread!.Email);
+        Assert.Equal("john.doe@example.com", reread!.Email); // Preserved, not overwritten
+        Assert.Equal("4111111111111234", reread.CardNumber); // Preserved, not overwritten
+        Assert.Equal("Rebuilt", reread.FullName); // Non-masked field was updated
     }
 
     // ── Masking is a policy, not one switch ─────────────────────────────────
@@ -449,5 +450,216 @@ public class MaskingTests : IDisposable
 
         Assert.DoesNotContain("000012345678", claim!.PolicyNumber);
         Assert.DoesNotContain("4111", claim.CardNumber);
+    }
+
+    // ── PreserveMaskedFieldsCallerCannotRead: prevent data loss when unreadable fields are updated ─
+
+    [Fact]
+    public async Task CallerWithoutScopeSubmittingMaskVerbatim_PreservesStoredValue()
+    {
+        // Caller without scope reads entity (gets masked values), modifies other field, writes back.
+        // The mask echoed back should be caught by the old guard, but now the guard also preserves
+        // by checking per-category entitlement.
+        var id = await SeedClaimAsync();
+        var unentitledRepository = ClaimsFor();
+
+        var masked = await unentitledRepository.GetByIdAsync(id);
+        var originalPolicy = "POL-000012345678";
+        var originalCard = "4111111111111234";
+
+        // Echo back the masked values as-is, change something else
+        await unentitledRepository.UpdateAsync(masked! with { Reference = "UPDATED" });
+
+        var stored = await ClaimsFor("view:policy", "view:financial").GetByIdAsync(id);
+        Assert.Equal(originalPolicy, stored!.PolicyNumber);
+        Assert.Equal(originalCard, stored.CardNumber);
+        Assert.Equal("UPDATED", stored.Reference); // Only this should change
+    }
+
+    [Fact]
+    public async Task CallerWithoutScopeOmittingMaskedField_PreservesStoredValue()
+    {
+        // The reported defect: a well-behaved client that omits the field to avoid echoing
+        // the mask ends up wiping it. Now it should be preserved. We simulate omission by
+        // sending default values (empty strings) for those fields.
+        var id = await SeedClaimAsync();
+        var unentitledRepository = ClaimsFor();
+
+        var masked = await unentitledRepository.GetByIdAsync(id);
+        var originalPolicy = "POL-000012345678";
+        var originalCard = "4111111111111234";
+
+        // Build a fresh entity with empty string fields (simulating an omitted field in a PUT)
+        await unentitledRepository.UpdateAsync(new Claim
+        {
+            Id = id,
+            PolicyNumber = string.Empty,
+            CardNumber = string.Empty,
+            Reference = "UPDATED",
+            Version = masked!.Version
+        });
+
+        var stored = await ClaimsFor("view:policy", "view:financial").GetByIdAsync(id);
+        Assert.Equal(originalPolicy, stored!.PolicyNumber);
+        Assert.Equal(originalCard, stored.CardNumber);
+    }
+
+    [Fact]
+    public async Task CallerWithoutScopeSubmittingEmptyString_PreservesStoredValue()
+    {
+        // Another way to wipe the field: send empty string instead of null/mask/actual value
+        var id = await SeedClaimAsync();
+        var unentitledRepository = ClaimsFor();
+
+        var masked = await unentitledRepository.GetByIdAsync(id);
+        var originalPolicy = "POL-000012345678";
+        var originalCard = "4111111111111234";
+
+        await unentitledRepository.UpdateAsync(masked! with { PolicyNumber = "", CardNumber = "" });
+
+        var stored = await ClaimsFor("view:policy", "view:financial").GetByIdAsync(id);
+        Assert.Equal(originalPolicy, stored!.PolicyNumber);
+        Assert.Equal(originalCard, stored.CardNumber);
+    }
+
+    [Fact]
+    public async Task CallerWithoutScopeSubmittingNewValue_PreservesStoredValue()
+    {
+        // Caller without scope reads an entity (gets masked values). Because the real values
+        // are stored and shown as masked, the caller has no way to know a genuinely new value.
+        // Permitting them to overwrite would let them corrupt data in the name of updating it.
+        var id = await SeedClaimAsync();
+        var unentitledRepository = ClaimsFor();
+
+        var masked = await unentitledRepository.GetByIdAsync(id);
+        var originalPolicy = "POL-000012345678";
+        var originalCard = "4111111111111234";
+
+        // Attempt to replace with new values
+        await unentitledRepository.UpdateAsync(masked! with
+        {
+            PolicyNumber = "POL-ATTACKER123456",
+            CardNumber = "5555555555555555"
+        });
+
+        var stored = await ClaimsFor("view:policy", "view:financial").GetByIdAsync(id);
+        Assert.Equal(originalPolicy, stored!.PolicyNumber);
+        Assert.Equal(originalCard, stored.CardNumber);
+    }
+
+    [Fact]
+    public async Task CallerWithScopeSubmittingNewValue_UpdatesStoredValue()
+    {
+        // Privileged caller may update. This is the normal case.
+        var id = await SeedClaimAsync();
+        var entitledRepository = ClaimsFor("view:policy", "view:financial");
+
+        var unmasked = await entitledRepository.GetByIdAsync(id);
+        await entitledRepository.UpdateAsync(unmasked! with
+        {
+            PolicyNumber = "POL-NEWVALUE123456",
+            CardNumber = "6666666666666666"
+        });
+
+        var stored = await entitledRepository.GetByIdAsync(id);
+        Assert.Equal("POL-NEWVALUE123456", stored!.PolicyNumber);
+        Assert.Equal("6666666666666666", stored.CardNumber);
+    }
+
+    [Fact]
+    public async Task CallerWithScopeSubmittingEmptyString_ClearsStoredValue()
+    {
+        // Privileged caller retains full control, including clearing the field.
+        var id = await SeedClaimAsync();
+        var entitledRepository = ClaimsFor("view:policy", "view:financial");
+
+        var unmasked = await entitledRepository.GetByIdAsync(id);
+        await entitledRepository.UpdateAsync(unmasked! with
+        {
+            PolicyNumber = "",
+            CardNumber = ""
+        });
+
+        var stored = await entitledRepository.GetByIdAsync(id);
+        Assert.Equal("", stored!.PolicyNumber);
+        Assert.Equal("", stored.CardNumber);
+    }
+
+    [Fact]
+    public async Task CallerWithScopeCanUpdateWithoutRestriction()
+    {
+        // Privileged caller reading with full scope gets actual values (never masks), so they can
+        // always write whatever they want. The old guard still applies if they somehow send back
+        // a mask value (though in practice they never see masks), but that's a rare edge case.
+        // Normal case: privileged caller reads, modifies, and writes back. All good.
+        var id = await SeedClaimAsync();
+        var entitledRepository = ClaimsFor("view:policy", "view:financial");
+
+        var unmasked = await entitledRepository.GetByIdAsync(id);
+
+        // Privileged caller can freely update
+        await entitledRepository.UpdateAsync(unmasked! with { Reference = "changed" });
+
+        var stored = await entitledRepository.GetByIdAsync(id);
+        Assert.Equal("changed", stored!.Reference);
+        Assert.Equal("POL-000012345678", stored.PolicyNumber); // Unchanged
+    }
+
+    [Fact]
+    public async Task CallerWithMixedCategoryAccess_UpdatesReadablePreservesUnreadable()
+    {
+        // The most important case: one caller, two categories, different access to each.
+        // A claims handler who may read PolicyNumber but not CardNumber attempts an update.
+        // PolicyNumber should be updated, CardNumber should be preserved.
+        var id = await SeedClaimAsync();
+        var mixedRepository = ClaimsFor("view:policy"); // Can read policy, not financial
+
+        var partial = await mixedRepository.GetByIdAsync(id);
+        var originalCard = "4111111111111234"; // Masked when read; cannot be read in full
+
+        // Attempt to update both (handler may have logic that touches both fields)
+        await mixedRepository.UpdateAsync(partial! with
+        {
+            PolicyNumber = "POL-HANDLER-UPDATE",
+            CardNumber = "9999999999999999"
+        });
+
+        var stored = await ClaimsFor("view:policy", "view:financial").GetByIdAsync(id);
+        Assert.Equal("POL-HANDLER-UPDATE", stored!.PolicyNumber); // Handler could read it, so update takes effect
+        Assert.Equal(originalCard, stored.CardNumber); // Handler could not read it, so preservation applies
+    }
+
+    /// <summary>
+    /// A privileged caller who echoes back a masked field must still be refused, even though
+    /// unprivileged callers are now allowed (preservation instead of throwing). The unprivileged
+    /// path preserves because the caller cannot read the field; a privileged caller echoing back
+    /// a mask indicates a client bug and must not silently persist the masked form to storage.
+    /// </summary>
+    [Fact]
+    public async Task CallerWithScopeWritingBackTheMaskIsStillRefused()
+    {
+        var id = await SeedClaimAsync();
+
+        // Capture the masked representation by reading without scopes
+        var masked = await ClaimsFor().GetByIdAsync(id);
+        var maskedPolicyNumber = masked!.PolicyNumber;
+
+        // Read with full scopes to get the actual value and correct Version
+        var entitledRepository = ClaimsFor("view:policy", "view:financial");
+        var unmasked = await entitledRepository.GetByIdAsync(id);
+
+        // Privileged caller attempts to update using the masked value (client bug scenario)
+        var updateAttempt = unmasked! with { PolicyNumber = maskedPolicyNumber };
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => entitledRepository.UpdateAsync(updateAttempt));
+
+        // Verify the error message identifies the field and explains the issue
+        Assert.Contains("PolicyNumber", ex.Message);
+        Assert.Contains("masked form", ex.Message);
+
+        // Verify the stored value was not changed by the failed update attempt
+        var stored = await entitledRepository.GetByIdAsync(id);
+        Assert.Equal("POL-000012345678", stored!.PolicyNumber);
     }
 }

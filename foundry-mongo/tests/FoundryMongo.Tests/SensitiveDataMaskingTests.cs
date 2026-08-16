@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Claims;
 using System.Threading;
 using System.Threading.Tasks;
 using Foundry.Core.Audit;
 using Foundry.Core.Entities;
+using Foundry.Core.Security;
+using Foundry.Core.User;
 using Foundry.Mongo.Repositories;
 using MongoDB.Bson;
 using MongoDB.Driver;
@@ -13,8 +16,32 @@ using Xunit;
 
 namespace Foundry.Mongo.Tests;
 
+/// <summary>Helper to create user context with scopes for testing.</summary>
+public class TestUserContext : ICurrentUserContext
+{
+    private readonly string[] _scopes;
+
+    public TestUserContext(params string[] scopes) => _scopes = scopes;
+
+    public string OperatorId => "test-operator";
+    public string? OperatorName => "Test Operator";
+
+    public ClaimsPrincipal? User
+    {
+        get
+        {
+            var claims = new List<System.Security.Claims.Claim> { new("sub", "test-operator") };
+            claims.AddRange(_scopes.Select(s => new System.Security.Claims.Claim(ViewSensitiveDataScope.ClaimType, s)));
+            return new ClaimsPrincipal(new ClaimsIdentity(claims, "Test", "sub", "role"));
+        }
+    }
+}
+
 public class SensitiveDataMaskingTests
 {
+    private static ICurrentUserContext CreateUserContextWithScope(params string[] scopes)
+        => new TestUserContext(scopes);
+
     public record UserProfile : BaseEntity<ObjectId>
     {
         public string Username { get; set; } = string.Empty;
@@ -101,7 +128,11 @@ public class SensitiveDataMaskingTests
         ).Returns(Task.FromResult(replaceResult));
 
         var auditSink = new InMemoryAuditSink();
-        var repository = new Repository<UserProfile>(mockDb, auditSink);
+
+        // Create a user context with view:pii scope so the update actually proceeds
+        // (without it, masked fields would be preserved rather than updated per the security fix)
+        var userContext = CreateUserContextWithScope("view:pii");
+        var repository = new Repository<UserProfile>(mockDb, auditSink, userContext);
 
         var updatedProfile = new UserProfile
         {

@@ -629,7 +629,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             throw new KeyNotFoundException($"Entity with ID {entity.Id} not found in collection '{CollectionName}'");
 
         DecryptEntity(existing);
-        RefuseMaskedOverwrite(entity, existing);
+        PreserveMaskedFieldsCallerCannotRead(entity, existing);
 
         var oldValues = new Dictionary<string, object?>();
         var properties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);
@@ -902,7 +902,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             if (existing == null) continue;
 
             DecryptEntity(existing);
-            RefuseMaskedOverwrite(entity, existing);
+            PreserveMaskedFieldsCallerCannotRead(entity, existing);
 
             var oldValues = new Dictionary<string, object?>();
             var properties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);
@@ -1457,45 +1457,60 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         .Any(a => a is { Protection: Foundry.Core.Entities.ProtectionType.Mask });
 
     /// <summary>
-    /// Refuses a write that would replace a stored value with its own masked form.
+    /// Preserves masked fields that the caller cannot read, preventing data loss through updates.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Masking on read creates a hazard it would be negligent to leave unguarded. A caller reads an
-    /// entity, changes one field and writes it back — an ordinary pattern in a business rule or a
-    /// handler — and <c>j***e@example.com</c> replaces the real address. The corruption is silent, the
-    /// original is gone, and it arrives through a change made to protect data.
+    /// The old guard caught only the mask being echoed back, so a well-behaved client that omitted
+    /// the field instead wiped it. Masking is applied on serialization while the update is a
+    /// whole-document replace, so the server must reconcile: a caller who was not allowed to read
+    /// a field must not be able to change it.
     /// </para>
     /// <para>
-    /// Comparing against the stored row rather than tracking the instances handed out, because
-    /// <c>record with</c> produces a new object and defeats identity tracking entirely — which is
-    /// exactly how a caller modifies a record, so the tracking version guarded the case nobody hits.
-    /// This comparison has no false positives either: writing precisely the mask of the value
-    /// currently stored is not something a caller does by accident.
+    /// For each masked string property:
+    /// - If the caller cannot view this category (ShouldMask returns true), the incoming value is
+    ///   overwritten with the stored value. This preserves the field regardless of what was supplied
+    ///   (mask echoed back, null, empty string, or attempted update).
+    /// - If the caller can view this category (ShouldMask returns false), the update is allowed and
+    ///   the existing guard against writing back the mask is kept in place as a client bug indicator.
+    /// </para>
+    /// <para>
+    /// Non-string masked properties are skipped because string operations are not reliable on other
+    /// property types in this context.
     /// </para>
     /// </remarks>
-    private static void RefuseMaskedOverwrite(T incoming, T existing)
+    private void PreserveMaskedFieldsCallerCannotRead(T incoming, T existing)
     {
         if (!HasMaskedProperties) return;
 
         foreach (var (property, attribute) in EntityEncryptionService<T>.GetSensitiveProperties())
         {
             if (attribute.Protection != Foundry.Core.Entities.ProtectionType.Mask) continue;
-            if (property.PropertyType != typeof(string)) continue;
+            if (property.PropertyType != typeof(string)) continue; // Skip non-string properties
 
             var stored = property.GetValue(existing) as string;
             var supplied = property.GetValue(incoming) as string;
 
-            if (string.IsNullOrEmpty(stored) || supplied is null) continue;
-            if (string.Equals(stored, supplied, StringComparison.Ordinal)) continue;
+            // If the caller cannot view this category, preserve the stored value regardless of what was supplied
+            if (_accessPolicy.ShouldMask(attribute))
+            {
+                // Restore the stored value to prevent data loss
+                property.SetValue(incoming, stored);
+            }
+            else
+            {
+                // Privileged caller: allow update but still guard against mask echo
+                if (string.IsNullOrEmpty(stored) || supplied is null) continue;
+                if (string.Equals(stored, supplied, StringComparison.Ordinal)) continue;
 
-            if (!string.Equals(attribute.MaskValue(stored), supplied, StringComparison.Ordinal)) continue;
+                if (!string.Equals(attribute.MaskValue(stored), supplied, StringComparison.Ordinal)) continue;
 
-            throw new InvalidOperationException(
-                $"{typeof(T).Name}.{property.Name} was written back in its masked form, which would "
-                + "replace the stored value with the mask. Re-read the entity as a caller holding the "
-                + $"'{ViewSensitiveDataScope.ClaimValue}' scope, or build the update from a value the "
-                + "caller supplied rather than from a masked read.");
+                throw new InvalidOperationException(
+                    $"{typeof(T).Name}.{property.Name} was written back in its masked form, which would "
+                    + "replace the stored value with the mask. Re-read the entity as a caller holding the "
+                    + $"'{ViewSensitiveDataScope.ClaimValue}' scope, or build the update from a value the "
+                    + "caller supplied rather than from a masked read.");
+            }
         }
     }
 
