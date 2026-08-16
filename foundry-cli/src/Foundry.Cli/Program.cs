@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
+using Foundry.Schema.Compiler.Exporters;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
@@ -51,6 +52,9 @@ public class Program
 
         new("export", "export -i <f> -f <format> [-m <f>] [-o <f>]", "Exports openapi | asyncapi | postman | mermaid | reference.",
             args => Task.FromResult(HandleExportCommand(args))),
+
+        new("verify", "verify -i <f> -m <f> [--strict]", "Verifies a committed api-manifest.json still matches its IR schema.",
+            args => Task.FromResult(HandleVerifyCommand(args))),
 
         new("sdk", "sdk -i <f> -l <lang> [-o <path>]", "Generates a client SDK: ts | csharp | python.",
             args => Task.FromResult(HandleSdkCommand(args))),
@@ -1897,6 +1901,264 @@ app.Run();
             Console.WriteLine($"[Error] {ex.Message}");
             Console.ResetColor();
             return 1;
+        }
+    }
+
+    /// <summary>
+    /// Prints the documentation inconsistency note with proper wrapping at word boundaries.
+    /// The note explains that business rules are enforced via DI, not via manifest declarations,
+    /// and appends an optional suffix (e.g., the --strict hint).
+    /// </summary>
+    /// <param name="note">The note text to display</param>
+    /// <param name="suffix">Optional suffix to append (e.g., " Use --strict to fail on these.")</param>
+    private static void PrintDocumentationInconsistencyNote(string note, string? suffix = null)
+    {
+        var fullText = suffix != null ? note + suffix : note;
+
+        // Try to break at a word boundary around 70 characters from the start
+        int breakPoint = -1;
+
+        // Search for a space between positions 50 and 75
+        for (int i = Math.Min(75, fullText.Length - 1); i >= 50; i--)
+        {
+            if (i < fullText.Length && fullText[i] == ' ')
+            {
+                breakPoint = i;
+                break;
+            }
+        }
+
+        if (breakPoint > 0)
+        {
+            var line1 = fullText.Substring(0, breakPoint);
+            var line2 = fullText.Substring(breakPoint + 1);
+
+            Console.WriteLine($"    Note: {line1}");
+            Console.WriteLine($"          {line2}");
+        }
+        else
+        {
+            // If no suitable break point found, print on one line
+            Console.WriteLine($"    Note: {fullText}");
+        }
+    }
+
+    /// <summary>
+    /// Verifies that a committed api-manifest.json still matches its IR schema.
+    /// </summary>
+    /// <remarks>
+    /// Exits 0 on success with no enforcement gaps, 1 if gaps are found (or with --strict, any divergence),
+    /// and 2 if verification could not run (missing files, parse errors, etc.).
+    /// </remarks>
+    private static int HandleVerifyCommand(string[] args)
+    {
+        string? inputPath = null;
+        string? manifestPath = null;
+        var strict = false;
+
+        for (int i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--input" or "-i" when i + 1 < args.Length:
+                    inputPath = args[++i];
+                    break;
+                case "--manifest" or "-m" when i + 1 < args.Length:
+                    manifestPath = args[++i];
+                    break;
+                case "--strict":
+                    strict = true;
+                    break;
+            }
+        }
+
+        // Validate required arguments
+        if (string.IsNullOrEmpty(inputPath))
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("[Error] -i is required. Usage: foundry verify -i <ir.json> -m <manifest.json> [--strict]");
+            Console.ResetColor();
+            return 2;
+        }
+
+        if (string.IsNullOrEmpty(manifestPath))
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("[Error] -m is required. Enforcement cannot be verified without a manifest.");
+            Console.ResetColor();
+            return 2;
+        }
+
+        // Check files exist
+        if (!File.Exists(inputPath))
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"[Error] IR schema file '{inputPath}' not found.");
+            Console.ResetColor();
+            return 2;
+        }
+
+        if (!File.Exists(manifestPath))
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"[Error] Manifest file '{manifestPath}' not found.");
+            Console.ResetColor();
+            return 2;
+        }
+
+        try
+        {
+            // Parse IR schema
+            var irJson = File.ReadAllText(inputPath);
+            var ir = JsonSerializer.Deserialize<Foundry.Schema.Compiler.SchemaModel>(
+                irJson,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            if (ir is null)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[Error] Could not parse IR schema from '{inputPath}'.");
+                Console.ResetColor();
+                return 2;
+            }
+
+            // Parse manifest
+            var manifestJson = File.ReadAllText(manifestPath);
+            JsonNode? manifestNode;
+            try
+            {
+                manifestNode = JsonNode.Parse(manifestJson);
+            }
+            catch (JsonException ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[Error] Manifest JSON is malformed: {ex.Message}");
+                Console.ResetColor();
+                return 2;
+            }
+
+            if (manifestNode is null)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[Error] Could not parse manifest from '{manifestPath}'.");
+                Console.ResetColor();
+                return 2;
+            }
+
+            // Convert manifest to Dictionary<string, object>
+            var manifestDict = Foundry.Schema.Compiler.Exporters.ReferenceExporter.ConvertJsonNodeToDictionary(manifestNode);
+            if (manifestDict is null)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[Error] Could not convert manifest to internal format.");
+                Console.ResetColor();
+                return 2;
+            }
+
+            // Run divergence check
+            var check = new Foundry.Schema.Compiler.Exporters.DivergenceCheck();
+            check.Run(ir, manifestDict);
+
+            // Classify divergences
+            var enforcementGaps = check.Divergences.Where(d => d.Kind == "enforcement_gap").ToList();
+            var docInconsistencies = check.Divergences.Where(d => d.Kind == "documentation_inconsistency").ToList();
+
+            // Determine exit code
+            var hasFailures = enforcementGaps.Count > 0 || (strict && docInconsistencies.Count > 0);
+
+            if (!hasFailures)
+            {
+                // Success case (may have documentation warnings)
+                Console.ForegroundColor = ConsoleColor.Green;
+                if (docInconsistencies.Count > 0)
+                {
+                    Console.WriteLine($"✓ No enforcement gaps. Compared {check.EntitiesChecked} CRUD endpoint(s), {check.CustomEndpointsChecked} custom endpoint(s);");
+                    Console.WriteLine($"  excluded {check.TransitionsDerived} compiler-derived workflow transition endpoint(s).");
+                    Console.WriteLine($"  {docInconsistencies.Count} documentation inconsistency/ies found (warnings only, not failures).");
+                }
+                else
+                {
+                    Console.WriteLine($"✓ No enforcement gaps. Compared {check.EntitiesChecked} CRUD endpoint(s), {check.CustomEndpointsChecked} custom endpoint(s);");
+                    Console.WriteLine($"  excluded {check.TransitionsDerived} compiler-derived workflow transition endpoint(s).");
+                }
+                Console.ResetColor();
+
+                // Print documentation warnings even in success path
+                if (docInconsistencies.Count > 0)
+                {
+                    Console.WriteLine();
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("[Documentation Inconsistencies (Warnings)]");
+                    Console.ResetColor();
+                    foreach (var div in docInconsistencies.OrderBy(d => d.Element))
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        Console.WriteLine($"  {div.Element}");
+                        Console.ResetColor();
+                        Console.WriteLine($"    IR declares:  {div.IrValue}");
+                        Console.WriteLine($"    Manifest records: {div.ManifestValue}");
+                        PrintDocumentationInconsistencyNote(DivergenceCheck.DocumentationInconsistencyNote, " Use --strict to fail on these.");
+                        Console.WriteLine();
+                    }
+                }
+
+                return 0;
+            }
+
+            // Failure case - print findings
+            if (enforcementGaps.Count > 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("[Enforcement Gaps]");
+                Console.ResetColor();
+                foreach (var div in enforcementGaps.OrderBy(d => d.Element))
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"  {div.Element}");
+                    Console.ResetColor();
+                    Console.WriteLine($"    IR declares:  {div.IrValue}");
+                    Console.WriteLine($"    Manifest enforces: {div.ManifestValue}");
+                    Console.WriteLine($"    Consequence: {div.Consequence}");
+                    Console.WriteLine();
+                }
+            }
+
+            if (docInconsistencies.Count > 0 && strict)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("[Documentation Inconsistencies (Treated as Failures with --strict)]");
+                Console.ResetColor();
+                foreach (var div in docInconsistencies.OrderBy(d => d.Element))
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"  {div.Element}");
+                    Console.ResetColor();
+                    Console.WriteLine($"    IR declares:  {div.IrValue}");
+                    Console.WriteLine($"    Manifest records: {div.ManifestValue}");
+                    PrintDocumentationInconsistencyNote(DivergenceCheck.DocumentationInconsistencyNote);
+                    Console.WriteLine();
+                }
+            }
+
+            Console.ForegroundColor = ConsoleColor.Red;
+            if (enforcementGaps.Count > 0)
+            {
+                Console.WriteLine($"✗ {enforcementGaps.Count} enforcement gap(s) found.");
+            }
+            else if (strict && docInconsistencies.Count > 0)
+            {
+                Console.WriteLine($"✗ {docInconsistencies.Count} divergence(s) found (--strict mode).");
+            }
+            Console.ResetColor();
+
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine($"[Error] Verification failed: {ex.Message}");
+            Console.ResetColor();
+            return 2;
         }
     }
 
