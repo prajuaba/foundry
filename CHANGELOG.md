@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-16
+
+Two security defects, the structural changes that stop the class recurring, and the tooling that
+found them. Both defects were found by writing a document that refused to guess, not by a test.
+
+### Fixed
+
+- **Custom endpoint roles never reached the runtime.** `ApiManifestGenerator` hardcoded `Roles` and
+  `BusinessRules` to empty arrays when copying custom endpoints into `api-manifest.json`. The
+  manifest is the only channel to the running application, and an empty role list falls past the
+  `Count: > 0` branch in `RequireDeclaredRoles` to a bare `RequireAuthorization()` — so every custom
+  endpoint was served to any authenticated caller whatever the schema declared. In one real project
+  that was all twenty of them. Present in 2.0.0.
+- **A caller who could not read a masked field could destroy it.** Masking is applied on
+  serialization while updates are a whole-document replace. The existing guard caught the mask being
+  echoed back and let through `null` and `""` — so a client told not to send the mask back did the
+  right thing by omitting the field, and that was the path that wiped it. The repository now keeps
+  the stored value for any masked property the caller lacks the scope to read, per category rather
+  than per entity. Callers holding the scope keep full control, including clearing a field.
+
+### Added
+
+- `foundry verify -i <ir> -m <manifest>` — the schema/manifest divergence check as a CI gate. Three
+  exit codes: `0` compared clean, `1` enforcement gaps, `2` could not verify. The third exists
+  because a gate that passes when it cannot read its input reports success for exactly the case it
+  is there to catch. `--strict` also fails on documentation inconsistencies, which are reported but
+  not fatal by default because business rules bind through DI and a rule absent from the manifest
+  still runs.
+- `foundry export -f reference` — a twelve-section technical reference derived from an IR document
+  and, optionally, the manifest the application actually serves. It marks what it cannot derive
+  rather than filling it in, and reports enforced rather than declared access. Coverage claims are
+  raised by the emitters that produce rows, and a guard rejects any topic claimed and disclaimed at
+  once.
+- `description` on entities, properties, DTOs, DTO properties, enums, custom endpoints, workflows
+  and connectors. Feeds the IR JSON Schema, XML doc comments on generated C#, OpenAPI descriptions
+  and doc comments in all three SDKs. Silent when unused: a schema without descriptions produces
+  byte-identical output.
+
+### Changed
+
+- Conformance tests assert that every access-bearing IR field reaches the manifest at its exact JSON
+  path, and a tripwire fails when a new property appears on an access-bearing type without a
+  decision about which channel carries it. Eight fields have historically been declared, validated
+  and then silently dropped; the ninth cannot be added by omission.
+- `SchemaValidator.IsSecretReference` is now internal and shared. The reference exporter had
+  reimplemented it more strictly and was reporting the framework's own recommended `${ENV:NAME}`
+  form as a committed literal secret.
+
 ## [2.0.0] - 2026-08-15
 
 A major version because upgrading changes behaviour on the wire, not because anything here was a
