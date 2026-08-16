@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace Foundry.Schema.Compiler.Exporters;
@@ -61,6 +62,16 @@ public record Divergence(
 public class DivergenceCheck
 {
     private readonly List<Divergence> _divergences = new();
+
+    /// <summary>
+    /// The single definition: business rules are enforced via dependency injection, not manifest declarations.
+    /// Referenced by the reference exporter's markdown table and the verify command's console output.
+    /// This is the only place readers are told that a rule missing from the manifest is still enforced via DI.
+    ///
+    /// Must not be duplicated. Previously existed in three drifting copies, risking that documentation
+    /// inconsistencies would be mistaken for enforcement gaps. This constant documents the defect in the code that fixed it.
+    /// </summary>
+    public const string DocumentationInconsistencyNote = "Business rules are enforced via DI, not the manifest. This is descriptive inconsistency, not an enforcement gap.";
 
     public IReadOnlyList<Divergence> Divergences => _divergences.AsReadOnly();
     public int EntitiesChecked { get; private set; }
@@ -595,6 +606,24 @@ public static class ReferenceExporter
             System.Text.Json.JsonValueKind.Null => "",
             _ => ""
         };
+    }
+
+    /// <summary>
+    /// Converts a JsonNode to Dictionary&lt;string, object&gt; for use by DivergenceCheck and other consumers.
+    /// </summary>
+    public static Dictionary<string, object>? ConvertJsonNodeToDictionary(JsonNode? node)
+    {
+        if (node is null) return null;
+
+        try
+        {
+            var element = JsonSerializer.SerializeToElement(node, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            return ConvertJsonElementToDictionary(element);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static string EscapePipe(string? s)
@@ -1424,7 +1453,7 @@ public static class ReferenceExporter
 
                     foreach (var div in docInconsistencies)
                     {
-                        string note = "Business rules are enforced via DI, not the manifest. This is descriptive inconsistency, not an enforcement gap.";
+                        string note = DivergenceCheck.DocumentationInconsistencyNote;
                         lines.Add($"| {EscapePipe(div.Element)} | {EscapePipe(div.IrValue)} | {EscapePipe(div.ManifestValue)} | {note} |");
                     }
 
