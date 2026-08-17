@@ -227,6 +227,13 @@ public sealed class CachedRepository<T> : IRepository<T> where T : class, IEntit
     public Task<EntityRevision?> GetRevisionByVersionAsync(object id, int version, IClientSessionHandle? session = null, CancellationToken ct = default)
         => _inner.GetRevisionByVersionAsync(id, version, session, ct);
 
+    /// <inheritdoc />
+    public bool HasProtectedProperties => _inner.HasProtectedProperties;
+
+    /// <inheritdoc />
+    public IReadOnlyList<T> ProtectForRead(IReadOnlyList<T> entities)
+        => _inner.ProtectForRead(entities);
+
     public T MaskSensitiveFields(T entity)
         => _inner.MaskSensitiveFields(entity);
 

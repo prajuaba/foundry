@@ -1491,6 +1491,29 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     /// <summary>
     /// Whether this entity type declares anything to mask, read once per closed generic type.
     /// </summary>
+    /// <summary>Whether this entity declares any Encrypt property.</summary>
+    private static readonly bool HasEncryptedProperties = typeof(T)
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Select(p => p.GetCustomAttribute<Foundry.Core.Entities.SensitiveDataAttribute>())
+        .Any(a => a is { Protection: Foundry.Core.Entities.ProtectionType.Encrypt });
+
+    /// <inheritdoc />
+    public bool HasProtectedProperties => HasMaskedProperties || HasEncryptedProperties;
+
+    /// <inheritdoc />
+    public IReadOnlyList<T> ProtectForRead(IReadOnlyList<T> entities)
+    {
+        ArgumentNullException.ThrowIfNull(entities);
+        if (entities.Count == 0 || !HasProtectedProperties) return entities;
+
+        // Decrypt first, then mask -- the same order the async read paths use. Masking a still
+        // encrypted value would redact ciphertext and leave the plaintext unreachable rather than
+        // protected.
+        foreach (var entity in entities) DecryptEntity(entity);
+
+        return MaskForCaller(entities);
+    }
+
     private static readonly bool HasMaskedProperties = typeof(T)
         .GetProperties(BindingFlags.Public | BindingFlags.Instance)
         .Select(p => p.GetCustomAttribute<Foundry.Core.Entities.SensitiveDataAttribute>())

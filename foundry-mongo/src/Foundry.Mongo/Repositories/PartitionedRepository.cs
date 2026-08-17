@@ -399,6 +399,13 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
         return await repo.RestoreVersionAsync(objectId, version, session, ct);
     }
 
+    /// <inheritdoc />
+    public bool HasProtectedProperties => _activeRepository.HasProtectedProperties;
+
+    /// <inheritdoc />
+    public IReadOnlyList<T> ProtectForRead(IReadOnlyList<T> entities)
+        => _activeRepository.ProtectForRead(entities);
+
     public T MaskSensitiveFields(T entity)
     {
         return _activeRepository.MaskSensitiveFields(entity);

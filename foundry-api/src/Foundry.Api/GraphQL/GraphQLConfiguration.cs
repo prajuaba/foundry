@@ -392,7 +392,21 @@ public static class GraphQLResolverHelper<TEntity> where TEntity : class, IEntit
     public static IQueryable<TEntity> ResolveCollection(IResolverContext context)
     {
         var repo = context.Service<IRepository<TEntity>>();
-        return repo.Query();
+        var query = repo.Query();
+
+        // Query() is an IQueryable, so it carries the tenant, owner and soft-delete filters but
+        // cannot decrypt or mask -- there are no materialised entities to work on until it is
+        // enumerated. GetByIdAsync and FindManyAsync do that work after materialising; this
+        // resolver did not, so `getResources { email phoneNumber }` answered with raw ciphertext
+        // and an unredacted phone number, while the same fields over REST were protected.
+        //
+        // Entity types that declare nothing sensitive keep the IQueryable untouched, so filtering
+        // and paging still reach the database. Only the types that actually declare Encrypt or Mask
+        // pay for materialising, which is the trade this makes deliberately: a protected field
+        // returned in the clear is not a performance question.
+        if (!repo.HasProtectedProperties) return query;
+
+        return repo.ProtectForRead(query.ToList()).AsQueryable();
     }
 
     public static async Task<TEntity?> ResolveById(IResolverContext context, string id)

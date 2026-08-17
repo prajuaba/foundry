@@ -111,6 +111,34 @@ public interface IRepository<T> where T : class, IEntity<ObjectId>
     /// <summary>Returns a shallow clone of the entity with all properties marked with [SensitiveData] masked.</summary>
     T MaskSensitiveFields(T entity);
 
+    /// <summary>
+    /// Whether this entity declares any property the read path has to protect -- Encrypt or Mask.
+    /// </summary>
+    /// <remarks>
+    /// Lets a caller that must bypass the async read methods keep the fast path for entity types
+    /// with nothing to protect, and pay for protection only where it is declared.
+    /// </remarks>
+    bool HasProtectedProperties { get; }
+
+    /// <summary>
+    /// Applies the same decryption and masking that <see cref="FindManyAsync"/> and
+    /// <see cref="GetByIdAsync"/> apply, to entities obtained some other way.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="Query"/> returns an <see cref="IQueryable{T}"/> so callers can push filtering and
+    /// paging into the database, which means it cannot decrypt or mask -- there are no materialised
+    /// entities to work on yet. Anything that consumes <c>Query()</c> and then hands entities to a
+    /// caller has to close that gap itself, and this is how.
+    /// </para>
+    /// <para>
+    /// The GraphQL collection resolver did not, and returned encrypted fields as raw ciphertext and
+    /// masked fields in the clear -- the same data the REST path had been redacting all along,
+    /// through a different door.
+    /// </para>
+    /// </remarks>
+    IReadOnlyList<T> ProtectForRead(IReadOnlyList<T> entities);
+
     /// <summary>Restores a soft-deleted entity back to active state. Clears IsDeleted and DeletedAt stamps.</summary>
     Task RestoreDeletedAsync(ObjectId id, IClientSessionHandle? session = null, CancellationToken ct = default);
 
