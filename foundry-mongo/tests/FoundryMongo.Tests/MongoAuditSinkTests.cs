@@ -310,49 +310,53 @@ public class MongoAuditSinkTests : IDisposable
         public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
         public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
         public int Version { get; set; } = 1;
+        public string Name { get; init; } = string.Empty;
+    }
+
+    // Written against Repository, not against EntityAuditService.
+    //
+    // The tests these replace constructed EntityAuditService directly and asserted it stamped the
+    // tenant. It did. It was also never called by anything: Repository builds audit entries inline
+    // and the service was dead code, so the tests passed while the shipped behaviour was broken,
+    // and 3 of 2,090 audit rows in a real application carried a tenant. Exercising the type that
+    // actually writes is the whole point.
+
+    private Foundry.Mongo.Repositories.Repository<AuditProbe> RepositoryWith(
+        RecordingSink sink, string? tenant)
+        => new(_db, sink, userContext: null, encryptionProvider: null,
+               collectionName: "AuditProbes", tenantContext: new FixedTenantContext(tenant));
+
+    [Fact]
+    public async Task AnInsertThroughTheRepositoryCarriesTheTenant()
+    {
+        var sink = new RecordingSink();
+        await RepositoryWith(sink, "acme").InsertAsync(new AuditProbe { Name = "one" });
+
+        Assert.NotEmpty(sink.Written);
+        Assert.All(sink.Written, e => Assert.Equal("acme", e.TenantId));
     }
 
     [Fact]
-    public async Task AnEntryWrittenUnderATenantCarriesThatTenant()
+    public async Task ABulkInsertStampsEveryEntryNotJustTheFirst()
     {
         var sink = new RecordingSink();
-        var service = new Foundry.Mongo.Services.EntityAuditService<AuditProbe>(
-            sink, null, new FixedTenantContext("acme"));
-
-        await service.AuditInsertAsync("op-1", ObjectId.GenerateNewId().ToString(), "auditprobes", default);
-
-        Assert.Single(sink.Written);
-        Assert.Equal("acme", sink.Written[0].TenantId);
-    }
-
-    [Fact]
-    public async Task AnEntryWrittenWithNoTenantContextHasNoTenant()
-    {
-        // Null, never empty string. A tenant-scoped read excludes null and would match "" against a
-        // caller whose tenant is also unset -- the two must not be able to collide.
-        var sink = new RecordingSink();
-        var service = new Foundry.Mongo.Services.EntityAuditService<AuditProbe>(sink, null, null);
-
-        await service.AuditInsertAsync("op-1", ObjectId.GenerateNewId().ToString(), "auditprobes", default);
-
-        Assert.Single(sink.Written);
-        Assert.Null(sink.Written[0].TenantId);
-    }
-
-    [Fact]
-    public async Task TheBulkPathStampsEveryEntryNotJustTheFirst()
-    {
-        // The bulk path builds its entries inside a Select, which is the one place a per-entry stamp
-        // is easy to leave out. Three entities, three tenants asserted individually.
-        var sink = new RecordingSink();
-        var service = new Foundry.Mongo.Services.EntityAuditService<AuditProbe>(
-            sink, null, new FixedTenantContext("acme"));
-
-        var entities = new[] { new AuditProbe(), new AuditProbe(), new AuditProbe() };
-        await service.AuditBulkInsertAsync("op-1", entities, "auditprobes", default);
+        await RepositoryWith(sink, "acme").BulkInsertAsync(
+            new[] { new AuditProbe { Name = "a" }, new AuditProbe { Name = "b" }, new AuditProbe { Name = "c" } });
 
         Assert.Equal(3, sink.Written.Count);
         Assert.All(sink.Written, e => Assert.Equal("acme", e.TenantId));
+    }
+
+    [Fact]
+    public async Task WithNoTenantContextTheEntryHasNoTenant()
+    {
+        // Null, never empty string: a tenant-scoped read excludes null, and "" would match a caller
+        // whose own tenant is unset.
+        var sink = new RecordingSink();
+        await RepositoryWith(sink, null).InsertAsync(new AuditProbe { Name = "one" });
+
+        Assert.NotEmpty(sink.Written);
+        Assert.All(sink.Written, e => Assert.Null(e.TenantId));
     }
 
     [Fact]

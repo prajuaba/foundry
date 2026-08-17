@@ -64,7 +64,6 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     private readonly EntityWriteGuard<T> _writeGuard;
 
     private readonly EntityEncryptionService<T> _encryptionService;
-    private readonly EntityAuditService<T> _auditService;
 
     /// <summary>
     /// Writes one audit entry, stamped with the ambient tenant.
@@ -151,7 +150,6 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         // every entry is written with a null TenantId, and the audit collection has no way to say
         // which tenant an entry belongs to -- which is exactly what stops the trail from ever being
         // safely readable by the people it is about.
-        _auditService = new EntityAuditService<T>(auditSink, userContext, tenantContext);
         _versioningService = new EntityVersioningService<T>(db);
 
         var actualCollectionName = collectionName ?? typeof(T).Name.Pluralize();
