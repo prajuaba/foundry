@@ -2,6 +2,7 @@ using System.Reflection;
 using Foundry.Core.Audit;
 using Foundry.Core.User;
 using Foundry.Core.Entities;
+using Foundry.Core.Tenant;
 using MongoDB.Bson;
 
 namespace Foundry.Mongo.Services;
@@ -14,11 +15,13 @@ internal sealed class EntityAuditService<T> where T : class, IEntity<ObjectId>
 {
     private readonly IAuditSink? _auditSink;
     private readonly ICurrentUserContext? _userContext;
+    private readonly ITenantContext? _tenantContext;
 
-    public EntityAuditService(IAuditSink? auditSink, ICurrentUserContext? userContext)
+    public EntityAuditService(IAuditSink? auditSink, ICurrentUserContext? userContext, ITenantContext? tenantContext = null)
     {
         _auditSink = auditSink;
         _userContext = userContext;
+        _tenantContext = tenantContext;
     }
 
     /// <summary>
@@ -30,6 +33,11 @@ internal sealed class EntityAuditService<T> where T : class, IEntity<ObjectId>
     /// Whether an audit sink is configured.
     /// </summary>
     internal bool HasAuditSink => _auditSink != null;
+
+    /// <summary>
+    /// Gets the current tenant ID from tenant context, if available.
+    /// </summary>
+    private string? CurrentTenantId => _tenantContext?.TenantId;
 
     /// <summary>
     /// Computes property diffs between old values and the current state of an entity.
@@ -87,6 +95,7 @@ internal sealed class EntityAuditService<T> where T : class, IEntity<ObjectId>
             typeof(T).FullName ?? typeof(T).Name,
             entityId,
             collectionName);
+        entry = entry with { TenantId = CurrentTenantId };
         await _auditSink.WriteAsync(entry, ct);
     }
 
@@ -97,11 +106,12 @@ internal sealed class EntityAuditService<T> where T : class, IEntity<ObjectId>
     {
         if (_auditSink == null) return;
 
-        var auditEntries = entities.Select(entity => AuditLogEntry.ForInsert(
-            operatorId,
-            typeof(T).FullName ?? typeof(T).Name,
-            entity.Id.ToString(),
-            collectionName)).ToList();
+        var auditEntries = entities.Select(entity =>
+            AuditLogEntry.ForInsert(
+                operatorId,
+                typeof(T).FullName ?? typeof(T).Name,
+                entity.Id.ToString(),
+                collectionName) with { TenantId = CurrentTenantId }).ToList();
 
         await _auditSink.WriteManyAsync(auditEntries, ct);
     }
@@ -127,7 +137,7 @@ internal sealed class EntityAuditService<T> where T : class, IEntity<ObjectId>
                 operatorId,
                 typeof(T).FullName ?? typeof(T).Name,
                 entityId,
-                collectionName);
+                collectionName) with { TenantId = CurrentTenantId };
         }
         else
         {
@@ -137,7 +147,7 @@ internal sealed class EntityAuditService<T> where T : class, IEntity<ObjectId>
                 typeof(T).FullName ?? typeof(T).Name,
                 entityId,
                 collectionName,
-                diffs);
+                diffs) with { TenantId = CurrentTenantId };
         }
 
         await _auditSink.WriteAsync(entry, ct);
@@ -160,7 +170,7 @@ internal sealed class EntityAuditService<T> where T : class, IEntity<ObjectId>
                 operatorId,
                 typeof(T).FullName ?? typeof(T).Name,
                 entityId,
-                collectionName);
+                collectionName) with { TenantId = CurrentTenantId };
         }
         else
         {
@@ -170,7 +180,7 @@ internal sealed class EntityAuditService<T> where T : class, IEntity<ObjectId>
                 typeof(T).FullName ?? typeof(T).Name,
                 entityId,
                 collectionName,
-                diffs);
+                diffs) with { TenantId = CurrentTenantId };
         }
     }
 
@@ -185,7 +195,7 @@ internal sealed class EntityAuditService<T> where T : class, IEntity<ObjectId>
             operatorId,
             typeof(T).FullName ?? typeof(T).Name,
             entityId,
-            collectionName);
+            collectionName) with { TenantId = CurrentTenantId };
         await _auditSink.WriteAsync(entry, ct);
     }
 
@@ -200,7 +210,7 @@ internal sealed class EntityAuditService<T> where T : class, IEntity<ObjectId>
             operatorId,
             typeof(T).FullName ?? typeof(T).Name,
             entityId,
-            collectionName);
+            collectionName) with { TenantId = CurrentTenantId };
         await _auditSink.WriteAsync(entry, ct);
     }
 
@@ -215,7 +225,7 @@ internal sealed class EntityAuditService<T> where T : class, IEntity<ObjectId>
             operatorId,
             typeof(T).FullName ?? typeof(T).Name,
             entityId,
-            collectionName);
+            collectionName) with { TenantId = CurrentTenantId };
         await _auditSink.WriteAsync(entry, ct);
     }
 

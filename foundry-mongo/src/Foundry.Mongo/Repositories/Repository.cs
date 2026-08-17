@@ -111,7 +111,11 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         _encryptionProvider = encryptionProvider;
 
         _encryptionService = new EntityEncryptionService<T>(encryptionProvider);
-        _auditService = new EntityAuditService<T>(auditSink, userContext);
+        // The tenant context reaches the audit service, not only the write guard below. Without it
+        // every entry is written with a null TenantId, and the audit collection has no way to say
+        // which tenant an entry belongs to -- which is exactly what stops the trail from ever being
+        // safely readable by the people it is about.
+        _auditService = new EntityAuditService<T>(auditSink, userContext, tenantContext);
         _versioningService = new EntityVersioningService<T>(db);
 
         var actualCollectionName = collectionName ?? typeof(T).Name.Pluralize();

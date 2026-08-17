@@ -270,4 +270,123 @@ public class MongoAuditSinkTests : IDisposable
         var defaultEntries = await defaultCollection.Find(Builders<AuditLogEntry>.Filter.Empty).ToListAsync();
         Assert.Empty(defaultEntries);
     }
+
+    // ---- Tenant attribution -------------------------------------------------------------------
+    //
+    // AuditLogEntry carried no tenant, so the audit collection had no way to say which tenant an
+    // entry belonged to. Every entity in a multi-tenant application is tenant-scoped, so a read API
+    // over the trail would have served one tenant's entity ids, operator ids, timestamps and
+    // property diffs to another -- which is why the trail could be written but never safely read.
+
+    private sealed class FixedTenantContext : Foundry.Core.Tenant.ITenantContext
+    {
+        private string? _tenantId;
+        public FixedTenantContext(string? tenantId) => _tenantId = tenantId;
+        public string? TenantId => _tenantId;
+        public bool HasTenant => !string.IsNullOrEmpty(_tenantId);
+        public void SetTenantId(string tenantId) => _tenantId = tenantId;
+    }
+
+    private sealed class RecordingSink : IAuditSink
+    {
+        public readonly List<AuditLogEntry> Written = new();
+
+        public Task WriteAsync(AuditLogEntry entry, System.Threading.CancellationToken ct = default)
+        {
+            Written.Add(entry);
+            return Task.CompletedTask;
+        }
+
+        public Task WriteManyAsync(IReadOnlyList<AuditLogEntry> entries, System.Threading.CancellationToken ct = default)
+        {
+            Written.AddRange(entries);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed record AuditProbe : Foundry.Core.Entities.IEntity<ObjectId>
+    {
+        public ObjectId Id { get; init; } = ObjectId.GenerateNewId();
+        public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+        public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
+        public int Version { get; set; } = 1;
+    }
+
+    [Fact]
+    public async Task AnEntryWrittenUnderATenantCarriesThatTenant()
+    {
+        var sink = new RecordingSink();
+        var service = new Foundry.Mongo.Services.EntityAuditService<AuditProbe>(
+            sink, null, new FixedTenantContext("acme"));
+
+        await service.AuditInsertAsync("op-1", ObjectId.GenerateNewId().ToString(), "auditprobes", default);
+
+        Assert.Single(sink.Written);
+        Assert.Equal("acme", sink.Written[0].TenantId);
+    }
+
+    [Fact]
+    public async Task AnEntryWrittenWithNoTenantContextHasNoTenant()
+    {
+        // Null, never empty string. A tenant-scoped read excludes null and would match "" against a
+        // caller whose tenant is also unset -- the two must not be able to collide.
+        var sink = new RecordingSink();
+        var service = new Foundry.Mongo.Services.EntityAuditService<AuditProbe>(sink, null, null);
+
+        await service.AuditInsertAsync("op-1", ObjectId.GenerateNewId().ToString(), "auditprobes", default);
+
+        Assert.Single(sink.Written);
+        Assert.Null(sink.Written[0].TenantId);
+    }
+
+    [Fact]
+    public async Task TheBulkPathStampsEveryEntryNotJustTheFirst()
+    {
+        // The bulk path builds its entries inside a Select, which is the one place a per-entry stamp
+        // is easy to leave out. Three entities, three tenants asserted individually.
+        var sink = new RecordingSink();
+        var service = new Foundry.Mongo.Services.EntityAuditService<AuditProbe>(
+            sink, null, new FixedTenantContext("acme"));
+
+        var entities = new[] { new AuditProbe(), new AuditProbe(), new AuditProbe() };
+        await service.AuditBulkInsertAsync("op-1", entities, "auditprobes", default);
+
+        Assert.Equal(3, sink.Written.Count);
+        Assert.All(sink.Written, e => Assert.Equal("acme", e.TenantId));
+    }
+
+    [Fact]
+    public async Task AnEntryWithNoTenantStillRoundTripsThroughMongo()
+    {
+        // Rows written before the field existed have no tenant. They must still deserialise.
+        var sink = new Foundry.Mongo.Audit.MongoAuditSink(_db);
+        var entityId = ObjectId.GenerateNewId().ToString();
+
+        await sink.WriteAsync(AuditLogEntry.ForInsert("op-1", "Probe", entityId, "probes"));
+
+        var collection = _db.GetCollection<AuditLogEntry>("audit_log");
+        var read = await collection.Find(Builders<AuditLogEntry>.Filter.Eq(e => e.EntityId, entityId)).ToListAsync();
+
+        Assert.Single(read);
+        Assert.Null(read[0].TenantId);
+        Assert.Equal("op-1", read[0].OperatorId);
+    }
+
+    [Fact]
+    public async Task ATenantStampedEntryRoundTripsThroughMongo()
+    {
+        var sink = new Foundry.Mongo.Audit.MongoAuditSink(_db);
+        var entityId = ObjectId.GenerateNewId().ToString();
+
+        await sink.WriteAsync(
+            AuditLogEntry.ForInsert("op-1", "Probe", entityId, "probes") with { TenantId = "acme" });
+
+        var collection = _db.GetCollection<AuditLogEntry>("audit_log");
+        var read = await collection
+            .Find(Builders<AuditLogEntry>.Filter.Eq(e => e.TenantId, "acme"))
+            .ToListAsync();
+
+        Assert.Single(read);
+        Assert.Equal(entityId, read[0].EntityId);
+    }
 }
