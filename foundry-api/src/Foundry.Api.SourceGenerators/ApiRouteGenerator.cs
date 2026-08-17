@@ -387,6 +387,66 @@ namespace Foundry.Api.SourceGenerators
                         sb.AppendLine("                return Results.Text(JsonSerializer.Serialize(result, Foundry.Core.Serialization.FoundryJsonDefaults.Options), \"application/json\");");
                         sb.AppendLine("            });");
                         sb.AppendLine($"            ConfigureMetadata(builderGet, config_{ep.Entity}, \"GET\", typeof({fullEntityType}), 200);");
+
+                        // The list route above clamps to 500 rows and takes no offset, so a caller
+                        // holding more than 500 of anything had no way to reach the rest: they got a
+                        // 200, a short list, and nothing saying it was short. A client rendering
+                        // portfolio-wide totals from that is quietly computing them from a fraction.
+                        //
+                        // SearchPagedQueryHandler is already registered for every entity a few lines
+                        // up, and SearchPagedAsync already implements offset paging with a depth cap
+                        // and cursor seeking. All of it was unreachable: registered, never routed.
+                        // This maps it, so the capability the framework already ships can be used.
+                        sb.AppendLine($"            var builderPaged = endpoints.MapGet(\"{ep.Route}/paged\", async (HttpContext context, ISender sender) =>");
+                        sb.AppendLine("            {");
+                        sb.AppendLine("                var pageNumber = int.TryParse(context.Request.Query[\"pageNumber\"].ToString(), out var pn) ? pn : 1;");
+                        sb.AppendLine("                if (pageNumber < 1) pageNumber = 1;");
+                        // Same 500 ceiling as the list route. The point of this endpoint is reaching
+                        // every row, not fetching them in one enormous response.
+                        sb.AppendLine("                var pageSize = int.TryParse(context.Request.Query[\"pageSize\"].ToString(), out var ps) ? ps : 100;");
+                        sb.AppendLine("                if (pageSize < 1) pageSize = 1;");
+                        sb.AppendLine("                if (pageSize > 500) pageSize = 500;");
+                        sb.AppendLine();
+                        sb.AppendLine("                var pagedSortBy = context.Request.Query[\"sortBy\"].ToString();");
+                        sb.AppendLine("                var pagedSortOrder = string.Equals(context.Request.Query[\"sortOrder\"].ToString(), \"asc\", System.StringComparison.OrdinalIgnoreCase) || string.Equals(context.Request.Query[\"sortOrder\"].ToString(), \"ascending\", System.StringComparison.OrdinalIgnoreCase) ? Foundry.Core.Paging.SortOrder.Ascending : Foundry.Core.Paging.SortOrder.Descending;");
+                        sb.AppendLine();
+                        sb.AppendLine("                var pagedCriteriaJson = context.Request.Query[\"criteria\"].ToString();");
+                        sb.AppendLine("                SearchCriterion[] pagedCriteria = System.Array.Empty<SearchCriterion>();");
+                        sb.AppendLine("                if (!string.IsNullOrEmpty(pagedCriteriaJson))");
+                        sb.AppendLine("                {");
+                        // Rejected, not ignored -- for the same reason the list route rejects it.
+                        // Dropping an unparseable filter silently widens the result set.
+                        sb.AppendLine("                    try {");
+                        sb.AppendLine("                        var pagedOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };");
+                        sb.AppendLine("                        pagedOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());");
+                        sb.AppendLine("                        pagedCriteria = JsonSerializer.Deserialize<SearchCriterion[]>(pagedCriteriaJson, pagedOptions) ?? System.Array.Empty<SearchCriterion>();");
+                        sb.AppendLine("                    }");
+                        sb.AppendLine("                    catch (JsonException ex)");
+                        sb.AppendLine("                    {");
+                        sb.AppendLine("                        return Results.Problem(");
+                        sb.AppendLine("                            detail: \"The 'criteria' query parameter is not valid JSON: \" + ex.Message,");
+                        sb.AppendLine("                            statusCode: StatusCodes.Status400BadRequest,");
+                        sb.AppendLine("                            title: \"Invalid search criteria\");");
+                        sb.AppendLine("                    }");
+                        sb.AppendLine("                }");
+                        sb.AppendLine();
+                        sb.AppendLine("                var pageRequest = new Foundry.Core.Paging.PagedRequest { PageNumber = pageNumber, PageSize = pageSize };");
+                        sb.AppendLine("                if (!string.IsNullOrEmpty(pagedSortBy))");
+                        sb.AppendLine("                {");
+                        sb.AppendLine("                    pageRequest = pageRequest with { SortBy = new Foundry.Core.Paging.SortRequest { FieldName = pagedSortBy, Order = pagedSortOrder } };");
+                        sb.AppendLine("                }");
+                        sb.AppendLine($"                var pagedQuery = new SearchPagedQuery<{fullEntityType}>(pagedCriteria, pageRequest);");
+                        sb.AppendLine("                var pagedResult = await sender.Send(pagedQuery, context.RequestAborted);");
+                        sb.AppendLine("                return Results.Text(JsonSerializer.Serialize(pagedResult, Foundry.Core.Serialization.FoundryJsonDefaults.Options), \"application/json\");");
+                        sb.AppendLine("            });");
+                        // Same roles as GET. This is the same data through a different door, so the
+                        // two must never be able to disagree about who may read it.
+                        sb.AppendLine($"            ConfigureMetadata(builderPaged, config_{ep.Entity}, \"GET\", typeof({fullEntityType}), 200);");
+                        // ConfigureMetadata names an endpoint "{method}_{entity}", which this route
+                        // would share with the list route above -- and a duplicate endpoint name is
+                        // a startup failure, not a warning. Renamed after the fact so the shared
+                        // role and response metadata still comes from one place.
+                        sb.AppendLine($"            builderPaged.WithName(\"GET_PAGED_{ep.Entity}\");");
                     }
                 }
 
