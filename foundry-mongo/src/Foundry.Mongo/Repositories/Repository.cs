@@ -37,6 +37,9 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     private readonly IMongoCollection<T> _collection;
     private readonly IAuditSink? _auditSink;
     private readonly ICurrentUserContext? _userContext;
+
+    /// <summary>Ambient tenant, used to stamp audit entries. See <see cref="WriteAuditAsync"/>.</summary>
+    private readonly Foundry.Core.Tenant.ITenantContext? _tenantContext;
     private readonly IEncryptionProvider? _encryptionProvider;
 
     /// <summary>
@@ -62,6 +65,38 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
     private readonly EntityEncryptionService<T> _encryptionService;
     private readonly EntityAuditService<T> _auditService;
+
+    /// <summary>
+    /// Writes one audit entry, stamped with the ambient tenant.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every audit write in this class goes through here rather than touching the sink directly.
+    /// There are fifteen places that construct an <see cref="AuditLogEntry"/> and none of them set
+    /// the tenant, so stamping at each construction site would have been fifteen chances to miss
+    /// one — and a future sixteenth site would have missed it by default. Stamping at the single
+    /// point where entries leave the repository means a new construction site inherits it.
+    /// </para>
+    /// <para>
+    /// The tenant was added to <see cref="AuditLogEntry"/> so the trail could be read back safely,
+    /// and the stamping was put in <c>EntityAuditService</c> — which this class constructs and never
+    /// calls. The field shipped, the index shipped, the read filtered on it, and nothing ever
+    /// populated it: 3 rows out of 2,090 carried a tenant, and all three were written by tests that
+    /// handed the sink an entry directly. Fixing the abstraction did nothing because the abstraction
+    /// is not on the path.
+    /// </para>
+    /// </remarks>
+    private Task WriteAuditAsync(AuditLogEntry entry, CancellationToken ct)
+        => _auditSink is null
+            ? Task.CompletedTask
+            : _auditSink.WriteAsync(entry with { TenantId = _tenantContext?.TenantId }, ct);
+
+    /// <inheritdoc cref="WriteAuditAsync"/>
+    private Task WriteAuditManyAsync(IReadOnlyList<AuditLogEntry> entries, CancellationToken ct)
+        => _auditSink is null
+            ? Task.CompletedTask
+            : _auditSink.WriteManyAsync(
+                entries.Select(e => e with { TenantId = _tenantContext?.TenantId }).ToList(), ct);
 
     /// <summary>
     /// Where a revision snapshot goes and how it is read back. The shadow collection's name was
@@ -93,6 +128,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         ArgumentNullException.ThrowIfNull(db);
         _auditSink = auditSink;
         _userContext = userContext;
+        _tenantContext = tenantContext;
         _accessPolicy = new EntityAccessPolicy<T>(tenantContext, userContext, mongoOptions?.AllowUnauthenticatedFullReads ?? false);
         _searchTranslator = new EntitySearchTranslator<T>(_accessPolicy);
 
@@ -208,7 +244,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                 typeof(T).FullName ?? typeof(T).Name,
                 entity.Id.ToString(),
                 CollectionName);
-            await _auditSink.WriteAsync(entry, ct);
+            await WriteAuditAsync(entry, ct);
         }
     }
 
@@ -264,7 +300,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                 entity.Id.ToString(),
                 CollectionName)).ToList();
 
-            await _auditSink.WriteManyAsync(auditEntries, ct);
+            await WriteAuditManyAsync(auditEntries, ct);
         }
     }
 
@@ -607,7 +643,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                     diffs);
             }
 
-            await _auditSink.WriteAsync(entry, ct);
+            await WriteAuditAsync(entry, ct);
         }
     }
 
@@ -726,7 +762,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                     diffs);
             }
 
-            await _auditSink.WriteAsync(entry, ct);
+            await WriteAuditAsync(entry, ct);
         }
     }
 
@@ -874,7 +910,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
             if (_auditSink != null && auditEntries.Count > 0)
             {
-                await _auditSink.WriteManyAsync(auditEntries, ct);
+                await WriteAuditManyAsync(auditEntries, ct);
             }
         }
 
@@ -1006,7 +1042,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
             if (_auditSink != null && auditEntries.Count > 0)
             {
-                await _auditSink.WriteManyAsync(auditEntries, ct);
+                await WriteAuditManyAsync(auditEntries, ct);
             }
         }
     }
@@ -1070,7 +1106,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                     typeof(T).FullName ?? typeof(T).Name,
                     entity.Id.ToString(),
                     CollectionName);
-                await _auditSink.WriteAsync(entry, ct);
+                await WriteAuditAsync(entry, ct);
             }
         }
         else
@@ -1100,7 +1136,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                     typeof(T).FullName ?? typeof(T).Name,
                     entity.Id.ToString(),
                     CollectionName);
-                await _auditSink.WriteAsync(entry, ct);
+                await WriteAuditAsync(entry, ct);
             }
         }
     }
@@ -1584,7 +1620,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
                 typeof(T).FullName ?? typeof(T).Name,
                 id.ToString(),
                 CollectionName);
-            await _auditSink.WriteAsync(entry, ct);
+            await WriteAuditAsync(entry, ct);
         }
     }
 
@@ -1655,7 +1691,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             typeof(T).FullName ?? typeof(T).Name,
             entityId,
             CollectionName);
-        await _auditSink.WriteAsync(entry, ct);
+        await WriteAuditAsync(entry, ct);
     }
 
     private async Task AuditReadsAsync(IEnumerable<string> entityIds, CancellationToken ct)
@@ -1672,7 +1708,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
         if (entries.Any())
         {
-            await _auditSink.WriteManyAsync(entries, ct);
+            await WriteAuditManyAsync(entries, ct);
         }
     }
 }
