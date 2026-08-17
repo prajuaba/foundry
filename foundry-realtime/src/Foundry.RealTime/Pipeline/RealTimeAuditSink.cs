@@ -38,8 +38,13 @@ public class RealTimeAuditSink : IAuditSink
             return type?.GetCustomAttribute<Foundry.Core.Attributes.RealTimeAttribute>();
         });
 
-        // Enabled by default unless explicitly disabled via [RealTime(enabled: false)]
-        return rtAttr == null || rtAttr.Enabled;
+        // Requires the declaration. This read `rtAttr == null || rtAttr.Enabled`, so an entity that
+        // said nothing was broadcast -- including framework types nobody declares at all: every
+        // subscriber received OutboxMessage mutations, and received them regardless of role, since
+        // an undeclared type also carries no realTimeRoles to check against.
+        //
+        // An author who omits the flag is not asking for the feature.
+        return rtAttr is { Enabled: true };
     }
 
     public async Task WriteAsync(AuditLogEntry entry, CancellationToken ct = default)

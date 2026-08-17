@@ -31,6 +31,14 @@ public class MongoOutboxQueue : IOutboxQueue
     {
         if (eventData == null) throw new ArgumentNullException(nameof(eventData));
 
+        // The opt-in, honoured. enableKafkaOutbox previously reached the compiler and stopped there,
+        // so this queue took every mutation of every entity: in one application, 1,013 of 1,024 rows
+        // belonged to entities that had never asked to be published, and the dispatcher gave each of
+        // them a topic derived from its type name. An entity that did not opt in now writes no row,
+        // which also stops the rows that were being written and marked processed without ever having
+        // a destination.
+        if (!KafkaTopicDeclaration.IsEnabledFor(typeof(TEvent))) return;
+
         var currentActivity = System.Diagnostics.Activity.Current;
         var correlationId = currentActivity?.RootId ?? Guid.NewGuid().ToString();
         var traceParent = currentActivity?.Id;

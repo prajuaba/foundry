@@ -29,6 +29,24 @@ public static class KafkaTopicDeclaration
         return Declared(Subject(eventType));
     }
 
+    /// <summary>
+    /// Whether the entity this event is about opted into the outbox.
+    /// </summary>
+    /// <remarks>
+    /// Answered from <see cref="KafkaOutboxAttribute"/> rather than from the topic, because an
+    /// entity may opt in without naming one and let the dispatcher derive it. Reading the topic as
+    /// the opt-in signal would publish everything that declared a topic and nothing that did not,
+    /// which is the wrong question asked of the wrong field.
+    /// </remarks>
+    public static bool IsEnabledFor(Type eventType)
+    {
+        ArgumentNullException.ThrowIfNull(eventType);
+
+        return Subject(eventType)
+            .GetCustomAttributes(typeof(KafkaOutboxAttribute), inherit: true)
+            .Length > 0;
+    }
+
     private static Type Subject(Type eventType)
         => eventType.IsGenericType && eventType.GetGenericArguments().Length > 0
             ? eventType.GetGenericArguments()[0]

@@ -60,7 +60,13 @@ public class OutboxDomainEventBehavior<TRequest, TResponse> : IPipelineBehavior<
                         var timestampProp = eventGenericType.GetProperty("Timestamp");
 
                         mutTypeProp?.SetValue(mutationEvent, mutationType);
-                        entityValProp?.SetValue(mutationEvent, entityVal);
+
+                        // Redacted before it goes anywhere. This entity came off the caller's
+                        // command, so the repository has not encrypted it yet -- publishing it as
+                        // received put fields declared Encrypt onto a Kafka topic in plaintext.
+                        entityValProp?.SetValue(
+                            mutationEvent,
+                            Foundry.Core.Outbox.SensitiveFieldRedactor.Redact(entityVal));
                         timestampProp?.SetValue(mutationEvent, DateTime.UtcNow);
 
                         // Enqueue transactionally into the outbox

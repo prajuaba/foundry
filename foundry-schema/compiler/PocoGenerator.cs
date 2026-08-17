@@ -967,7 +967,19 @@ public static class RealTimeConfiguration
                 ? $"[KafkaTopic(\"{CodeGen.Lit(entity.KafkaTopic!)}\")]\n"
                 : "";
 
-            var needAttributes = entity.Partitioned || !entity.RealTime || (entity.RealTimeRoles != null && entity.RealTimeRoles.Count > 0) || !string.IsNullOrEmpty(compoundIndexAttribute) || !string.IsNullOrEmpty(kafkaTopicAttribute);
+            // The opt-in itself, separate from where it publishes. enableKafkaOutbox previously
+            // reached only the compiler -- it chose which consumers were registered and produced
+            // nothing the runtime could read -- so the outbox could not distinguish an entity that
+            // had opted in from one that had not, and published every mutation of every entity.
+            //
+            // Emitted when the entity enables the outbox or names a topic, matching the condition
+            // the consumer registration already uses, so the two cannot disagree about which
+            // entities are involved.
+            var kafkaOutboxAttribute = entity.KafkaOutboxEnabled || !string.IsNullOrWhiteSpace(entity.KafkaTopic)
+                ? "[KafkaOutbox]\n"
+                : "";
+
+            var needAttributes = entity.Partitioned || !entity.RealTime || (entity.RealTimeRoles != null && entity.RealTimeRoles.Count > 0) || !string.IsNullOrEmpty(compoundIndexAttribute) || !string.IsNullOrEmpty(kafkaTopicAttribute) || !string.IsNullOrEmpty(kafkaOutboxAttribute);
             var extraImports = needAttributes
                 ? "\nusing Foundry.Core.Attributes;"
                 : "";
@@ -991,7 +1003,7 @@ using Foundry.Core.Entities;{extraImports}
 
 namespace {CodeGen.Ns(@namespace)};
 
-{xmlDoc}{partitionAttribute}{realTimeAttribute}{ownerExemptAttribute}{compoundIndexAttribute}{kafkaTopicAttribute}public partial record {CodeGen.Ident(entity.Name, "Entity name")} : {interfaceList}
+{xmlDoc}{partitionAttribute}{realTimeAttribute}{ownerExemptAttribute}{compoundIndexAttribute}{kafkaTopicAttribute}{kafkaOutboxAttribute}public partial record {CodeGen.Ident(entity.Name, "Entity name")} : {interfaceList}
 {{{propertyLines}}}";
         }
 
