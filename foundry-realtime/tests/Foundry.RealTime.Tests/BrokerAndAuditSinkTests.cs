@@ -149,13 +149,18 @@ public class BrokerAndAuditSinkTests
     }
 
     [Fact]
-    public async Task AnEntityWithNoAttribute_Broadcasts()
+    public async Task AnEntityWithNoAttribute_DoesNotBroadcast()
     {
-        // Documented default: real-time is on unless [RealTime(false)] says otherwise.
+        // This test asserted the opposite, and the opposite was the defect.
+        //
+        // Treating an absent [RealTime] as enabled meant every type was broadcast, including the
+        // framework's own OutboxMessage, and to every subscriber regardless of role -- an undeclared
+        // type carries no realTimeRoles for the policy to check against. An author who omits the
+        // flag is not asking for the feature.
         var broker = new RecordingBroker();
         await new RealTimeAuditSink(broker, new RecordingSink()).WriteAsync(EntryFor(typeof(PlainEntity)));
 
-        Assert.Single(broker.Broadcast);
+        Assert.Empty(broker.Broadcast);
     }
 
     [Fact]

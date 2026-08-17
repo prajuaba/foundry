@@ -119,6 +119,14 @@ public class WebSocketConnectionManager
     /// Anything carrying entity data must name it, so <see cref="RealTimeAccessPolicy"/> can decide.
     /// </remarks>
     public async Task BroadcastMessageAsync(object message, string? entityTypeName, CancellationToken ct = default)
+        => await BroadcastMessageAsync(message, entityTypeName, eventTenantId: null, ct);
+
+    /// <summary>
+    /// Broadcasts to the sockets whose caller may observe <paramref name="entityTypeName"/> and
+    /// belongs to <paramref name="eventTenantId"/>.
+    /// </summary>
+    public async Task BroadcastMessageAsync(
+        object message, string? entityTypeName, string? eventTenantId, CancellationToken ct = default)
     {
         var tasks = new List<Task>();
         foreach (var (id, connection) in _sockets)
@@ -130,7 +138,7 @@ public class WebSocketConnectionManager
             }
 
             if (entityTypeName is not null
-                && !RealTimeAccessPolicy.MayObserve(connection.User, entityTypeName, out var reason))
+                && !RealTimeAccessPolicy.MayObserve(connection.User, entityTypeName, eventTenantId, out var reason))
             {
                 if (RealTimeAccessPolicy.IsKnownEntity(entityTypeName))
                 {

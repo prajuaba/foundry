@@ -147,6 +147,49 @@ public static class RealTimeAccessPolicy
         => MayObserve(user, entityTypeName, out _);
 
     /// <summary>
+    /// Whether this caller may observe this event, checking the tenant as well as the role.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Roles were the only question asked, so a subscriber authenticated to one tenant received
+    /// mutation events for every other: entity type, entity id, collection name, operator id and
+    /// timestamp. Property diffs are empty on an insert, so field values did not cross, but which
+    /// records exist elsewhere and when they change is not nothing.
+    /// </para>
+    /// <para>
+    /// An event whose tenant is null is delivered only to a caller who also has none. That covers a
+    /// single-tenant deployment, where neither side ever carries one, and refuses the case that
+    /// matters: an entry written before audit entries carried a tenant cannot say whose it is, and
+    /// showing it to whoever asks first is the failure this is here to prevent.
+    /// </para>
+    /// </remarks>
+    public static bool MayObserve(
+        ClaimsPrincipal? user, string entityTypeName, string? eventTenantId, out string? reason)
+    {
+        if (!MayObserve(user, entityTypeName, out reason)) return false;
+
+        var callerTenant = TenantOf(user);
+        if (string.Equals(Normalise(eventTenantId), Normalise(callerTenant), StringComparison.Ordinal))
+        {
+            reason = null;
+            return true;
+        }
+
+        // The tenant is deliberately absent from the reason. It is logged where a subscriber may see
+        // it, and naming another tenant's identifier in a message about refusing access to that
+        // tenant's data would give away a smaller version of the same thing.
+        reason = $"'{ToSubscriptionName(entityTypeName)}' belongs to another tenant.";
+        return false;
+    }
+
+    /// <summary>The caller's tenant, by the same claims the tenant middleware reads.</summary>
+    private static string? TenantOf(ClaimsPrincipal? user)
+        => user?.FindFirst("tenant_id")?.Value ?? user?.FindFirst("tenantId")?.Value;
+
+    private static string Normalise(string? tenant)
+        => string.IsNullOrWhiteSpace(tenant) ? string.Empty : tenant.Trim();
+
+    /// <summary>
     /// Whether this process can see the type behind a name at all.
     /// </summary>
     /// <remarks>

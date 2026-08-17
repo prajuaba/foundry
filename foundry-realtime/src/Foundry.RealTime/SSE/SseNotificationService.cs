@@ -69,7 +69,7 @@ public class SseNotificationService : INotificationService
         var tasks = new List<Task>();
         foreach (var (id, client) in _clients)
         {
-            if (!RealTimeAccessPolicy.MayObserve(client.User, entry.EntityType, out var reason))
+            if (!RealTimeAccessPolicy.MayObserve(client.User, entry.EntityType, entry.TenantId, out var reason))
             {
                 if (RealTimeAccessPolicy.IsKnownEntity(entry.EntityType))
                 {

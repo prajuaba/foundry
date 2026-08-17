@@ -29,6 +29,6 @@ public class WebSocketNotificationService : INotificationService
 
         // Named, so delivery can be filtered by the entity's realTimeRoles rather than going to
         // every connected socket regardless of who is on the other end.
-        await _connectionManager.BroadcastMessageAsync(wsMessage, entry.EntityType, ct);
+        await _connectionManager.BroadcastMessageAsync(wsMessage, entry.EntityType, entry.TenantId, ct);
     }
 }
