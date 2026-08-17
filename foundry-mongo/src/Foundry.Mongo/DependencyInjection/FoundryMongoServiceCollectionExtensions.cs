@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Hosting;
+using System.Threading;
+using System.Threading.Tasks;
 using System;
 using System.Reflection;
 using Foundry.Core.Attributes;
@@ -34,33 +37,56 @@ public static class FoundryMongoServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configureOptions);
 
-        var options = new FoundryMongoOptions();
-        configureOptions(options);
+        // The caller's lambda runs when the options are first resolved, not here.
+        //
+        // Running it here read the application's configuration at the moment AddFoundryMongo was
+        // called -- which, in Program.cs, is before the host is built and therefore before any
+        // configuration source added later exists. ConfigureAppConfiguration callbacks are applied
+        // during host build, so the standard ASP.NET mechanism for overriding settings in a test
+        // host had no effect: a suite pointing the application at its own database was silently
+        // ignored and every test wrote to the developer's real one, while its cleanup dropped an
+        // empty database it had never used.
+        //
+        // Deferring also means a lambda reading builder.Configuration sees the finished
+        // configuration rather than a half-built one, which is what a caller writing that lambda
+        // reasonably expects.
+        services.TryAddSingleton(_ => BuildOptions(configureOptions));
 
-        services.TryAddSingleton(options);
+        // Read once, here, for the decisions that shape the container rather than fill it.
+        //
+        // EnableCaching picks the implementation type registered for every entity, so it has to be
+        // known while the container is being built and cannot wait for resolution. Values -- the
+        // connection string, the database name, the keys -- are read later, from the finished
+        // configuration, which is the part that was wrong.
+        //
+        // The consequence, stated because it is a real one: a lambda whose EnableCaching depends on
+        // configuration added after AddFoundryMongo is called will see the earlier answer for that
+        // flag alone. Everything else sees the later one.
+        var structuralOptions = BuildOptions(configureOptions);
 
-        if (string.IsNullOrWhiteSpace(options.ConnectionString))
-        {
-            throw new ArgumentException("ConnectionString is required to initialize MongoDB client.", nameof(configureOptions));
-        }
-
-        if (string.IsNullOrWhiteSpace(options.DatabaseName))
-        {
-            throw new ArgumentException("DatabaseName is required to bind MongoDB database context.", nameof(configureOptions));
-        }
-
-        // Initialize global casing and serialization conventions
+        // Conventions are global and depend on no configuration, so they stay eager: registering
+        // them late would let a serializer be constructed before the casing rules were in place.
         MongoDbConventions.Register();
 
-        // Configure connection client and target database context
-        var mongoSettings = MongoClientSettings.FromConnectionString(options.ConnectionString);
-        mongoSettings.MinConnectionPoolSize = options.MinConnectionPoolSize;
-        mongoSettings.MaxConnectionPoolSize = options.MaxConnectionPoolSize;
-        var mongoClient = new MongoClient(mongoSettings);
-        var database = mongoClient.GetDatabase(options.DatabaseName);
+        services.TryAddSingleton<IMongoClient>(sp =>
+        {
+            var options = sp.GetRequiredService<FoundryMongoOptions>();
+            var mongoSettings = MongoClientSettings.FromConnectionString(options.ConnectionString);
+            mongoSettings.MinConnectionPoolSize = options.MinConnectionPoolSize;
+            mongoSettings.MaxConnectionPoolSize = options.MaxConnectionPoolSize;
+            return new MongoClient(mongoSettings);
+        });
 
-        services.TryAddSingleton<IMongoClient>(mongoClient);
-        services.TryAddSingleton<IMongoDatabase>(database);
+        services.TryAddSingleton<IMongoDatabase>(sp =>
+            sp.GetRequiredService<IMongoClient>()
+              .GetDatabase(sp.GetRequiredService<FoundryMongoOptions>().DatabaseName));
+
+        // Validation used to happen at registration, so a missing connection string stopped the
+        // application before it started listening. Deferring the options would have moved that to
+        // the first request that touched a repository. This keeps the old timing: the hosted
+        // service resolves the database once at startup, so a misconfiguration still fails at boot
+        // and says so, rather than answering 500 to whoever arrives first.
+        services.AddHostedService<MongoConfigurationCheck>();
         services.TryAddSingleton<IUnitOfWorkFactory, UnitOfWorkFactory>();
         services.TryAddSingleton<Foundry.Core.Tenant.ITenantContext, Foundry.Core.Tenant.TenantContext>();
 
@@ -78,10 +104,11 @@ public static class FoundryMongoServiceCollectionExtensions
         // Envelope encryption now requires the application to supply its own IKmsClient, and says so
         // if it does not. LocalMockKmsClient still exists for local work and tests; registering it is
         // a visible line of the caller's own code, which is where a decision like that belongs.
-        if (!string.IsNullOrWhiteSpace(options.EncryptedEncryptionKey))
+        if (!string.IsNullOrWhiteSpace(structuralOptions.EncryptedEncryptionKey))
         {
             services.TryAddSingleton<IEncryptionProvider>(sp =>
             {
+                var options = sp.GetRequiredService<FoundryMongoOptions>();
                 var kmsClient = sp.GetService<IKmsClient>()
                     ?? throw new InvalidOperationException(
                         "FoundryMongoOptions.EncryptedEncryptionKey is set, which selects KMS envelope "
@@ -96,18 +123,19 @@ public static class FoundryMongoServiceCollectionExtensions
                 return new KmsEnvelopeEncryptionProvider(kmsClient, options.EncryptedEncryptionKey);
             });
         }
-        else if (!string.IsNullOrWhiteSpace(options.EncryptionKey))
+        else if (!string.IsNullOrWhiteSpace(structuralOptions.EncryptionKey))
         {
-            services.TryAddSingleton<IEncryptionProvider>(_ => new AesEncryptionProvider(options.EncryptionKey));
+            services.TryAddSingleton<IEncryptionProvider>(sp =>
+                new AesEncryptionProvider(sp.GetRequiredService<FoundryMongoOptions>().EncryptionKey));
         }
 
         // Bind Caching decorator options if enabled
-        if (options.EnableCaching)
+        if (structuralOptions.EnableCaching)
         {
             services.AddMemoryCache();
             services.TryAddSingleton(new CachedRepositoryOptions
             {
-                DefaultTtl = options.DefaultCacheTtl ?? TimeSpan.FromMinutes(5)
+                DefaultTtl = structuralOptions.DefaultCacheTtl ?? TimeSpan.FromMinutes(5)
             });
             services.TryAddTransient(typeof(Repository<>));
         }
@@ -132,7 +160,7 @@ public static class FoundryMongoServiceCollectionExtensions
             }
             else
             {
-                if (options.EnableCaching)
+                if (structuralOptions.EnableCaching)
                 {
                     var implementationType = typeof(CachedRepository<>).MakeGenericType(entityType);
                     services.TryAddTransient(interfaceType, implementationType);
@@ -209,5 +237,53 @@ public static class FoundryMongoServiceCollectionExtensions
             .AddCheck<MongoHealthCheck>(name, failureStatus: HealthStatus.Unhealthy);
 
         return services;
+    }
+
+    /// <summary>
+    /// Runs the caller's configuration lambda and checks the result is usable.
+    /// </summary>
+    private static FoundryMongoOptions BuildOptions(Action<FoundryMongoOptions> configureOptions)
+    {
+        var options = new FoundryMongoOptions();
+        configureOptions(options);
+
+        if (string.IsNullOrWhiteSpace(options.ConnectionString))
+        {
+            throw new ArgumentException("ConnectionString is required to initialize MongoDB client.", nameof(configureOptions));
+        }
+
+        if (string.IsNullOrWhiteSpace(options.DatabaseName))
+        {
+            throw new ArgumentException("DatabaseName is required to bind MongoDB database context.", nameof(configureOptions));
+        }
+
+        return options;
+    }
+
+    /// <summary>
+    /// Resolves the database once at startup so a bad configuration fails at boot.
+    /// </summary>
+    /// <remarks>
+    /// Construction is deferred so the options see the finished configuration, and the cost of
+    /// deferring is that nothing would notice a missing connection string until the first request.
+    /// This pays that back: it touches the database registration during start-up and lets the
+    /// exception surface where the old eager validation used to.
+    /// </remarks>
+    private sealed class MongoConfigurationCheck : IHostedService
+    {
+        private readonly IServiceProvider _services;
+
+        public MongoConfigurationCheck(IServiceProvider services) => _services = services;
+
+        public Task StartAsync(CancellationToken cancellationToken)
+        {
+            // Resolution alone is the check. No command is sent, so this does not require the
+            // server to be reachable -- an unreachable database is an operational condition, not a
+            // configuration error, and failing to boot over it would be worse than retrying.
+            _ = _services.GetRequiredService<IMongoDatabase>();
+            return Task.CompletedTask;
+        }
+
+        public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
     }
 }
