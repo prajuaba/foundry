@@ -62,6 +62,17 @@ public sealed record AuditLogEntry
     /// <summary>Type of audit event (Inserted, Updated, DeletedHard, DeletedSoft, Restored, Read).</summary>
     public required AuditAction Action { get; init; }
 
+    /// <summary>
+    /// Tenant the audited entity belongs to, or null when the write happened outside any tenant
+    /// scope (system tasks, migrations, single-tenant deployments).
+    /// </summary>
+    /// <remarks>
+    /// Nullable on purpose. Entries written before this field existed have no tenant, and a
+    /// tenant-scoped read must exclude them rather than guess -- showing an unattributed entry to
+    /// whoever asks first is the failure this field exists to prevent.
+    /// </remarks>
+    public string? TenantId { get; init; }
+
     /// <summary>Number of properties changed by this operation.</summary>
     public int ChangeCount => PropertyDiffs.Count(p => p.HasChanged);
 

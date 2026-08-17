@@ -110,8 +110,17 @@ public sealed class MongoAuditSink : IAuditSink, IDisposable
                     Builders<AuditLogEntry>.IndexKeys
                         .Descending(e => e.TimestampUtc));
 
+                // Compound index: TenantId (ascending), TimestampUtc (descending)
+                // The shape a tenant-scoped read uses: one tenant's entries, newest first. Any read
+                // that serves the trail back to the people it is about has to filter on TenantId,
+                // so this is what keeps that read from being a collection scan per page.
+                var tenantIndexModel = new CreateIndexModel<AuditLogEntry>(
+                    Builders<AuditLogEntry>.IndexKeys
+                        .Ascending(e => e.TenantId)
+                        .Descending(e => e.TimestampUtc));
+
                 await indexManager.CreateManyAsync(
-                    new[] { compoundIndexModel, timestampIndexModel },
+                    new[] { compoundIndexModel, timestampIndexModel, tenantIndexModel },
                     cancellationToken: ct);
             }
             catch
