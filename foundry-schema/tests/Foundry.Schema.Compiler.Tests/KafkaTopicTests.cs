@@ -89,4 +89,32 @@ public class KafkaTopicTests
 
         Assert.Contains("public string Topic => \"orders.v2\";", consumer);
     }
+
+    [Fact]
+    public void AnEntityThatEnablesTheOutboxAndNamesNoTopicStillGetsKafkaOutbox()
+    {
+        var code = EntityCode(SchemaWith("Order", null), "Order");
+
+        Assert.Contains("[KafkaOutbox]", code);
+        Assert.DoesNotContain("KafkaTopic", code);
+        Assert.Contains("using Foundry.Core.Attributes;", code);
+    }
+
+    [Fact]
+    public void AnEntityThatNamesATopicButDoesNotEnableTheOutboxGetsKafkaTopicButNotKafkaOutbox()
+    {
+        var code = EntityCode(SchemaWith("Order", "orders.v2", outbox: false), "Order");
+
+        Assert.Contains("[KafkaTopic(\"orders.v2\")]", code);
+        Assert.DoesNotContain("[KafkaOutbox]", code);
+    }
+
+    [Fact]
+    public void AnEntityThatNeitherEnablesTheOutboxNorNamesATopicGetsNeitherAttribute()
+    {
+        var code = EntityCode(SchemaWith("Order", null, outbox: false), "Order");
+
+        Assert.DoesNotContain("[KafkaOutbox]", code);
+        Assert.DoesNotContain("[KafkaTopic", code);
+    }
 }
