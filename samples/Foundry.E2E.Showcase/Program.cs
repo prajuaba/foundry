@@ -115,6 +115,7 @@ builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(SecurityBehav
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(ValidationBehavior<,>));
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(BusinessRuleBehavior<,>));
 builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(CachingBehavior<,>));
+builder.Services.AddTransient(typeof(IPipelineBehavior<,>), typeof(OutboxDomainEventBehavior<,>)); // Writes outbox rows for Kafka topics
 
 builder.Services.AddExceptionHandler<Foundry.Api.Middleware.GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
