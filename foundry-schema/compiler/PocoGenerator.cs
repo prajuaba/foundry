@@ -972,10 +972,21 @@ public static class RealTimeConfiguration
             // nothing the runtime could read -- so the outbox could not distinguish an entity that
             // had opted in from one that had not, and published every mutation of every entity.
             //
-            // Emitted when the entity enables the outbox or names a topic, matching the condition
-            // the consumer registration already uses, so the two cannot disagree about which
-            // entities are involved.
-            var kafkaOutboxAttribute = entity.KafkaOutboxEnabled || !string.IsNullOrWhiteSpace(entity.KafkaTopic)
+            // The opt-in, and only the opt-in. Where an entity publishes is declared separately,
+            // and an entity may opt in without naming a topic and let the dispatcher derive one.
+            //
+            // This deliberately does not match the consumer-registration condition above, which is
+            // KafkaOutboxEnabled || topic. Subscribing and publishing are different questions:
+            // naming a topic without enabling the outbox is a legitimate configuration, where the
+            // generated consumer subscribes so the entity can read a topic another system writes
+            // to without writing to it itself.
+            //
+            // This used to be emitted from either signal. That discarded an explicit
+            // "enableKafkaOutbox": false whenever a topic was named, because the attribute is what
+            // the runtime reads. KafkaTopicDeclaration.IsEnabledFor deliberately answers from the
+            // attribute rather than the topic -- and emitting the attribute from the topic put the
+            // conflation it avoids back one layer down.
+            var kafkaOutboxAttribute = entity.KafkaOutboxEnabled
                 ? "[KafkaOutbox]\n"
                 : "";
 
