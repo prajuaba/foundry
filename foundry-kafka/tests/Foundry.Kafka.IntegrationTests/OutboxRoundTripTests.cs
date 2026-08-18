@@ -43,12 +43,19 @@ public sealed class OutboxRoundTripTests : IDisposable
     private ServiceProvider? _services;
 
     /// <summary>An event shaped like the ones the outbox behaviour enqueues.</summary>
+    /// <remarks>
+    /// Carries the opt-in because a generated entity would. The queue drops anything that has
+    /// not declared it, so a subject without this reaches no topic and every round-trip
+    /// assertion times out waiting for a message that was never sent.
+    /// </remarks>
+    [Foundry.Core.Attributes.KafkaOutbox]
     public sealed record OrderPlaced(OrderPlaced.OrderBody Entity)
     {
         public sealed record OrderBody(string Id, string Reference);
     }
 
     /// <summary>The same, for a subject that names its own topic.</summary>
+    [Foundry.Core.Attributes.KafkaOutbox]
     [Foundry.Core.Attributes.KafkaTopic(DeclaredTopic)]
     public sealed record InvoiceIssued(InvoiceIssued.InvoiceBody Entity)
     {
@@ -68,6 +75,7 @@ public sealed class OutboxRoundTripTests : IDisposable
     /// two members derived from the same four bytes, with the random and counter bytes absent, so
     /// the id could not be reconstructed by anyone consuming it.
     /// </remarks>
+    [Foundry.Core.Attributes.KafkaOutbox]
     public sealed record ShipmentDispatched(ShipmentDispatched.ShipmentBody Entity)
     {
         public sealed record ShipmentBody(ObjectId Id, ObjectId CarrierId, Carrier Mode, string Reference);

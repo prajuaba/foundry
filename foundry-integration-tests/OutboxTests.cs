@@ -22,6 +22,12 @@ namespace Foundry.IntegrationTests;
 
 public class OutboxTests
 {
+    /// <summary>
+    /// Declares the opt-in, as a generated entity would. MongoOutboxQueue drops any event type
+    /// that has not, so without this the queue writes nothing and the assertion below fails on
+    /// an empty collection rather than on anything to do with what it is testing.
+    /// </summary>
+    [Foundry.Core.Attributes.KafkaOutbox]
     public class SampleDomainEvent
     {
         public string EventId { get; set; } = string.Empty;

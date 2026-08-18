@@ -46,29 +46,71 @@ public class RealTimeIntegrationTests : IClassFixture<AuthenticatedSampleFactory
     }
 
     [Fact]
-    public async Task RealTimeAuditSink_WhenAuditWritten_CallsInnerSinkAndPropagatesToChannels()
+    public async Task RealTimeAuditSink_WhenEntityHasRealTimeEnabled_CallsInnerSinkAndPropagatesToChannels()
     {
         // Arrange
         var services = new ServiceCollection();
-        
+
         // Mock channel
         var mockChannel = Substitute.For<INotificationService>();
         mockChannel.ChannelName.Returns("TestChannel");
-        
+
         services.AddSingleton(mockChannel);
         services.AddLogging();
-        
+
         // Mock inner audit sink
         var mockInnerSink = Substitute.For<IAuditSink>();
         services.AddSingleton<IAuditSink>(mockInnerSink);
 
         // Register RealTime services (automatically decorates IAuditSink)
         services.AddFoundryRealTime();
-        
+
         var serviceProvider = services.BuildServiceProvider();
         var decoratedSink = serviceProvider.GetRequiredService<IAuditSink>();
-        
-        // Build entry using factory method
+
+        // Build entry using a type that declares [RealTime(true)]
+        var entry = AuditLogEntry.ForInsert(
+            operatorId: "admin",
+            entityType: typeof(EnabledRealTimeDummyEntity).AssemblyQualifiedName!,
+            entityId: "dummy-id",
+            collectionName: "Dummies"
+        );
+
+        // Act
+        await decoratedSink.WriteAsync(entry, CancellationToken.None);
+
+        // Assert
+        // 1. Verify inner audit sink was written to
+        await mockInnerSink.Received(1).WriteAsync(entry, Arg.Any<CancellationToken>());
+
+        // 2. Verify broker routed message to the mock notification channel
+        await mockChannel.Received(1).SendMutationAsync(entry, Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task RealTimeAuditSink_WhenEntityTypeIsUnresolvable_CallsInnerSinkButDoesNotPropagate()
+    {
+        // Arrange
+        var services = new ServiceCollection();
+
+        // Mock channel
+        var mockChannel = Substitute.For<INotificationService>();
+        mockChannel.ChannelName.Returns("TestChannel");
+
+        services.AddSingleton(mockChannel);
+        services.AddLogging();
+
+        // Mock inner audit sink
+        var mockInnerSink = Substitute.For<IAuditSink>();
+        services.AddSingleton<IAuditSink>(mockInnerSink);
+
+        // Register RealTime services (automatically decorates IAuditSink)
+        services.AddFoundryRealTime();
+
+        var serviceProvider = services.BuildServiceProvider();
+        var decoratedSink = serviceProvider.GetRequiredService<IAuditSink>();
+
+        // Build entry using an unresolvable type name (no RealTimeAttribute, no real type)
         var entry = AuditLogEntry.ForInsert(
             operatorId: "admin",
             entityType: "IntegrationTest.Domain.Product",
@@ -80,11 +122,11 @@ public class RealTimeIntegrationTests : IClassFixture<AuthenticatedSampleFactory
         await decoratedSink.WriteAsync(entry, CancellationToken.None);
 
         // Assert
-        // 1. Verify inner audit sink was written to
+        // 1. Verify inner audit sink was still written to (auditing not affected)
         await mockInnerSink.Received(1).WriteAsync(entry, Arg.Any<CancellationToken>());
-        
-        // 2. Verify broker routed message to the mock notification channel
-        await mockChannel.Received(1).SendMutationAsync(entry, Arg.Any<CancellationToken>());
+
+        // 2. Verify broker did NOT route message to notification channel (real-time is not enabled for unresolvable types)
+        await mockChannel.DidNotReceive().SendMutationAsync(Arg.Any<AuditLogEntry>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -125,6 +167,12 @@ public class RealTimeIntegrationTests : IClassFixture<AuthenticatedSampleFactory
         // But notification service should NOT receive the broadcast
         await mockChannel.DidNotReceive().SendMutationAsync(Arg.Any<AuditLogEntry>(), Arg.Any<CancellationToken>());
     }
+}
+
+[RealTime(true)]
+public class EnabledRealTimeDummyEntity
+{
+    public string Id { get; set; } = string.Empty;
 }
 
 [RealTime(false)]

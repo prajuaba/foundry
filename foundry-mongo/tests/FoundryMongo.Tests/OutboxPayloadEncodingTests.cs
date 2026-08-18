@@ -45,7 +45,18 @@ public class OutboxPayloadEncodingTests
         Delivered = 2,
     }
 
+    // The opt-in these tests depend on. MongoOutboxQueue drops any event type that has not
+    // declared it, so without this the queue writes nothing and every assertion below fails on
+    // an empty collection -- which is exactly what happened when the opt-in gate was added and
+    // these hand-written records, unlike generated entities, were not updated to carry it.
+    [Foundry.Core.Attributes.KafkaOutbox]
     public sealed record OrderPlaced(ObjectId Id, ObjectId CustomerId, Fulfilment Status, string Reference);
+
+    /// <summary>
+    /// A record that deliberately does NOT carry the [KafkaOutbox] attribute.
+    /// This record exists solely to prove the opt-in gate holds and must never gain the attribute.
+    /// </summary>
+    public sealed record UnpublishedSignal(ObjectId Id, string Message);
 
     private static async Task<string> EnqueueAndCapture<TEvent>(TEvent payload) where TEvent : class
     {
@@ -158,5 +169,38 @@ public class OutboxPayloadEncodingTests
         Assert.NotNull(restored);
         Assert.Equal(ObjectId.Empty, restored!.Id);
         Assert.Equal("ORD-LEGACY", restored.Reference);
+    }
+
+    [Fact]
+    public async Task AnEventThatDidNotOptInIsNotEnqueued()
+    {
+        // The gate at the top of MongoOutboxQueue.EnqueueAsync must hold: an event that has not
+        // declared [KafkaOutbox] must write no row to the outbox collection. When this gate was
+        // introduced, several existing test suites silently stopped publishing anything and failed
+        // with unrelated-looking symptoms (empty collections, timeouts) rather than pointing at
+        // the cause. This test asserts both halves of the contract: unpublished events write nothing,
+        // while published events write a row.
+        var repository = Substitute.For<IRepository<OutboxMessage>>();
+        var queue = new MongoOutboxQueue(repository);
+
+        // Enqueue an unpublished event and verify the repository was not called.
+        await queue.EnqueueAsync(
+            new UnpublishedSignal(ObjectId.GenerateNewId(), "This should not appear in the outbox"),
+            CancellationToken.None);
+
+        await repository.DidNotReceive().InsertAsync(
+            Arg.Any<OutboxMessage>(),
+            Arg.Any<MongoDB.Driver.IClientSessionHandle>(),
+            Arg.Any<CancellationToken>());
+
+        // Now enqueue a published event and verify a row is written.
+        await queue.EnqueueAsync(
+            new OrderPlaced(ObjectId.GenerateNewId(), ObjectId.GenerateNewId(), Fulfilment.Pending, "ORD-GATED"),
+            CancellationToken.None);
+
+        await repository.Received(1).InsertAsync(
+            Arg.Any<OutboxMessage>(),
+            Arg.Any<MongoDB.Driver.IClientSessionHandle>(),
+            Arg.Any<CancellationToken>());
     }
 }
