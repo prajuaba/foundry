@@ -6,6 +6,8 @@ using Foundry.Core.Paging;
 using Foundry.Mongo.Repositories;
 using Foundry.Rules;
 using Foundry.E2E.Showcase.Services;
+using Foundry.Api.MediatR;
+using Foundry.Core.Outbox;
 
 namespace Foundry.E2E.Showcase.Runner;
 
@@ -26,6 +28,13 @@ namespace Foundry.E2E.Showcase.Runner;
 /// </remarks>
 public class E2EShowcaseRunner
 {
+    /// <summary>
+    /// A standard test card number, used wherever the showcase needs a value that must never
+    /// survive to a place it does not belong. Named rather than repeated so the value asserted
+    /// on is the same one written -- the two drifting apart would make the assertion vacuous.
+    /// </summary>
+    private const string TestCardNumber = "4111111111111111";
+
     private readonly IServiceProvider _serviceProvider;
 
     public E2EShowcaseRunner(IServiceProvider serviceProvider) => _serviceProvider = serviceProvider;
@@ -87,7 +96,7 @@ public class E2EShowcaseRunner
             CustomerId = customer.Id.ToString(),
             OrderNumber = $"ORD-{DateTime.UtcNow:yyyyMMddHHmmss}",
             TotalAmount = 2_399.49m,
-            PaymentCardNumber = "4111111111111111"
+            PaymentCardNumber = TestCardNumber
         };
 
         await mediator.Send(submit);
@@ -128,6 +137,48 @@ public class E2EShowcaseRunner
             await orders.DeleteAsync(first.Id);
             var remaining = await orders.FindManyAsync(x => x.Id == first.Id);
             Step("Soft delete", $"{remaining.Count} row(s) still visible for {first.OrderNumber}");
+        }
+
+        // 6. Outbox redaction behavior.
+        var order = new Order
+        {
+            Id = ObjectId.GenerateNewId(),
+            CustomerId = customer.Id,
+            OrderNumber = $"ORD-{DateTime.UtcNow:yyyyMMddHHmmss}",
+            TotalAmount = 1234.56m,
+            OrderDate = DateTime.UtcNow,
+            Status = OrderStatus.Pending,
+            Shipment = ShipmentMethod.Standard,
+
+            // The whole point of the step below. Without a card number actually set, the
+            // assertion that the payload does not contain one passes because nothing was
+            // ever there -- a green check for a redaction that never ran.
+            PaymentCardNumber = TestCardNumber
+        };
+
+        await mediator.Send(new InsertCommand<Order>(order));
+
+        var outboxMessages = sp.GetRequiredService<IRepository<OutboxMessage>>();
+        var messages = await outboxMessages.FindManyAsync(_ => true);
+        var message = messages.FirstOrDefault(m => m.Payload.Contains(order.Id.ToString()));
+
+        if (message is null)
+        {
+            Step("Outbox redaction", "NOTHING — no outbox row was published");
+        }
+        else
+        {
+            var payload = message.Payload;
+            var hasCardNumber = payload.Contains(TestCardNumber);
+
+            if (!hasCardNumber)
+            {
+                Step("Outbox redaction", $"Card number absent from payload for topic {message.Topic}");
+            }
+            else
+            {
+                Step("Outbox redaction", "LEAKED — the raw card number reached the outbox payload");
+            }
         }
 
         Console.WriteLine(new string('-', 79));
