@@ -22,6 +22,7 @@ namespace Foundry.E2E.Showcase;
 [RealTime(false)]
 [CompoundIndex("CustomerId", "OrderDate", Name = "ix_order_customer_date")]
 [KafkaTopic("order-events")]
+[KafkaOutbox]
 public partial record Order : BaseEntity<ObjectId>, IVersionable, ISoftDelete, IWorkflowStateful
 {
     [Indexed]
