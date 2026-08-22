@@ -1264,13 +1264,34 @@ CSPROJ
 # the endpoints rather than the role checks -- those have their own phases above.
 SUITE_TOKEN=$(mint_token suite-runner "Admin,Supervisor,Auditor,Warehouse,Sales" acme)
 
+# The suites now assert owner scoping, which cannot be observed with one identity: a single token
+# shows that a caller sees rows, never that a caller is denied someone else's. Each of these is a
+# distinct principal against the Note entity, which declares ownerScoped with
+# ownerExemptRoles ["Supervisor"] and ownerReadExemptRoles ["Auditor"]:
+#
+#   OTHER         bob holds no roles, so nothing exempts him -- he is the denial case, and he is
+#                 in acme on purpose. From another tenant, tenant isolation would produce the same
+#                 result with owner scoping switched off entirely.
+#   EXEMPT        acme-supervisor holds Supervisor, exempt on reads and writes both.
+#   READ_EXEMPT   acme-auditor holds Auditor, exempt on reads only -- a separate declaration, and
+#                 one that would go unverified if the wider list alone were covered.
+#   OTHER_TENANT  globex-supervisor is exempt within globex, which is what makes it a real test of
+#                 the tenant boundary rather than of the role check.
+#
+# All four are minted above for the hand-written ownership phase; this passes the same principals
+# to the generated suites, so the two phases assert the same property by different routes.
 if ! ( cd "$SUITE_DIR" \
        && FOUNDRY_TEST_BASE_URL="$BASE" \
           FOUNDRY_TEST_TOKEN="$SUITE_TOKEN" \
           FOUNDRY_TEST_TENANT="acme" \
+          FOUNDRY_TEST_TOKEN_OTHER="$BOB" \
+          FOUNDRY_TEST_TOKEN_EXEMPT="$ACME_SUPERVISOR" \
+          FOUNDRY_TEST_TOKEN_READ_EXEMPT="$ACME_AUDITOR" \
+          FOUNDRY_TEST_TOKEN_OTHER_TENANT="$GLOBEX_SUPERVISOR" \
+          FOUNDRY_TEST_TENANT_OTHER="globex" \
           dotnet test --nologo -v q ) > "$WORK_DIR/suite-run.log" 2>&1; then
   fail "the generated suites failed against the application they were generated from:
-$(grep -E "error|Failed|failed" "$WORK_DIR/suite-run.log" | head -20)"
+$(grep -E "error|Failed|failed|\[FAIL\]" "$WORK_DIR/suite-run.log" | head -20)"
 fi
 
 pass "$(grep -oE "Passed! *- *Failed: *[0-9]+, *Passed: *[0-9]+" "$WORK_DIR/suite-run.log" | head -1)"
