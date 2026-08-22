@@ -53,7 +53,7 @@ public class Program
         new("export", "export -i <f> -f <format> [-m <f>] [-o <f>]", "Exports openapi | asyncapi | postman | mermaid | reference.",
             args => Task.FromResult(HandleExportCommand(args))),
 
-        new("verify", "verify -i <f> -m <f> [--strict]", "Verifies a committed api-manifest.json still matches its IR schema.",
+        new("verify", "verify -i <f> [-m <f>] [--enforcement [--max-gaps <n>]] [--strict]", "Checks the manifest against the IR, and with --enforcement reports which security declarations are actually asserted.",
             args => Task.FromResult(HandleVerifyCommand(args))),
 
         new("sdk", "sdk -i <f> -l <lang> [-o <path>]", "Generates a client SDK: ts | csharp | python.",
@@ -1947,7 +1947,7 @@ app.Run();
     /// Verifies that a committed api-manifest.json still matches its IR schema.
     /// </summary>
     /// <remarks>
-    /// Exits 0 on success with no enforcement gaps, 1 if gaps are found (or with --strict, any divergence),
+    /// Exits 0 when the manifest matches the IR, 1 on divergence (or with --strict, any divergence),
     /// and 2 if verification could not run (missing files, parse errors, etc.).
     /// </remarks>
     private static int HandleVerifyCommand(string[] args)
@@ -1955,6 +1955,8 @@ app.Run();
         string? inputPath = null;
         string? manifestPath = null;
         var strict = false;
+        var enforcement = false;
+        int? maxGaps = null;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -1969,6 +1971,12 @@ app.Run();
                 case "--strict":
                     strict = true;
                     break;
+                case "--enforcement":
+                    enforcement = true;
+                    break;
+                case "--max-gaps" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], out var parsedMax)) maxGaps = parsedMax;
+                    break;
             }
         }
 
@@ -1981,10 +1989,14 @@ app.Run();
             return 2;
         }
 
-        if (string.IsNullOrEmpty(manifestPath))
+        // -m is what the manifest check compares against, so it stays required for that check --
+        // but --enforcement reads the IR alone, and demanding a manifest it never opens would be
+        // asking for a file to prove it was not needed.
+        if (string.IsNullOrEmpty(manifestPath) && !enforcement)
         {
             Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine("[Error] -m is required. Enforcement cannot be verified without a manifest.");
+            Console.WriteLine("[Error] -m is required for the manifest check. Pass --enforcement to report");
+            Console.WriteLine("        which security declarations are asserted, which needs only -i.");
             Console.ResetColor();
             return 2;
         }
@@ -1998,7 +2010,7 @@ app.Run();
             return 2;
         }
 
-        if (!File.Exists(manifestPath))
+        if (!string.IsNullOrEmpty(manifestPath) && !File.Exists(manifestPath))
         {
             Console.ForegroundColor = ConsoleColor.Red;
             Console.WriteLine($"[Error] Manifest file '{manifestPath}' not found.");
@@ -2020,6 +2032,62 @@ app.Run();
                 Console.WriteLine($"[Error] Could not parse IR schema from '{inputPath}'.");
                 Console.ResetColor();
                 return 2;
+            }
+
+            // Enforcement coverage, before the manifest check and independent of it.
+            //
+            // The two answer different questions, and conflating them is what made the original
+            // `verify` misleading. The manifest check compares two files the same compiler wrote:
+            // useful for catching drift, silent about whether anything enforces what they agree on.
+            // It reported "No enforcement gaps" against an application with three open
+            // access-control findings, because none of them appears in either file. Its wording is
+            // now "Manifest matches the IR", which is what it actually establishes.
+            var coverageGaps = 0;
+            if (enforcement)
+            {
+                var claims = Foundry.Testing.Coverage.EnforcementCoverage.Analyse(ir);
+                Console.Write(Foundry.Testing.Coverage.EnforcementCoverage.Render(claims));
+
+                coverageGaps = claims.Count(
+                    c => c.State == Foundry.Testing.Coverage.CoverageState.NotAsserted);
+
+                Console.WriteLine();
+
+                // A ratchet, not a cliff.
+                //
+                // An application with existing gaps cannot adopt a gate that fails on all of them --
+                // it goes red on day one and gets switched off, which is worse than never adding it.
+                // --max-gaps pins today's count so the number can only fall, and reports when the
+                // baseline is loose enough to tighten. Without it the command fails on any gap,
+                // which is the right default for a schema starting clean.
+                var budget = maxGaps ?? 0;
+
+                if (coverageGaps > budget)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[Gap] {coverageGaps} declaration/egress pair(s) are declared and unasserted"
+                        + (maxGaps is null ? "." : $", above the agreed limit of {budget}."));
+                    Console.ResetColor();
+                }
+                else if (coverageGaps == 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("[OK] Every security declaration is asserted on every egress it reaches.");
+                    Console.ResetColor();
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"[OK] {coverageGaps} gap(s), within the agreed limit of {budget}.");
+                    if (coverageGaps < budget)
+                    {
+                        Console.WriteLine($"      Lower --max-gaps to {coverageGaps} to hold the ground just gained.");
+                    }
+                    Console.ResetColor();
+                }
+
+                // Nothing more to do when no manifest was given: the coverage report is the answer.
+                if (string.IsNullOrEmpty(manifestPath)) return coverageGaps > budget ? 1 : 0;
             }
 
             // Parse manifest
@@ -2072,13 +2140,13 @@ app.Run();
                 Console.ForegroundColor = ConsoleColor.Green;
                 if (docInconsistencies.Count > 0)
                 {
-                    Console.WriteLine($"✓ No enforcement gaps. Compared {check.EntitiesChecked} CRUD endpoint(s), {check.CustomEndpointsChecked} custom endpoint(s);");
+                    Console.WriteLine($"✓ Manifest matches the IR. Compared {check.EntitiesChecked} CRUD endpoint(s), {check.CustomEndpointsChecked} custom endpoint(s);");
                     Console.WriteLine($"  excluded {check.TransitionsDerived} compiler-derived workflow transition endpoint(s).");
                     Console.WriteLine($"  {docInconsistencies.Count} documentation inconsistency/ies found (warnings only, not failures).");
                 }
                 else
                 {
-                    Console.WriteLine($"✓ No enforcement gaps. Compared {check.EntitiesChecked} CRUD endpoint(s), {check.CustomEndpointsChecked} custom endpoint(s);");
+                    Console.WriteLine($"✓ Manifest matches the IR. Compared {check.EntitiesChecked} CRUD endpoint(s), {check.CustomEndpointsChecked} custom endpoint(s);");
                     Console.WriteLine($"  excluded {check.TransitionsDerived} compiler-derived workflow transition endpoint(s).");
                 }
                 Console.ResetColor();
@@ -2143,7 +2211,7 @@ app.Run();
             Console.ForegroundColor = ConsoleColor.Red;
             if (enforcementGaps.Count > 0)
             {
-                Console.WriteLine($"✗ {enforcementGaps.Count} enforcement gap(s) found.");
+                Console.WriteLine($"✗ {enforcementGaps.Count} manifest divergence(s) found.");
             }
             else if (strict && docInconsistencies.Count > 0)
             {
