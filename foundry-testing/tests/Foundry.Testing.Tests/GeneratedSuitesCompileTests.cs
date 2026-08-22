@@ -63,26 +63,9 @@ public class GeneratedSuitesCompileTests
                 File.WriteAllText(Path.Combine(work, name), content);
             }
 
-            // A test project with the packages a generated suite uses, and nothing else. If a suite
-            // needs something beyond these, the developer who runs `foundry test` needs to be told
-            // rather than left to discover it from a build error.
-            File.WriteAllText(Path.Combine(work, "GeneratedSuites.csproj"), """
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
-    <NoWarn>$(NoWarn);CS1591;CS8618</NoWarn>
-  </PropertyGroup>
-  <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
-    <PackageReference Include="xunit" Version="2.9.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
-    <PackageReference Include="FluentAssertions" Version="6.12.0" />
-  </ItemGroup>
-</Project>
-""");
+            // The project file comes from the generator, so this gate compiles the project a user
+            // of `foundry test` actually gets. It used to be a private copy here, which meant the
+            // gate could pass against a project nobody else had.
 
             var (exitCode, output) = RunDotnetBuild(work);
 

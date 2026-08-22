@@ -1346,22 +1346,11 @@ SUITE_DIR="$WORK_DIR/generated-suites"
 [[ -f "$SUITE_DIR/FoundryTestEnvironment.cs" ]] \
   || fail "the generated suites carry no shared test environment"
 
-cat > "$SUITE_DIR/GeneratedSuites.csproj" <<'CSPROJ'
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
-  </PropertyGroup>
-  <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
-    <PackageReference Include="xunit" Version="2.9.2" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
-    <PackageReference Include="FluentAssertions" Version="6.12.0" />
-  </ItemGroup>
-</Project>
-CSPROJ
+# The project file comes from `foundry test` itself now, not from this script. That is the point:
+# this phase runs the suites exactly as somebody who ran the CLI would get them, and a csproj
+# written here would hide a CLI that emits an unrunnable directory.
+[[ -f "$SUITE_DIR/GeneratedSuites.csproj" ]] \
+  || fail "foundry test wrote no project file, so the suites it generated cannot be run"
 
 # A caller holding every role the tenant schema declares, so the authenticated assertions exercise
 # the endpoints rather than the role checks -- those have their own phases above.

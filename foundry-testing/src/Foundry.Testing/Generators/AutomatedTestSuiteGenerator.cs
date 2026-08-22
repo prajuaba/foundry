@@ -23,6 +23,14 @@ public static class AutomatedTestSuiteGenerator
         // a copy of all three in every emitted file.
         files["FoundryTestEnvironment.cs"] = GenerateEnvironment(ns);
 
+        // A project file, so that what `foundry test` writes can be run rather than only read.
+        //
+        // Without one, `dotnet test <dir>` finds no project and the suites are inert -- which is
+        // how they sat for as long as they did. The compile gate carried its own private copy of
+        // this csproj, so it was checking a project no user of the CLI ever got; that copy now
+        // comes from here, and the two cannot drift.
+        files["GeneratedSuites.csproj"] = GenerateProjectFile();
+
         foreach (var entity in schema.Entities)
         {
             var name = entity.Name;
@@ -88,6 +96,29 @@ public static class AutomatedTestSuiteGenerator
     /// every generated endpoint calls <c>RequireAuthorization()</c>. So the suites asserted 200 on
     /// requests that can only answer 401, and a healthy application failed every one of them.
     /// </remarks>
+    /// <summary>The project file for the emitted suites, with the packages they use and no others.</summary>
+    /// <remarks>
+    /// If a suite ever needs something beyond these, whoever runs <c>foundry test</c> should be
+    /// told here rather than left to discover it from a build error.
+    /// </remarks>
+    private static string GenerateProjectFile() => """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <NoWarn>$(NoWarn);CS1591;CS8618</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="FluentAssertions" Version="6.12.0" />
+  </ItemGroup>
+</Project>
+""";
+
     private static string GenerateEnvironment(string ns) => $@"// Auto-generated test environment.
 //
 // Configure with environment variables:
@@ -246,12 +277,38 @@ public static class FoundryTestEnvironment
 ");
         }
 
-        // Owner scoping, emitted only where the schema declares it, and only where there is a
-        // write method to create a row to be denied. This is the first assertion in the suite
-        // that is derived from a security declaration rather than from the route existing.
-        if (entity.OwnerScoped && methods.Contains("POST") && methods.Contains("GET"))
+        // Access-control assertions, each emitted only where the schema declares the property and
+        // where there is a write method to create a row with. These are the assertions derived
+        // from a security declaration rather than from the route existing.
+        var canProbe = methods.Contains("POST") && methods.Contains("GET");
+        var emittedAccessControl = false;
+
+        if (entity.OwnerScoped && canProbe)
         {
             tests.Append(GenerateOwnerScopingTests(entity, route));
+            emittedAccessControl = true;
+        }
+
+        if (entity.MultiTenant && canProbe)
+        {
+            tests.Append(GenerateTenancyTests(entity, route));
+            emittedAccessControl = true;
+        }
+
+        if (canProbe)
+        {
+            var masking = GenerateMaskingTests(entity, route);
+            if (masking.Length > 0)
+            {
+                tests.Append(masking);
+                emittedAccessControl = true;
+            }
+        }
+
+        // One copy, shared by whichever of the three emitted above.
+        if (emittedAccessControl)
+        {
+            tests.Append(GenerateAccessControlHelpers(entity, route));
         }
 
         if (methods.Contains("POST"))
@@ -435,9 +492,133 @@ public class {name}RestApiTests
 ");
         }
 
-        // Helpers, emitted alongside rather than in the shared environment: the route and the
-        // payload shape are per-entity, and the id property name is the compiler's, not a guess.
-        tests.Append($@"
+        return tests.ToString();
+    }
+
+    /// <summary>
+    /// A property declaring a mask, paired with the attribute that declares it.
+    /// </summary>
+    /// <remarks>
+    /// <c>Encrypt</c> is deliberately excluded. Repository.ProtectForRead decrypts and then masks,
+    /// in that order, so an Encrypt-only property is *correctly* returned in the clear to a caller
+    /// allowed to read the row: encryption protects the stored document, not the response. An
+    /// assertion that the value is absent from an HTTP body would fail against a working system.
+    /// </remarks>
+    private static List<(string Name, string Kind)> MaskedProperties(Entity entity)
+        => (entity.Properties ?? new List<Property>())
+            .Select(p => (p.Name, Kind: p.Attributes.FirstOrDefault(
+                a => a.StartsWith("Mask", StringComparison.Ordinal))))
+            .Where(p => !string.IsNullOrEmpty(p.Kind) && !p.Name.Equals("Id", StringComparison.Ordinal))
+            .Select(p => (p.Name, Kind: p.Kind!))
+            .ToList();
+
+    /// <summary>
+    /// A value distinctive enough that finding it in a response means the mask did not run.
+    /// </summary>
+    private static string MaskSentinel(string kind)
+        => kind.Contains("Email", StringComparison.Ordinal)
+            ? "unmasked-sentinel@example.com"
+            : "SENTINEL-0123456789";
+
+    /// <summary>
+    /// Emits the masking conformance assertions for each property declaring a mask.
+    /// </summary>
+    /// <remarks>
+    /// Three assertions per property, and the third is the one most easily forgotten. Asserting
+    /// only that the raw value is absent is satisfied by a response that dropped the field, by a
+    /// list that came back empty, and by a write that never happened -- so the row must be present
+    /// and the field must still hold something. A dropped field is a different defect from a
+    /// masked one and must not read as success.
+    /// </remarks>
+    private static string GenerateMaskingTests(Entity entity, string route)
+    {
+        var masked = MaskedProperties(entity);
+        if (masked.Count == 0) return string.Empty;
+
+        var tests = new StringBuilder();
+
+        foreach (var (name, kind) in masked)
+        {
+            var sentinel = MaskSentinel(kind);
+            tests.Append($@"
+    [Fact]
+    public async Task Protection_{name}_IsNotReturnedInTheClear()
+    {{
+        // '{entity.Name}.{name}' declares {kind}. Masking is applied in the repository after the
+        // entity is materialised, so it covers REST, GraphQL and the SDKs from one rule -- which
+        // is exactly why it must be asserted on more than one of them.
+        using var client = FoundryTestEnvironment.Authenticated();
+        var created = await CreateRowWithAsync(client, ""{name}"", ""{sentinel}"");
+
+        var body = await ReadRowAsync(client, created);
+
+        body.Should().NotContain(""{sentinel}"",
+            ""'{name}' declares {kind}, so a caller without the scope to see it must not receive ""
+            + ""the raw value"");
+        body.Should().Contain(created,
+            ""the row itself must come back, or the assertion above is satisfied by an empty ""
+            + ""response rather than by masking"");
+    }}
+");
+        }
+
+        return tests.ToString();
+    }
+
+    /// <summary>
+    /// Emits the tenancy conformance assertions for an entity that declares <c>multiTenant</c>.
+    /// </summary>
+    /// <remarks>
+    /// The same two-assertion shape as owner scoping, for the same reason. The positive control
+    /// comes first because the denial below is vacuously true whenever creation or listing is
+    /// broken -- "the other tenant cannot see it" holds when nobody can see anything.
+    ///
+    /// The tenant travels in the caller's token rather than a header, so the second identity is a
+    /// separate signed principal rather than the same one sending a different header. A header is
+    /// caller-assertable and proves nothing.
+    /// </remarks>
+    private static string GenerateTenancyTests(Entity entity, string route) => $@"
+    [Fact]
+    public async Task Tenancy_TheOwningTenantSeesItsOwnRow()
+    {{
+        // Positive control, and not optional: the denial below passes for the wrong reason if the
+        // create silently failed or the list route returns nothing at all.
+        using var owner = FoundryTestEnvironment.Authenticated();
+        var created = await CreateRowAsync(owner);
+
+        var listed = await ReadIdsAsync(owner);
+
+        listed.Should().Contain(created,
+            ""the tenant that created this row must be able to read it back, or the denial ""
+            + ""assertion below proves nothing"");
+    }}
+
+    [Fact]
+    public async Task Tenancy_ARowIsNotVisibleFromAnotherTenant()
+    {{
+        // The property under test. '{entity.Name}' declares multiTenant, so a caller whose token
+        // carries a different tenant must not see this row on any read path.
+        using var owner = FoundryTestEnvironment.Authenticated();
+        var created = await CreateRowAsync(owner);
+
+        using var other = FoundryTestEnvironment.AsOtherTenant();
+        var listed = await ReadIdsAsync(other);
+
+        listed.Should().NotContain(created,
+            ""'{entity.Name}' declares multiTenant, so a caller in another tenant must not see ""
+            + ""this row in the collection"");
+    }}
+";
+
+    /// <summary>
+    /// The per-entity helpers the access-control assertions share.
+    /// </summary>
+    /// <remarks>
+    /// Emitted once per suite rather than once per emitter. They live here instead of in the shared
+    /// FoundryTestEnvironment because the route and the payload shape are per-entity, and the id
+    /// property name is the compiler's rather than a guess.
+    /// </remarks>
+    private static string GenerateAccessControlHelpers(Entity entity, string route) => $@"
     private static async Task<string> CreateRowAsync(HttpClient client)
     {{
         var payload = {SamplePayload(entity)};
@@ -445,7 +626,7 @@ public class {name}RestApiTests
 
         response.StatusCode.Should().BeOneOf(
             new[] {{ HttpStatusCode.OK, HttpStatusCode.Created }},
-            ""the owner-scoping assertions all depend on this row existing"");
+            ""every access-control assertion in this suite depends on this row existing"");
 
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         return body.GetProperty(""Id"").GetString()!;
@@ -468,10 +649,47 @@ public class {name}RestApiTests
             .Select(row => row.GetProperty(""Id"").GetString()!)
             .ToList();
     }}
-");
 
-        return tests.ToString();
-    }
+    /// <summary>Creates a row carrying a known value in one property.</summary>
+    /// <remarks>
+    /// The sample payload alone cannot serve the masking assertions: a value has to be put in
+    /// deliberately, or the assertion that it does not come back is true because it was never
+    /// there. That is the defect this project found in its own showcase, where a redaction step
+    /// asserted no card number appeared in a payload it had never set one in.
+    /// </remarks>
+    private static async Task<string> CreateRowWithAsync(HttpClient client, string property, string value)
+    {{
+        var payload = new Dictionary<string, object?>(
+            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+                JsonSerializer.Serialize({SamplePayload(entity)}))!
+                .ToDictionary(kv => kv.Key, kv => (object?)kv.Value))
+        {{
+            [property] = value
+        }};
+
+        var response = await client.PostAsJsonAsync(""{route}"", payload);
+
+        response.StatusCode.Should().BeOneOf(
+            new[] {{ HttpStatusCode.OK, HttpStatusCode.Created }},
+            $""the masking assertion for '{{property}}' depends on this row existing"");
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        return body.GetProperty(""Id"").GetString()!;
+    }}
+
+    /// <summary>The raw response body for one row, read back by id.</summary>
+    /// <remarks>
+    /// Raw text rather than a parsed property, deliberately. A mask that leaks the value somewhere
+    /// other than the field it belongs to -- a nested copy, an audit echo, an error message --
+    /// still leaks it, and reading one property by name would not see that.
+    /// </remarks>
+    private static async Task<string> ReadRowAsync(HttpClient client, string id)
+    {{
+        var response = await client.GetAsync($""{route}/{{id}}"");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        return await response.Content.ReadAsStringAsync();
+    }}
+";
 
     private static string SamplePayload(Entity entity)
     {
@@ -506,8 +724,12 @@ public class {name}RestApiTests
 
         // The field name GraphQLConfiguration emits for a readable entity.
         return $@"// Auto-generated GraphQL Integration Tests for {name}
+using System.Collections.Generic;
+using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Xunit;
 using FluentAssertions;
@@ -531,8 +753,155 @@ public class {name}GraphQLTests
 
         var body = await response.Content.ReadAsStringAsync();
         body.Should().NotContain(""\""errors\"""");
-    }}
+    }}{GraphQlAccessControlTests(entity)}
 }}";
+    }
+
+    /// <summary>
+    /// The access-control assertions for the GraphQL egress.
+    /// </summary>
+    /// <remarks>
+    /// This egress needs its own assertions rather than inheriting the REST ones, and the history
+    /// is the argument. Masking and encryption are applied in the repository so that one rule
+    /// covers every transport -- but the resolver reads through <c>Query()</c>, which returns an
+    /// IQueryable with nothing materialised to protect. Protected fields came back raw over
+    /// GraphQL while the same fields over REST were protected, for two releases. A per-entity
+    /// verdict would have called those entities covered.
+    /// </remarks>
+    private static string GraphQlAccessControlTests(Entity entity)
+    {
+        var name = entity.Name;
+        var tests = new StringBuilder();
+
+        if (entity.OwnerScoped)
+        {
+            tests.Append($@"
+
+    [Fact]
+    public async Task OwnerScoping_ANonOwnerIsDeniedThroughTheResolver()
+    {{
+        // The resolver reads through Repository.Query(), which carries the owner filter. Nothing
+        // asserted that until now, and Query() is the path protection leaked through twice.
+        using var owner = FoundryTestEnvironment.Authenticated();
+        var mine = await client_OwnerRowAsync(owner);
+
+        using var other = FoundryTestEnvironment.AsOtherUser();
+        var body = await QueryIdsAsync(other);
+
+        body.Should().NotContain(mine,
+            ""'{name}' declares ownerScoped, so a caller who does not own this row must not ""
+            + ""receive it through the resolver either"");
+    }}
+
+    [Fact]
+    public async Task OwnerScoping_TheOwnerDoesSeeTheirRowThroughTheResolver()
+    {{
+        // Positive control. Without it the denial above passes against a resolver that returns
+        // nothing to anybody.
+        using var owner = FoundryTestEnvironment.Authenticated();
+        var mine = await client_OwnerRowAsync(owner);
+
+        var body = await QueryIdsAsync(owner);
+
+        body.Should().Contain(mine,
+            ""the owner must receive their own row through the resolver, or the denial assertion ""
+            + ""above proves nothing"");
+    }}");
+        }
+
+        foreach (var (property, kind) in MaskedProperties(entity))
+        {
+            var sentinel = MaskSentinel(kind);
+            tests.Append($@"
+
+    [Fact]
+    public async Task Protection_{property}_IsNotReturnedInTheClearThroughTheResolver()
+    {{
+        // Findings 7 and 8 were exactly this: '{property}' protected over REST and raw over
+        // GraphQL, because the resolver had no materialised entity to mask.
+        using var client = FoundryTestEnvironment.Authenticated();
+        var created = await client_RowWithAsync(client, ""{property}"", ""{sentinel}"");
+
+        var body = await QueryFieldAsync(client, ""{GraphQlField(property)}"");
+
+        body.Should().NotContain(""{sentinel}"",
+            ""'{property}' declares {kind}, so the resolver must not return the raw value"");
+        body.Should().Contain(created,
+            ""the row must come back, or the assertion above is satisfied by an empty result"");
+    }}");
+        }
+
+        if (tests.Length > 0) tests.Append(GraphQlHelpers(entity));
+        return tests.ToString();
+    }
+
+    /// <summary>
+    /// A property name as GraphQL exposes it.
+    /// </summary>
+    /// <remarks>
+    /// HotChocolate lower-camels field names by default, so the schema's <c>PhoneNumber</c> is
+    /// queried as <c>phoneNumber</c>. Asking for the PascalCase name returns an "unknown field"
+    /// error rather than data, which would make the masking assertion vacuous in the most
+    /// misleading way available: the sentinel really is absent from an error response.
+    /// </remarks>
+    private static string GraphQlField(string property)
+        => string.IsNullOrEmpty(property)
+            ? property
+            : char.ToLowerInvariant(property[0]) + property[1..];
+
+    /// <summary>Helpers the GraphQL access-control assertions share.</summary>
+    private static string GraphQlHelpers(Entity entity)
+    {
+        var name = entity.Name;
+        var route = ApiManifestGenerator.RouteFor(name);
+
+        return $@"
+
+    private static async Task<string> client_OwnerRowAsync(HttpClient client)
+    {{
+        // Written over REST and read over GraphQL on purpose: the point is that the two egresses
+        // answer consistently about the same row.
+        var response = await client.PostAsJsonAsync(""{route}"", {SamplePayload(entity)});
+        response.StatusCode.Should().BeOneOf(
+            new[] {{ HttpStatusCode.OK, HttpStatusCode.Created }},
+            ""the resolver assertions depend on this row existing"");
+
+        var created = await response.Content.ReadFromJsonAsync<JsonElement>();
+        return created.GetProperty(""Id"").GetString()!;
+    }}
+
+    private static async Task<string> client_RowWithAsync(HttpClient client, string property, string value)
+    {{
+        var payload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+            JsonSerializer.Serialize({SamplePayload(entity)}))!
+            .ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
+        payload[property] = value;
+
+        var response = await client.PostAsJsonAsync(""{route}"", payload);
+        response.StatusCode.Should().BeOneOf(
+            new[] {{ HttpStatusCode.OK, HttpStatusCode.Created }},
+            $""the resolver masking assertion for '{{property}}' depends on this row existing"");
+
+        var created = await response.Content.ReadFromJsonAsync<JsonElement>();
+        return created.GetProperty(""Id"").GetString()!;
+    }}
+
+    private static async Task<string> QueryIdsAsync(HttpClient client)
+        => await QueryFieldAsync(client, ""id"");
+
+    private static async Task<string> QueryFieldAsync(HttpClient client, string field)
+    {{
+        var query = new {{ query = ""query {{ get{name}s {{ id "" + field + "" }} }}"" }};
+        var response = await client.PostAsJsonAsync(""/graphql"", query);
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await response.Content.ReadAsStringAsync();
+
+        body.Should().NotContain(""\""errors\"""",
+            ""a resolver error would make every assertion below vacuous"");
+
+        return body;
+    }}";
     }
 
     /// <summary>
