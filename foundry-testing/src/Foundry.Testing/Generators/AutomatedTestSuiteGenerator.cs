@@ -161,6 +161,12 @@ public static class FoundryTestEnvironment
         Tenant,
         ""a caller holding one of the ownerExemptRoles this schema declares"");
 
+    /// <summary>A caller holding one of the entity's declared owner-read-exempt roles.</summary>
+    public static HttpClient AsReadExemptRole() => Identified(
+        ""FOUNDRY_TEST_TOKEN_READ_EXEMPT"",
+        Tenant,
+        ""a caller holding one of the ownerReadExemptRoles this schema declares"");
+
     /// <summary>A caller in a different tenant.</summary>
     public static HttpClient AsOtherTenant() => Identified(
         ""FOUNDRY_TEST_TOKEN_OTHER_TENANT"",
@@ -400,6 +406,31 @@ public class {name}RestApiTests
         listed.Should().Contain(created,
             ""'{entity.Name}' declares ownerExemptRoles [{roles}], so a caller holding one must ""
             + ""see rows they do not own"");
+    }}
+");
+        }
+
+        if (entity.OwnerReadExemptRoles.Count > 0)
+        {
+            var readRoles = string.Join(", ", entity.OwnerReadExemptRoles);
+            tests.Append($@"
+    [Fact]
+    public async Task OwnerScoping_AReadExemptRoleSeesTheRow()
+    {{
+        // ownerReadExemptRoles is a second, narrower declaration: EntityAccessPolicy exempts
+        // ownerExemptRoles on both reads and writes, and ownerReadExemptRoles on reads only. It
+        // is asserted separately because a suite that covered the wider list alone would leave
+        // the narrower one declared and unverified -- which is the defect this suite exists to
+        // catch, one declaration over.
+        using var owner = FoundryTestEnvironment.Authenticated();
+        var created = await CreateRowAsync(owner);
+
+        using var readExempt = FoundryTestEnvironment.AsReadExemptRole();
+        var listed = await ReadIdsAsync(readExempt);
+
+        listed.Should().Contain(created,
+            ""'{entity.Name}' declares ownerReadExemptRoles [{readRoles}], so a caller holding ""
+            + ""one must see rows they do not own when reading"");
     }}
 ");
         }

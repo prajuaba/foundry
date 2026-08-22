@@ -36,7 +36,8 @@ public class SuiteContentTests
     };
 
     private static SchemaModel OwnerScopedSchema(
-        string[]? exemptRoles = null, bool withOwnerKey = true, string[]? methods = null) => new()
+        string[]? exemptRoles = null, bool withOwnerKey = true, string[]? methods = null,
+        string[]? readExemptRoles = null) => new()
     {
         Namespace = "Sales.Domain",
         Entities =
@@ -46,6 +47,7 @@ public class SuiteContentTests
                 Name = "Customer",
                 OwnerScoped = true,
                 OwnerExemptRoles = [.. exemptRoles ?? Array.Empty<string>()],
+                OwnerReadExemptRoles = [.. readExemptRoles ?? Array.Empty<string>()],
                 ApiEnabledMethods = [.. methods ?? ["GET", "POST"]],
                 Properties =
                 [
@@ -282,5 +284,21 @@ public class SuiteContentTests
         Assert.Contains("FOUNDRY_TEST_TOKEN_OTHER", env);
         Assert.Contains("FOUNDRY_TEST_TOKEN_EXEMPT", env);
         Assert.Contains("throw new InvalidOperationException", env);
+    }
+
+    [Fact]
+    public void TheReadExemptRoleIsAssertedSeparatelyFromTheWiderExemption()
+    {
+        // EntityAccessPolicy exempts ownerExemptRoles on reads and writes, and
+        // ownerReadExemptRoles on reads only -- two declarations, not one. Covering the wider
+        // list alone would leave the narrower one declared and unverified, which is the defect
+        // this suite exists to catch, one declaration over.
+        var without = Generate(OwnerScopedSchema())["CustomerRestApiTests.cs"];
+        Assert.DoesNotContain("OwnerScoping_AReadExemptRoleSeesTheRow", without);
+
+        var with = Generate(OwnerScopedSchema(readExemptRoles: ["Auditor"]))["CustomerRestApiTests.cs"];
+        Assert.Contains("OwnerScoping_AReadExemptRoleSeesTheRow", with);
+        Assert.Contains("ownerReadExemptRoles [Auditor]", with);
+        Assert.Contains("AsReadExemptRole", with);
     }
 }
