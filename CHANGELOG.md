@@ -6,6 +6,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [2.8.1] - 2026-08-22
+
+The first release cut through the preflight gate, and the reason the gate exists: **2.5.0, 2.6.0,
+2.7.0 and 2.8.0 were each tagged on a commit whose CI run had already failed.** 2.8.0 remains
+published from `d1ecb81`, which is red; this is the same line of work re-cut from a tree where all
+seven jobs pass.
+
+### Added
+
+- **`foundry verify --enforcement`.** Reports which security declarations carry an assertion, per
+  declaration and per egress. The existing `-m` mode compares the manifest against the IR — two
+  files the same compiler wrote — and reported "No enforcement gaps" against an application with
+  three open access-control findings, none of which appears in either file. It now says "Manifest
+  matches the IR", which is what it establishes. `--max-gaps` ratchets the count so it can only
+  fall.
+- **Conformance assertions emitted from declarations**: owner scoping, tenancy, masking, and both
+  masking and owner scoping through the GraphQL resolver. Coverage is computed by running the
+  generator and reading its real output, so the report cannot claim an assertion that is not there.
+- **`scripts/preflight-release.sh`** and Step 0 in `RELEASING.md`. All seven jobs must be green on
+  the exact commit being tagged; a green run on some other commit does not count.
+- **`foundry test` writes a project file**, so what it emits can be run rather than only read.
+
+### Fixed
+
+- **Outbox redaction had no gate.** `SensitiveFieldRedactor` had four unit tests and exactly one
+  production call site, and nothing asserted the call site used it. Deleting the call put fields
+  declared `Encrypt` onto a Kafka topic in plaintext with every suite still green.
+- **The GraphQL masking fix from findings 7 and 8 had no test**, so the leak it repaired could
+  return silently. Deleting the protection passed the whole suite.
+- **The real-time tenant boundary was unverified at runtime.** Its SSE denial assertion searched the
+  stream for a field value the payload never carries, so it passed whether the event was withheld or
+  delivered.
+- **The generator read a declared Kafka topic as an opt-in**, publishing entities that had declared
+  `enableKafkaOutbox: false`.
+- **The generated suite could not run against a real application**: it parallelised until the rate
+  limiter refused it, searched one page of a list for a row that could be on the next, wrote a
+  constant into every row until a unique index rejected it, and ignored `Range` and `MaxLength`.
+
+### Notes
+
+`Encrypt` is protection at rest, not redaction on read — `ProtectForRead` decrypts and then masks,
+so an `Encrypt`-only property is correctly returned in the clear to a caller allowed to read the
+row. Asserting its absence from a response fails against a working system.
+
 ## [2.1.0] - 2026-08-16
 
 Two security defects, the structural changes that stop the class recurring, and the tooling that
