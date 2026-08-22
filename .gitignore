@@ -45,3 +45,8 @@ TestResults/
 coverage/
 *.trx
 *.coverage
+
+# `foundry test` writes its report beside the suites it generates. Running the CLI from the
+# repository root drops these here, and they are output rather than source.
+test-report.html
+test-report.md
