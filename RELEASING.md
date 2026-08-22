@@ -109,8 +109,9 @@ When you push a tag, the `distro-binary` job in `.github/workflows/ci.yml`:
    tag; otherwise it falls back to `1.0.0` rather than a bare commit hash, which broke the build
    once already)
 2. Passes it to `scripts/build-distro.sh` as the version
-3. Publishes the CLI with `-p:Version=vX.Y.Z`, so `foundry version` reports the tagged version
-4. Uploads the binary as `foundry-linux-x64-vX.Y.Z` (including the version in the artifact name)
+3. Strips the leading `v` (`sed 's/^v//'`), because `-p:Version=` takes a bare version number
+4. Publishes the CLI with `-p:Version=X.Y.Z`, so `foundry version` reports the tagged version
+5. Uploads the binary as `foundry-linux-x64-X.Y.Z` — no `v`, since the prefix was stripped above
 
 The binary's reported version now matches the git state and the artifact filename, eliminating version ambiguity.
 
