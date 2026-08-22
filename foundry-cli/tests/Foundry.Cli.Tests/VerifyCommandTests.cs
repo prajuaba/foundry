@@ -57,7 +57,9 @@ public class VerifyCommandTests
         var result = await Cli.RunAsync(null, "verify", "-i", irPath, "-m", manifestPath);
 
         Assert.Equal(0, result.ExitCode);
-        Assert.Contains("No enforcement gaps", result.Output);
+        // Was "No enforcement gaps", which this check cannot establish: it compares two files the
+        // same compiler wrote and never observes the running system. Enforcement is --enforcement.
+        Assert.Contains("Manifest matches the IR", result.Output);
         Assert.Contains("CRUD endpoint", result.Output);
         Assert.Contains("custom endpoint", result.Output);
     }
@@ -113,7 +115,7 @@ public class VerifyCommandTests
         var result = await Cli.RunAsync(null, "verify", "-i", irPath);
 
         Assert.Equal(2, result.ExitCode);
-        Assert.Contains("enforcement cannot be verified", result.Output.ToLower());
+        Assert.Contains("-m is required for the manifest check", result.Output.ToLower());
     }
 
     /// <summary>
