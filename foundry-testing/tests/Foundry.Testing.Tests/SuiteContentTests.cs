@@ -59,6 +59,46 @@ public class SuiteContentTests
         ]
     };
 
+    private static SchemaModel TenantSchema(bool multiTenant = true, string[]? methods = null) => new()
+    {
+        Namespace = "Sales.Domain",
+        Entities =
+        [
+            new Entity
+            {
+                Name = "Customer",
+                MultiTenant = multiTenant,
+                TenantProperty = "TenantId",
+                ApiEnabledMethods = [.. methods ?? ["GET", "POST"]],
+                Properties =
+                [
+                    new Property { Name = "Id", Type = "ObjectId", IsKey = true },
+                    new Property { Name = "TenantId", Type = "string" },
+                    new Property { Name = "Email", Type = "string", Attributes = ["Required"] }
+                ]
+            }
+        ]
+    };
+
+    private static SchemaModel MaskedSchema(string attribute = "MaskEmail", bool graphQl = false) => new()
+    {
+        Namespace = "Sales.Domain",
+        Entities =
+        [
+            new Entity
+            {
+                Name = "Customer",
+                GraphQlEnabled = graphQl,
+                ApiEnabledMethods = ["GET", "POST"],
+                Properties =
+                [
+                    new Property { Name = "Id", Type = "ObjectId", IsKey = true },
+                    new Property { Name = "Email", Type = "string", Attributes = [attribute] }
+                ]
+            }
+        ]
+    };
+
     private static Dictionary<string, string> Generate(SchemaModel schema)
         => AutomatedTestSuiteGenerator.GenerateAllTestSuites(schema);
 
@@ -300,5 +340,101 @@ public class SuiteContentTests
         Assert.Contains("OwnerScoping_AReadExemptRoleSeesTheRow", with);
         Assert.Contains("ownerReadExemptRoles [Auditor]", with);
         Assert.Contains("AsReadExemptRole", with);
+    }
+
+    // ── Tenancy ─────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void AMultiTenantEntityGetsADenialAndItsControl()
+    {
+        var suite = Generate(TenantSchema())["CustomerRestApiTests.cs"];
+
+        Assert.Contains("Tenancy_ARowIsNotVisibleFromAnotherTenant", suite);
+        Assert.Contains("FoundryTestEnvironment.AsOtherTenant()", suite);
+
+        // The control is asserted separately rather than assumed to travel with the denial: "the
+        // other tenant cannot see it" is true whenever nobody can see anything.
+        Assert.Contains("Tenancy_TheOwningTenantSeesItsOwnRow", suite);
+    }
+
+    [Fact]
+    public void AnEntityThatIsNotMultiTenantGetsNoTenancyAssertions()
+    {
+        var suite = Generate(TenantSchema(multiTenant: false))["CustomerRestApiTests.cs"];
+
+        Assert.DoesNotContain("Tenancy_", suite);
+    }
+
+    [Fact]
+    public void TenancyAssertionsAreSkippedWithoutAWriteMethod()
+    {
+        // Every tenancy assertion begins by creating a row to be denied. With no POST there is
+        // nothing to create, and emitting them would fail against a correct read-only entity.
+        var suite = Generate(TenantSchema(methods: ["GET"]))["CustomerRestApiTests.cs"];
+
+        Assert.DoesNotContain("Tenancy_", suite);
+    }
+
+    // ── Masking ─────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void AMaskedPropertyIsProbedWithAValueThatWasActuallySet()
+    {
+        // The showcase once asserted that no card number appeared in a payload it had never put
+        // one in -- a green check for a redaction that never ran. The sentinel has to be written
+        // before its absence means anything.
+        var suite = Generate(MaskedSchema())["CustomerRestApiTests.cs"];
+
+        Assert.Contains("Protection_Email_IsNotReturnedInTheClear", suite);
+        Assert.Contains("CreateRowWithAsync", suite);
+        Assert.Contains("unmasked-sentinel@example.com", suite);
+    }
+
+    [Fact]
+    public void TheMaskingAssertionRequiresTheRowToComeBack()
+    {
+        // Absence of the sentinel is satisfied by an empty response, a dropped field and a write
+        // that never happened. The row's own id must be in the body too.
+        var suite = Generate(MaskedSchema())["CustomerRestApiTests.cs"];
+
+        Assert.Contains("Should().Contain(created", suite);
+    }
+
+    [Fact]
+    public void AnEncryptedPropertyGetsNoReadAssertion()
+    {
+        // Repository.ProtectForRead decrypts and then masks, so an Encrypt-only property is
+        // correctly returned in the clear to a caller allowed to read the row. Asserting its
+        // absence would fail against a working system: encryption protects the stored document,
+        // not the response.
+        var suite = Generate(MaskedSchema(attribute: "Encrypt"))["CustomerRestApiTests.cs"];
+
+        Assert.DoesNotContain("Protection_Email", suite);
+    }
+
+    [Fact]
+    public void AMaskedPropertyIsAlsoProbedThroughTheResolver()
+    {
+        // Findings 7 and 8: protected over REST and raw over GraphQL, because the resolver had no
+        // materialised entity to mask.
+        var suite = Generate(MaskedSchema(graphQl: true))["CustomerGraphQLTests.cs"];
+
+        Assert.Contains("Protection_Email_IsNotReturnedInTheClearThroughTheResolver", suite);
+
+        // Queried by the name GraphQL exposes. Asking for the PascalCase name returns an unknown
+        // field error, and the sentinel really is absent from an error response.
+        Assert.Contains("email", suite);
+    }
+
+    [Fact]
+    public void OwnerScopingIsAlsoAssertedThroughTheResolver()
+    {
+        var schema = OwnerScopedSchema();
+        schema = schema with { Entities = [schema.Entities[0] with { GraphQlEnabled = true }] };
+
+        var suite = Generate(schema)["CustomerGraphQLTests.cs"];
+
+        Assert.Contains("OwnerScoping_ANonOwnerIsDeniedThroughTheResolver", suite);
+        Assert.Contains("OwnerScoping_TheOwnerDoesSeeTheirRowThroughTheResolver", suite);
     }
 }

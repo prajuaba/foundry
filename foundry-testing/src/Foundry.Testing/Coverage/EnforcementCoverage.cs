@@ -105,8 +105,27 @@ public static class EnforcementCoverage
                     "no generated assertion crosses a tenant boundary on this egress"));
             }
 
+            // Mask and Encrypt protect against different things, and conflating them produces an
+            // assertion that fails on correct code.
+            //
+            // Repository.ProtectForRead decrypts and then masks, in that order, because masking a
+            // still-encrypted value would redact ciphertext and leave the plaintext unreachable
+            // rather than protected. An Encrypt-only property is therefore *correctly* returned in
+            // the clear to any caller allowed to read the row: encryption is protection at rest,
+            // against whoever reaches the database, not redaction on read. Claiming it on REST and
+            // asserting the value is absent would fail against a working system.
             foreach (var (name, kind) in Sensitive(entity))
             {
+                if (string.Equals(kind, "Encrypt", StringComparison.Ordinal))
+                {
+                    claims.Add(Claim(entity, $"{kind}:{name}", "At rest",
+                        false,
+                        "the stored document holds no plaintext",
+                        "no assertion reads the stored document, and no HTTP response can show this: "
+                        + "the value is decrypted before it is returned, which is the design"));
+                    continue;
+                }
+
                 if (servesRest)
                 {
                     claims.Add(Claim(entity, $"{kind}:{name}", "REST",

@@ -46,18 +46,22 @@ public class EnforcementCoverageTests
     }
 
     [Fact]
-    public void TheSameDeclarationIsReportedUncoveredOnGraphQL()
+    public void OneDeclarationIsTrackedSeparatelyOnEachEgressItReaches()
     {
-        // One declaration, two egresses, two different answers. This is the distinction the whole
-        // command exists for: masking was correct on REST and leaking over GraphQL for two
-        // releases, and a per-entity verdict would have called that entity covered.
+        // One declaration, two egresses, tracked apart. This is the distinction the whole command
+        // exists for: masking was correct on REST and leaking over GraphQL for two releases, and a
+        // per-entity verdict would have called that entity covered.
+        //
+        // Both now assert, since the GraphQL emitter covers owner scoping through the resolver.
+        // The value of the test is that the two are still counted separately -- if the GraphQL
+        // emission is removed, this fails while the REST claim stays green.
         var claims = EnforcementCoverage.Analyse(Schema(OwnerScoped(graphQl: true)));
 
         var rest = Assert.Single(claims, c => c.Declaration == "ownerScoped" && c.Egress == "REST");
         var gql = Assert.Single(claims, c => c.Declaration == "ownerScoped" && c.Egress == "GraphQL");
 
         Assert.Equal(CoverageState.Asserted, rest.State);
-        Assert.Equal(CoverageState.NotAsserted, gql.State);
+        Assert.Equal(CoverageState.Asserted, gql.State);
     }
 
     [Fact]
