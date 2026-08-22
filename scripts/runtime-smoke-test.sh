@@ -1135,7 +1135,18 @@ wait "$DENIED_PID" 2>/dev/null || true
 grep -q "event: connected" "$SSE_DENIED" \
   || fail "the denied client's SSE stream never opened, so receiving nothing proves nothing: $(cat "$SSE_DENIED")"
 
-grep -q "RT-WITHHELD" "$SSE_DENIED" \
+# Asserted on entityType, not on the reference value.
+#
+# This grepped for RT-WITHHELD until it was mutation-tested, and could never have found it. The
+# frame is an AuditLogEntry, not the entity: it carries entityType, entityId, collectionName and
+# a propertyDiffs array that is empty on an insert. The reference never appears in the payload
+# whether the event is delivered or withheld, so the assertion passed either way. Forcing
+# RealTimeAccessPolicy.MayObserve to return true left this phase green while the denied client
+# was demonstrably receiving the frame.
+#
+# entityType is in every frame, so an assertion on it fails when delivery is wrong -- which is the
+# only property that makes it worth running.
+grep -q '"entityType":"[^"]*Invoice"' "$SSE_DENIED" \
   && fail "an SSE client lacking the Warehouse role received an Invoice mutation: $(cat "$SSE_DENIED")"
 pass "SSE withheld the mutation from a caller on a live stream without the role"
 
@@ -1154,6 +1165,55 @@ wait "$ALLOWED_PID" 2>/dev/null || true
 grep -q "Invoice" "$SSE_ALLOWED" \
   || fail "an SSE client holding the Warehouse role received no Invoice mutation: $(cat "$SSE_ALLOWED")"
 pass "SSE delivered the mutation to a caller holding the role"
+
+# The tenant boundary on the stream itself.
+#
+# Everything above varies the role and holds the tenant fixed, so it can only ever prove the role
+# gate. RealTimeAccessPolicy has two overloads: the two-argument one answers the role, and the
+# three-argument one answers the role and then the event's tenant against the caller's. SSE and
+# WebSockets call the three-argument one; NotificationHub calls the two-argument one on subscribe.
+# Nothing here exercised the tenant half of it against a running application -- it was covered by
+# unit tests alone, and unit tests were what said the role gate above was fine.
+#
+# The watcher holds Warehouse, so the role gate admits them and only tenancy can withhold the
+# frame. A pass here therefore cannot be explained by the role check doing the work.
+log "A caller in another tenant receives none of this tenant's mutations, even holding the role"
+SSE_OTHER_TENANT="$WORK_DIR/sse-other-tenant.log"
+OTHER_TENANT_PID=$(observe_sse "$(mint_token globex-watcher Warehouse globex)" "$SSE_OTHER_TENANT")
+sleep 1
+authenticate_as "$ACME_ADMIN"
+curl -sS --max-time 10 -X POST "$BASE/api/invoices" \
+  -H 'Content-Type: application/json' "${AUTH[@]}" \
+  -d '{"reference":"RT-CROSS-TENANT","amount":13}' > /dev/null
+sleep 2
+wait "$OTHER_TENANT_PID" 2>/dev/null || true
+
+grep -q "event: connected" "$SSE_OTHER_TENANT" \
+  || fail "the globex client's SSE stream never opened, so receiving nothing proves nothing: $(cat "$SSE_OTHER_TENANT")"
+
+grep -q '"entityType":"[^"]*Invoice"' "$SSE_OTHER_TENANT" \
+  && fail "an SSE client in globex received an Invoice mutation written in acme -- the real-time tenant boundary is not applied on delivery: $(cat "$SSE_OTHER_TENANT")"
+pass "SSE withheld an acme mutation from a globex caller holding the role"
+
+# The control for the phase above, and it has to be a fresh write: the globex stream is closed by
+# now, and "the acme watcher saw the earlier one" would not show that delivery still works at this
+# point in the run.
+log "The same write does reach a caller in its own tenant"
+SSE_SAME_TENANT="$WORK_DIR/sse-same-tenant.log"
+SAME_TENANT_PID=$(observe_sse "$(mint_token acme-watcher Warehouse acme)" "$SSE_SAME_TENANT")
+sleep 1
+authenticate_as "$ACME_ADMIN"
+curl -sS --max-time 10 -X POST "$BASE/api/invoices" \
+  -H 'Content-Type: application/json' "${AUTH[@]}" \
+  -d '{"reference":"RT-SAME-TENANT","amount":14}' > /dev/null
+sleep 2
+wait "$SAME_TENANT_PID" 2>/dev/null || true
+
+grep -q '"entityType":"[^"]*Invoice"' "$SSE_SAME_TENANT" \
+  || fail "an acme SSE client holding the role received no Invoice mutation, so the phase above proves nothing: $(cat "$SSE_SAME_TENANT")"
+grep -q '"tenantId":"acme"' "$SSE_SAME_TENANT" \
+  || fail "the delivered frame does not carry tenantId acme, so the tenant assertions above are reading a field that is not there: $(cat "$SSE_SAME_TENANT")"
+pass "SSE delivered the acme mutation to an acme caller, stamped with its tenant"
 
 # A multi-tenant row with no tenant is invisible to every tenant once isolation is on, and
 # visible to all of them until then. The write is refused rather than silently orphaned.
