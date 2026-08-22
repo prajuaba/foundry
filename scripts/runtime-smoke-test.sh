@@ -450,7 +450,8 @@ cat > "$WORK_DIR/tenant-schema.json" <<'SCHEMA'
         { "Name": "Id", "Type": "ObjectId", "IsKey": true },
         { "Name": "TenantId", "Type": "string", "isTenantKey": true },
         { "Name": "Reference", "Type": "string", "Attributes": ["Required"] },
-        { "Name": "Amount", "Type": "decimal" }
+        { "Name": "Amount", "Type": "decimal" },
+        { "Name": "BillingEmail", "Type": "string", "Attributes": ["MaskEmail"] }
       ],
       "ApiEnabledMethods": ["GET", "POST", "GET_BY_ID", "PUT", "DELETE"],
       "ApiRoles": { "DELETE": ["Admin"] }
@@ -1279,6 +1280,48 @@ GQL_NOTE=$(curl -sS --max-time 15 -X POST "$BASE/graphql" \
 
 echo "$GQL_NOTE" | grep -q '"errors"' \
   || fail "Note is exposed over GraphQL although its schema never asked: $GQL_NOTE"
+
+# Masking on the GraphQL egress, which nothing has ever checked at runtime.
+#
+# Masking is applied in the repository so that one rule covers REST, GraphQL and the SDKs. The
+# GraphQL resolver is the one place that cannot inherit it for free: Query() returns an IQueryable
+# carrying the tenant, owner and soft-delete filters, but there are no materialised entities to
+# mask until it is enumerated. GetByIdAsync and FindManyAsync mask after materialising; the
+# resolver did not, and `getResources { email phoneNumber }` answered with raw ciphertext and an
+# unredacted phone number while the same fields over REST were protected. That was findings 7 and
+# 8, fixed in 2.4.0 by materialising and calling ProtectForRead.
+#
+# The fix had no test. Deleting it passes every suite in the repository, so the leak can return
+# silently. It went unchecked here because the only masked entity in this schema was Note, which
+# never opts into GraphQL, while Invoice -- which does -- had nothing masked. Invoice now carries
+# BillingEmail so the two overlap and the egress can be observed.
+log "A masked property is masked over GraphQL, not just over REST"
+authenticate_as "$ACME_ADMIN"
+curl -sS --max-time 10 -X POST "$BASE/api/invoices" \
+  -H 'Content-Type: application/json' "${AUTH[@]}" \
+  -d '{"reference":"GQL-MASK","amount":21,"billingEmail":"payer@example.com"}' > /dev/null
+
+authenticate_as "$(mint_token gql-user Admin acme)"
+GQL_MASKED=$(curl -sS --max-time 15 -X POST "$BASE/graphql" \
+  -H 'Content-Type: application/json' "${AUTH[@]}" \
+  -d '{"query":"{ getInvoices { reference billingEmail } }"}')
+
+echo "$GQL_MASKED" | grep -q '"errors"' \
+  && fail "the GraphQL masking query returned errors: $GQL_MASKED"
+
+# The control. Without it, "the address is absent" is satisfied by a query that returned nothing,
+# by a field that does not exist, and by an entity that was never written.
+echo "$GQL_MASKED" | grep -q "GQL-MASK" \
+  || fail "GraphQL returned no invoice, so the masking assertion below proves nothing: $GQL_MASKED"
+
+echo "$GQL_MASKED" | grep -q "payer@example.com" \
+  && fail "GraphQL returned a MaskEmail property in the clear -- the protection findings 7 and 8 added is gone: $GQL_MASKED"
+
+# Masked, not merely missing. An empty or absent field would satisfy the assertion above while
+# meaning the resolver dropped the property rather than protected it.
+echo "$GQL_MASKED" | grep -q "example.com" \
+  || fail "GraphQL returned neither the address nor its masked form, so the field was dropped rather than masked: $GQL_MASKED"
+pass "GraphQL returned the masked form, with the domain preserved"
 
 # ── The autonomous testing engine, run against this application ─────────────
 #
