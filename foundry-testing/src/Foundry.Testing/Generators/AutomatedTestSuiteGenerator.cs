@@ -31,6 +31,18 @@ public static class AutomatedTestSuiteGenerator
         // comes from here, and the two cannot drift.
         files["GeneratedSuites.csproj"] = GenerateProjectFile();
 
+        // xUnit parallelises test classes by default. Against a live application that means dozens
+        // of concurrent callers, which trips any rate limiter worth having -- a 429 then fails an
+        // access-control assertion for a reason that has nothing to do with access control. A
+        // conformance suite should not have to be defended against by the system it is checking.
+        files["xunit.runner.json"] = """
+{
+  "$schema": "https://xunit.net/schema/current/xunit.runner.schema.json",
+  "parallelizeAssembly": false,
+  "parallelizeTestCollections": false
+}
+""";
+
         foreach (var entity in schema.Entities)
         {
             var name = entity.Name;
@@ -110,6 +122,10 @@ public static class AutomatedTestSuiteGenerator
     <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
     <NoWarn>$(NoWarn);CS1591;CS8618</NoWarn>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- Without this the runner never reads it and the suite parallelises anyway. -->
+    <None Update="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
@@ -419,9 +435,7 @@ public class {name}RestApiTests
         using var owner = FoundryTestEnvironment.Authenticated();
         var created = await CreateRowAsync(owner);
 
-        var listed = await ReadIdsAsync(owner);
-
-        listed.Should().Contain(created,
+        (await CanReadByIdAsync(owner, created)).Should().BeTrue(
             ""the owner must be able to read back the row they created, or every denial ""
             + ""assertion in this suite passes for the wrong reason"");
     }}
@@ -436,11 +450,17 @@ public class {name}RestApiTests
         var created = await CreateRowAsync(owner);
 
         using var other = FoundryTestEnvironment.AsOtherUser();
-        var listed = await ReadIdsAsync(other);
 
-        listed.Should().NotContain(created,
+        // Both read paths, because they are not the same code. The list route filters with an
+        // expression and the by-id route with a FilterDefinition, and the two have already
+        // diverged once: a tenant clause present on one and missing on the other.
+        (await ReadIdsAsync(other)).Should().NotContain(created,
             ""'{entity.Name}' declares ownerScoped with owner key '{ownerKey}', so a caller who ""
             + ""does not own this row must not see it in the collection"");
+
+        (await CanReadByIdAsync(other, created)).Should().BeFalse(
+            ""'{entity.Name}' declares ownerScoped, so a non-owner must not reach this row by id ""
+            + ""either"");
     }}
 ");
 
@@ -458,9 +478,8 @@ public class {name}RestApiTests
         var created = await CreateRowAsync(owner);
 
         using var exempt = FoundryTestEnvironment.AsExemptRole();
-        var listed = await ReadIdsAsync(exempt);
 
-        listed.Should().Contain(created,
+        (await CanReadByIdAsync(exempt, created)).Should().BeTrue(
             ""'{entity.Name}' declares ownerExemptRoles [{roles}], so a caller holding one must ""
             + ""see rows they do not own"");
     }}
@@ -483,9 +502,8 @@ public class {name}RestApiTests
         var created = await CreateRowAsync(owner);
 
         using var readExempt = FoundryTestEnvironment.AsReadExemptRole();
-        var listed = await ReadIdsAsync(readExempt);
 
-        listed.Should().Contain(created,
+        (await CanReadByIdAsync(readExempt, created)).Should().BeTrue(
             ""'{entity.Name}' declares ownerReadExemptRoles [{readRoles}], so a caller holding ""
             + ""one must see rows they do not own when reading"");
     }}
@@ -588,7 +606,7 @@ public class {name}RestApiTests
 
         var listed = await ReadIdsAsync(owner);
 
-        listed.Should().Contain(created,
+        (await CanReadByIdAsync(owner, created)).Should().BeTrue(
             ""the tenant that created this row must be able to read it back, or the denial ""
             + ""assertion below proves nothing"");
     }}
@@ -602,11 +620,14 @@ public class {name}RestApiTests
         var created = await CreateRowAsync(owner);
 
         using var other = FoundryTestEnvironment.AsOtherTenant();
-        var listed = await ReadIdsAsync(other);
 
-        listed.Should().NotContain(created,
+        (await ReadIdsAsync(other)).Should().NotContain(created,
             ""'{entity.Name}' declares multiTenant, so a caller in another tenant must not see ""
             + ""this row in the collection"");
+
+        (await CanReadByIdAsync(other, created)).Should().BeFalse(
+            ""'{entity.Name}' declares multiTenant, so a caller in another tenant must not reach ""
+            + ""this row by id either"");
     }}
 ";
 
@@ -650,6 +671,32 @@ public class {name}RestApiTests
             .ToList();
     }}
 
+    /// <summary>Whether this caller can reach one row by its id.</summary>
+    /// <remarks>
+    /// Presence is asserted here rather than by searching the list, because the list route returns
+    /// one page. Against an application with real data the row can be on a later page, and the
+    /// positive control would then fail for a reason that has nothing to do with access control --
+    /// the worst kind of failure, since it teaches whoever sees it to distrust the suite.
+    ///
+    /// Denial is still asserted on both routes. They are not the same code: the list filters with
+    /// an expression and this one with a FilterDefinition, and the two have already diverged once
+    /// over a missing tenant clause.
+    /// </remarks>
+    private static async Task<bool> CanReadByIdAsync(HttpClient client, string id)
+    {{
+        var response = await client.GetAsync($""{route}/{{id}}"");
+
+        // Anything other than these two means the question was not answered -- a 500, a 429 from a
+        // rate limiter, an auth failure -- and reporting that as a refusal would turn an unhealthy
+        // system into a passing access-control assertion.
+        response.StatusCode.Should().BeOneOf(
+            new[] {{ HttpStatusCode.OK, HttpStatusCode.NotFound }},
+            $""a read by id must answer 200 or 404; {{response.StatusCode}} says the system could ""
+            + ""not answer, which is not the same as refusing"");
+
+        return response.StatusCode == HttpStatusCode.OK;
+    }}
+
     /// <summary>Creates a row carrying a known value in one property.</summary>
     /// <remarks>
     /// The sample payload alone cannot serve the masking assertions: a value has to be put in
@@ -691,11 +738,25 @@ public class {name}RestApiTests
     }}
 ";
 
+    /// <summary>The payload a sample write sends.</summary>
+    /// <remarks>
+    /// Required properties, and also any property whose declared constraints make its default
+    /// invalid.
+    ///
+    /// It used to send required properties alone, which is not the same thing. A property carrying
+    /// <c>Range(1, 10)</c> and no <c>Required</c> was omitted, arrived as the default 0, and the
+    /// application refused the write with "must be between 1 and 10" -- correctly. Against
+    /// Resourcify that lost eleven of twenty-four entities, so the tenancy and ownership
+    /// assertions for those entities never ran at all. The suite was not finding a defect; it was
+    /// sending a payload the schema had already said was invalid.
+    ///
+    /// The cap of six was removed with it. It saved nothing and silently truncated the payload of
+    /// any entity with more than six required properties, which fails in exactly the same way.
+    /// </remarks>
     private static string SamplePayload(Entity entity)
     {
         var assignments = (entity.Properties ?? new List<Property>())
-            .Where(p => !p.IsKey && p.Attributes.Contains("Required"))
-            .Take(6)
+            .Where(p => !p.IsKey && (p.Attributes.Contains("Required") || NeedsAValueToBeValid(p)))
             .Select(p => $"{CodeGen.Ident(p.Name, "Property")} = {SampleValueFor(p)}")
             .ToList();
 
@@ -704,17 +765,100 @@ public class {name}RestApiTests
             : "new { " + string.Join(", ", assignments) + " }";
     }
 
+    /// <summary>A per-row unique string that still fits what the property declares.</summary>
+    /// <remarks>
+    /// Uniqueness and length pull against each other, and the first version of this ignored the
+    /// second: appending a full 32-character GUID to "auto-code-" produced 42 characters for a
+    /// property declaring <c>MaxLength(24)</c>, and the application refused the write. Trading a
+    /// duplicate-key failure for a max-length failure is not progress.
+    ///
+    /// Eight hex characters are enough to keep a few hundred rows in one test run apart, and the
+    /// prefix is trimmed so the whole value fits the declared bound.
+    /// </remarks>
+    private static string UniqueString(Property property, string name, string suffix)
+    {
+        const int UniquePart = 9;   // one separator plus eight hex characters
+
+        var max = MaxLength(property);
+        var prefix = $"auto-{name}";
+
+        if (max is int limit)
+        {
+            var room = limit - UniquePart - suffix.Length;
+
+            // Nothing sensible fits: emit the unique part alone, trimmed to the bound. A value the
+            // application refuses is worse than an unreadable one.
+            if (room < 1) return $"$\"{{System.Guid.NewGuid().ToString(\"N\")[..System.Math.Max(1, {limit - suffix.Length})]}}{suffix}\"";
+
+            if (prefix.Length > room) prefix = prefix[..room];
+        }
+
+        return $"$\"{prefix}-{{System.Guid.NewGuid().ToString(\"N\")[..8]}}{suffix}\"";
+    }
+
+    /// <summary>The bound of a <c>MaxLength(n)</c> attribute, if the property declares one.</summary>
+    private static int? MaxLength(Property property)
+    {
+        var attribute = property.Attributes.FirstOrDefault(
+            a => a.StartsWith("MaxLength(", StringComparison.Ordinal));
+        if (attribute is null) return null;
+
+        var inside = attribute["MaxLength(".Length..].TrimEnd(')').Trim();
+        return int.TryParse(inside, System.Globalization.CultureInfo.InvariantCulture, out var max) ? max : null;
+    }
+
+    /// <summary>Whether leaving this property out would produce a value its own schema rejects.</summary>
+    private static bool NeedsAValueToBeValid(Property property)
+        => RangeMinimum(property) is > 0;
+
+    /// <summary>The lower bound of a <c>Range(min, max)</c> attribute, if the property declares one.</summary>
+    private static double? RangeMinimum(Property property)
+    {
+        var range = property.Attributes.FirstOrDefault(a => a.StartsWith("Range(", StringComparison.Ordinal));
+        if (range is null) return null;
+
+        var inside = range[6..].TrimEnd(')');
+        var first = inside.Split(',')[0].Trim();
+
+        return double.TryParse(first, System.Globalization.CultureInfo.InvariantCulture, out var min)
+            ? min
+            : null;
+    }
+
+    /// <summary>A value for one property in a sample payload.</summary>
+    /// <remarks>
+    /// String values are made unique per row at run time rather than being constants.
+    ///
+    /// They were constants, and against a real application that meant the second row of any entity
+    /// with a unique index collided: `E11000 duplicate key ... dup key: { name: "auto-name" }`.
+    /// Every access-control assertion creates at least one row and several create more, so half
+    /// the suite failed on a write that the schema had every right to refuse. It looked like a
+    /// framework defect and was a defect in the payload.
+    ///
+    /// A property whose name suggests an address keeps a valid address shape, since a uniqueness
+    /// suffix that breaks format validation only trades one failed write for another.
+    /// </remarks>
     private static string SampleValueFor(Property property)
     {
         if (property.IsEnum) return "\"\"";
 
+        var name = property.Name.ToLowerInvariant();
+
+        // Inside the declared range, when there is one. A constant 1 is refused by Range(5, 10)
+        // just as surely as the default 0 is refused by Range(1, 10).
+        var min = RangeMinimum(property);
+
         return property.Type.ToLowerInvariant() switch
         {
-            "int" or "long" => "1",
-            "decimal" or "double" or "float" => "1.0",
+            "int" or "long" => min is > 1 ? ((long)min).ToString(System.Globalization.CultureInfo.InvariantCulture) : "1",
+            "decimal" or "double" or "float" => min is > 1
+                ? min.Value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)
+                : "1.0",
             "bool" => "true",
             "datetime" => "System.DateTime.UtcNow",
-            _ => $"\"auto-{property.Name.ToLowerInvariant()}\""
+            _ when name.Contains("email", StringComparison.Ordinal)
+                => UniqueString(property, name, suffix: "@example.com"),
+            _ => UniqueString(property, name, suffix: "")
         };
     }
 
