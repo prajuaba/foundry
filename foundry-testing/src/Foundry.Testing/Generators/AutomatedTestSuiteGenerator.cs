@@ -29,6 +29,7 @@ public static class AutomatedTestSuiteGenerator
         // how they sat for as long as they did. The compile gate carried its own private copy of
         // this csproj, so it was checking a project no user of the CLI ever got; that copy now
         // comes from here, and the two cannot drift.
+        files["FoundrySeed.cs"] = GenerateSeedRegistry(schema);
         files["GeneratedSuites.csproj"] = GenerateProjectFile();
 
         // xUnit parallelises test classes by default. Against a live application that means dozens
@@ -108,6 +109,275 @@ public static class AutomatedTestSuiteGenerator
     /// every generated endpoint calls <c>RequireAuthorization()</c>. So the suites asserted 200 on
     /// requests that can only answer 401, and a healthy application failed every one of them.
     /// </remarks>
+    /// <summary>The entity a foreign-key property points at, or null when nothing matches.</summary>
+    /// <remarks>
+    /// By naming convention, because the IR has no way to say it. A property declares
+    /// <c>ObjectId</c> and a name; that a referenced row must <em>exist</em> lives in a hand-written
+    /// validator the schema cannot see. Until the IR can express a reference this is inference, so
+    /// it is deliberately conservative: it resolves a name or gives up, and never guesses at a
+    /// second-best entity.
+    ///
+    /// Longest suffix first, so <c>ResourceRequestId</c> resolves to ResourceRequest rather than to
+    /// Resource. Failing that, the last PascalCase word, which is what carries
+    /// <c>PredecessorPhaseId</c> to ProjectPhase -- there is no Phase entity, and the qualifier is
+    /// about the role the reference plays rather than about its type.
+    /// </remarks>
+    private static string? ReferencedEntity(string propertyName, IReadOnlyList<string> entityNames)
+    {
+        if (!propertyName.EndsWith("Id", StringComparison.Ordinal)) return null;
+
+        var stem = propertyName[..^2];
+        if (stem.Length == 0) return null;
+
+        var byLength = entityNames.OrderByDescending(n => n.Length).ToList();
+
+        var suffix = byLength.FirstOrDefault(n => stem.EndsWith(n, StringComparison.Ordinal));
+        if (suffix is not null) return suffix;
+
+        var words = System.Text.RegularExpressions.Regex.Matches(stem, "[A-Z][a-z0-9]*")
+            .Select(m => m.Value)
+            .ToList();
+        if (words.Count == 0) return null;
+
+        var last = words[^1];
+        return byLength.FirstOrDefault(n => n.EndsWith(last, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Foreign-key properties on an entity, paired with what they point at and with which row of it.
+    /// </summary>
+    /// <remarks>
+    /// The variant is the count of earlier references to the same entity, and it exists because one
+    /// seeded row per entity is not always enough. TaskDependency references ProjectPhase twice, as
+    /// predecessor and successor, and pointing both at the same row is refused: "A phase cannot
+    /// depend on itself". The second reference therefore asks for a second row.
+    ///
+    /// Distinct rows are used wherever an entity references the same type more than once, not only
+    /// where a validator is known to object. Two references that may legitimately be equal lose
+    /// nothing by being different; two that must differ fail every time if they are not.
+    /// </remarks>
+    private static List<(string Property, string Entity, int Variant)> References(
+        Entity entity, IReadOnlyList<string> entityNames)
+    {
+        var seen = new Dictionary<string, int>(StringComparer.Ordinal);
+        var references = new List<(string, string, int)>();
+
+        foreach (var property in (entity.Properties ?? new List<Property>())
+                     .Where(p => !p.IsKey && string.Equals(p.Type, "ObjectId", StringComparison.OrdinalIgnoreCase)))
+        {
+            var target = ReferencedEntity(property.Name, entityNames);
+            if (target is null) continue;
+
+            seen.TryGetValue(target, out var variant);
+            seen[target] = variant + 1;
+            references.Add((property.Name, target, variant));
+        }
+
+        return references;
+    }
+
+    /// <summary>
+    /// Emits the shared seeder: one row per entity, created on demand and reused.
+    /// </summary>
+    /// <remarks>
+    /// Without it, every foreign key went to the API as the default ObjectId and the application
+    /// refused the write -- correctly. Against Resourcify that lost seven of twenty-four entities,
+    /// so their tenancy and ownership assertions never ran at all while the coverage report
+    /// counted them as asserted.
+    ///
+    /// Rows are created depth-first: seeding a Project seeds the BusinessUnit it references first.
+    /// A reference already being resolved higher up the stack is left unset rather than recursed
+    /// into, which covers both a self-reference like <c>ParentBusinessUnitId</c> and any cycle
+    /// between two entities. An unset optional reference is a row the application accepts; an
+    /// infinite recursion is not.
+    ///
+    /// One row per entity for the whole run, which is the point: these exist so that the row under
+    /// test can be created, and a fresh Project for every assertion would multiply the writes
+    /// without changing what any of them prove.
+    /// </remarks>
+    private static string GenerateSeedRegistry(SchemaModel schema)
+    {
+        var ns = schema.Namespace;
+        var entities = (schema.Entities ?? new List<Entity>())
+            .Where(e => (e.ApiEnabledMethods ?? new List<string>()).Contains("POST"))
+            .ToList();
+        var names = (schema.Entities ?? new List<Entity>()).Select(e => e.Name).ToList();
+
+        var cases = new StringBuilder();
+        var creators = new StringBuilder();
+
+        foreach (var entity in entities)
+        {
+            cases.Append($@"
+            ""{entity.Name}"" => await Create{entity.Name}Async(client),");
+
+            var route = ApiManifestGenerator.RouteFor(entity.Name);
+            var refs = References(entity, names);
+            var seeding = new StringBuilder();
+
+            foreach (var (property, target, variant) in refs)
+            {
+                seeding.Append($@"
+        var {CodeGen.Ident(property, "Local")} = await ResolveAsync(client, ""{target}"", {variant});
+        if ({CodeGen.Ident(property, "Local")} is not null) payload[""{property}""] = {CodeGen.Ident(property, "Local")};");
+            }
+
+            creators.Append($@"
+    private static async Task<string?> Create{entity.Name}Async(HttpClient client)
+    {{
+        var payload = PayloadFor{entity.Name}();{seeding}
+
+        var response = await client.PostAsJsonAsync(""{route}"", payload);
+        if (!response.IsSuccessStatusCode) return null;
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        return body.TryGetProperty(""Id"", out var id) ? id.GetString() : null;
+    }}
+
+    internal static Dictionary<string, object?> PayloadFor{entity.Name}()
+        => new()
+        {{{PayloadEntries(entity)}
+        }};
+");
+        }
+
+        return $@"// Auto-generated seed registry.
+//
+// A foreign key that points at nothing is refused by the application, and rightly. This creates one
+// row per entity on demand so that the row under test can be created at all. It is scaffolding for
+// the assertions, not an assertion itself.
+using System;
+using System.Collections.Generic;
+using System.Net.Http;
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace {CodeGen.Ns(ns)}.Tests;
+
+public static class FoundrySeed
+{{
+    private static readonly Dictionary<string, string> Created = new(StringComparer.Ordinal);
+    private static readonly HashSet<string> Resolving = new(StringComparer.Ordinal);
+    private static readonly SemaphoreSlim Gate = new(1, 1);
+
+    /// <summary>The id of a row for this entity, creating one the first time it is asked for.</summary>
+    /// <remarks>
+    /// The variant selects which row. Most references want the same one, and a few must not: an
+    /// entity that references the same type twice -- a predecessor and a successor phase -- is
+    /// refused if both point at the same row.
+    /// </remarks>
+    public static async Task<string?> IdForAsync(HttpClient client, string entity, int variant = 0)
+    {{
+        await Gate.WaitAsync();
+        try {{ return await ResolveAsync(client, entity, variant); }}
+        finally {{ Gate.Release(); }}
+    }}
+
+    /// <summary>A payload for this entity with its references seeded.</summary>
+    public static async Task<Dictionary<string, object?>> PayloadForAsync(HttpClient client, string entity)
+    {{
+        await Gate.WaitAsync();
+        try {{ return await BuildPayloadAsync(client, entity); }}
+        finally {{ Gate.Release(); }}
+    }}
+
+    private static async Task<string?> ResolveAsync(HttpClient client, string entity, int variant = 0)
+    {{
+        var key = variant == 0 ? entity : $""{{entity}}#{{variant}}"";
+        if (Created.TryGetValue(key, out var existing)) return existing;
+
+        // Already being resolved further up the stack. Leaving the reference unset is what breaks
+        // a self-reference such as ParentBusinessUnitId, and any cycle between two entities. Keyed
+        // on the entity rather than the variant, since a second row of a type already being created
+        // would recurse the same way.
+        if (!Resolving.Add(entity)) return null;
+
+        try
+        {{
+            var id = entity switch
+            {{{cases}
+                _ => null
+            }};
+
+            if (id is not null) Created[key] = id;
+            return id;
+        }}
+        finally
+        {{
+            Resolving.Remove(entity);
+        }}
+    }}
+{creators}
+    private static async Task<Dictionary<string, object?>> BuildPayloadAsync(HttpClient client, string entity)
+    {{
+        var payload = PayloadFor(entity);
+
+        foreach (var (property, target, variant) in ReferencesOf(entity))
+        {{
+            var id = await ResolveAsync(client, target, variant);
+            if (id is not null) payload[property] = id;
+        }}
+
+        return payload;
+    }}
+
+    private static Dictionary<string, object?> PayloadFor(string entity)
+        => entity switch
+        {{{PayloadCases(entities)}
+            _ => new Dictionary<string, object?>()
+        }};
+
+    private static IReadOnlyList<(string Property, string Entity, int Variant)> ReferencesOf(string entity)
+        => entity switch
+        {{{ReferenceCases(entities, names)}
+            _ => Array.Empty<(string, string, int)>()
+        }};
+}}
+";
+    }
+
+    private static string PayloadEntries(Entity entity)
+    {
+        var entries = new StringBuilder();
+
+        foreach (var property in (entity.Properties ?? new List<Property>())
+                     .Where(p => !p.IsKey && (p.Attributes.Contains("Required") || NeedsAValueToBeValid(p))))
+        {
+            entries.Append($@"
+            [""{property.Name}""] = {SampleValueFor(property)},");
+        }
+
+        return entries.ToString();
+    }
+
+    private static string PayloadCases(IReadOnlyList<Entity> entities)
+    {
+        var cases = new StringBuilder();
+        foreach (var entity in entities)
+        {
+            cases.Append($@"
+            ""{entity.Name}"" => PayloadFor{entity.Name}(),");
+        }
+        return cases.ToString();
+    }
+
+    private static string ReferenceCases(IReadOnlyList<Entity> entities, IReadOnlyList<string> names)
+    {
+        var cases = new StringBuilder();
+        foreach (var entity in entities)
+        {
+            var refs = References(entity, names);
+            if (refs.Count == 0) continue;
+
+            var pairs = string.Join(", ", refs.Select(r => $@"(""{r.Property}"", ""{r.Entity}"", {r.Variant})"));
+            cases.Append($@"
+            ""{entity.Name}"" => new (string, string, int)[] {{ {pairs} }},");
+        }
+        return cases.ToString();
+    }
+
     /// <summary>The project file for the emitted suites, with the packages they use and no others.</summary>
     /// <remarks>
     /// If a suite ever needs something beyond these, whoever runs <c>foundry test</c> should be
@@ -333,8 +603,10 @@ public static class FoundryTestEnvironment
     [Fact]
     public async Task Create_ValidPayload_IsAccepted()
     {{
+        // A valid payload has to include the references the application checks, or this asserts
+        // that an invalid payload is accepted, and fails against a correct system.
         using var client = FoundryTestEnvironment.Authenticated();
-        var payload = {SamplePayload(entity)};
+        var payload = await FoundrySeed.PayloadForAsync(client, ""{entity.Name}"");
 
         var response = await client.PostAsJsonAsync(""{route}"", payload);
 
@@ -531,12 +803,35 @@ public class {name}RestApiTests
             .ToList();
 
     /// <summary>
-    /// A value distinctive enough that finding it in a response means the mask did not run.
+    /// A value distinctive enough that finding it in a response means the mask did not run, and
+    /// valid enough that the application accepts it in the first place.
     /// </summary>
-    private static string MaskSentinel(string kind)
-        => kind.Contains("Email", StringComparison.Ordinal)
-            ? "unmasked-sentinel@example.com"
-            : "SENTINEL-0123456789";
+    /// <remarks>
+    /// Both halves matter. A sentinel the application refuses never reaches storage, so the
+    /// assertion that it does not come back is true for the wrong reason -- and it fails as a 400
+    /// on the write rather than saying anything about masking. `SENTINEL-0123456789` in a property
+    /// declaring MaskPhone was refused with "The PhoneNumber field is not a valid phone number",
+    /// which is the application working correctly and the test being wrong.
+    ///
+    /// The shape follows the mask, since a mask says what kind of value the property holds.
+    /// </remarks>
+    private static string MaskSentinel(string kind, string propertyName)
+    {
+        var name = propertyName.ToLowerInvariant();
+
+        if (kind.Contains("Email", StringComparison.Ordinal) || name.Contains("email", StringComparison.Ordinal))
+        {
+            return "unmasked-sentinel@example.com";
+        }
+
+        // A number that is recognisably a number, and recognisable in a response.
+        if (kind.Contains("Phone", StringComparison.Ordinal) || name.Contains("phone", StringComparison.Ordinal))
+        {
+            return "+15550137019";
+        }
+
+        return "SENTINEL-0123456789";
+    }
 
     /// <summary>
     /// Emits the masking conformance assertions for each property declaring a mask.
@@ -557,7 +852,7 @@ public class {name}RestApiTests
 
         foreach (var (name, kind) in masked)
         {
-            var sentinel = MaskSentinel(kind);
+            var sentinel = MaskSentinel(kind, name);
             tests.Append($@"
     [Fact]
     public async Task Protection_{name}_IsNotReturnedInTheClear()
@@ -642,7 +937,10 @@ public class {name}RestApiTests
     private static string GenerateAccessControlHelpers(Entity entity, string route) => $@"
     private static async Task<string> CreateRowAsync(HttpClient client)
     {{
-        var payload = {SamplePayload(entity)};
+        // From the seeder, so the foreign keys point at rows that exist. Sent as literals, every
+        // reference was the default ObjectId and the application refused the write -- correctly,
+        // and before any access-control assertion had run.
+        var payload = await FoundrySeed.PayloadForAsync(client, ""{entity.Name}"");
         var response = await client.PostAsJsonAsync(""{route}"", payload);
 
         response.StatusCode.Should().BeOneOf(
@@ -706,13 +1004,8 @@ public class {name}RestApiTests
     /// </remarks>
     private static async Task<string> CreateRowWithAsync(HttpClient client, string property, string value)
     {{
-        var payload = new Dictionary<string, object?>(
-            JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
-                JsonSerializer.Serialize({SamplePayload(entity)}))!
-                .ToDictionary(kv => kv.Key, kv => (object?)kv.Value))
-        {{
-            [property] = value
-        }};
+        var payload = await FoundrySeed.PayloadForAsync(client, ""{entity.Name}"");
+        payload[property] = value;
 
         var response = await client.PostAsJsonAsync(""{route}"", payload);
 
@@ -955,7 +1248,7 @@ public class {name}GraphQLTests
 
         foreach (var (property, kind) in MaskedProperties(entity))
         {
-            var sentinel = MaskSentinel(kind);
+            var sentinel = MaskSentinel(kind, property);
             tests.Append($@"
 
     [Fact]
@@ -1005,7 +1298,8 @@ public class {name}GraphQLTests
     {{
         // Written over REST and read over GraphQL on purpose: the point is that the two egresses
         // answer consistently about the same row.
-        var response = await client.PostAsJsonAsync(""{route}"", {SamplePayload(entity)});
+        var payload = await FoundrySeed.PayloadForAsync(client, ""{name}"");
+        var response = await client.PostAsJsonAsync(""{route}"", payload);
         response.StatusCode.Should().BeOneOf(
             new[] {{ HttpStatusCode.OK, HttpStatusCode.Created }},
             ""the resolver assertions depend on this row existing"");
@@ -1016,9 +1310,7 @@ public class {name}GraphQLTests
 
     private static async Task<string> client_RowWithAsync(HttpClient client, string property, string value)
     {{
-        var payload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
-            JsonSerializer.Serialize({SamplePayload(entity)}))!
-            .ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
+        var payload = await FoundrySeed.PayloadForAsync(client, ""{name}"");
         payload[property] = value;
 
         var response = await client.PostAsJsonAsync(""{route}"", payload);

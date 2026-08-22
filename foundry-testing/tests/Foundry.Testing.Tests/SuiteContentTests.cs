@@ -220,10 +220,24 @@ public class SuiteContentTests
     {
         // It posted `new { Name = "AutoTest Customer" }` for every entity, so a POST to an entity
         // with required properties failed validation and the suite blamed the application.
+        //
+        // The payload now lives in the seed registry rather than inline in each suite, because a
+        // foreign key can only be filled by a row that was created first.
+        var seed = Generate(Schema())["FoundrySeed.cs"];
+
+        Assert.Contains("\"Email\"", seed);
+        Assert.DoesNotContain("AutoTest", seed);
+    }
+
+    [Fact]
+    public void TheSuitesTakeTheirPayloadFromTheSeederRatherThanALiteral()
+    {
+        // Every write in the suite goes through the seeder. A literal payload sends the default
+        // ObjectId for every reference, which the application refuses -- before any access-control
+        // assertion has run, so the entity is reported covered and is not.
         var suite = Generate(Schema())["CustomerRestApiTests.cs"];
 
-        Assert.Contains("Email =", suite);
-        Assert.DoesNotContain("AutoTest", suite);
+        Assert.Contains("FoundrySeed.PayloadForAsync", suite);
     }
 
     // ── Owner scoping ───────────────────────────────────────────────────────
