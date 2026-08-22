@@ -144,6 +144,31 @@ public static class AutomatedTestSuiteGenerator
     }
 
     /// <summary>
+    /// Reference properties the schema covers with a unique index.
+    /// </summary>
+    /// <remarks>
+    /// These have to differ between rows, and this is read from the IR rather than guessed: the
+    /// index is declared. TeamMembership is unique on (TeamId, ResourceId), VelocityRecord on
+    /// (TeamId, SprintId), TaskDependency on (PredecessorPhaseId, SuccessorPhaseId).
+    ///
+    /// One seeded row per entity meant every row of TeamMembership pointed at the same team and
+    /// the same resource, so the first write succeeded and every one after it collided. The suite
+    /// creates several rows per entity -- one per assertion -- so this failed everything except
+    /// whichever test happened to run first.
+    /// </remarks>
+    private static List<string> UniquelyIndexedReferences(Entity entity, IReadOnlyList<string> entityNames)
+    {
+        var referenced = References(entity, entityNames).Select(r => r.Property).ToHashSet(StringComparer.Ordinal);
+
+        return (entity.Indexes ?? new List<Foundry.Schema.Compiler.Index>())
+            .Where(i => i.Unique)
+            .SelectMany(i => i.Fields ?? new List<string>())
+            .Where(referenced.Contains)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
     /// Foreign-key properties on an entity, paired with what they point at and with which row of it.
     /// </summary>
     /// <remarks>
@@ -260,6 +285,7 @@ public static class FoundrySeed
 {{
     private static readonly Dictionary<string, string> Created = new(StringComparer.Ordinal);
     private static readonly HashSet<string> Resolving = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, int> Calls = new(StringComparer.Ordinal);
     private static readonly SemaphoreSlim Gate = new(1, 1);
 
     /// <summary>The id of a row for this entity, creating one the first time it is asked for.</summary>
@@ -314,9 +340,19 @@ public static class FoundrySeed
     {{
         var payload = PayloadFor(entity);
 
+        // A reference the schema covers with a unique index has to differ between rows, so it takes
+        // a fresh row each time this entity is asked for. Everything else reuses the seeded row:
+        // creating a new Project for every assertion would multiply writes without changing what
+        // any of them prove.
+        Calls.TryGetValue(entity, out var call);
+        Calls[entity] = call + 1;
+
+        var varying = MustVaryPerRow(entity);
+
         foreach (var (property, target, variant) in ReferencesOf(entity))
         {{
-            var id = await ResolveAsync(client, target, variant);
+            var wanted = varying.Contains(property) ? variant + (call * 8) : variant;
+            var id = await ResolveAsync(client, target, wanted);
             if (id is not null) payload[property] = id;
         }}
 
@@ -327,6 +363,12 @@ public static class FoundrySeed
         => entity switch
         {{{PayloadCases(entities)}
             _ => new Dictionary<string, object?>()
+        }};
+
+    private static IReadOnlyList<string> MustVaryPerRow(string entity)
+        => entity switch
+        {{{UniqueCases(entities, names)}
+            _ => Array.Empty<string>()
         }};
 
     private static IReadOnlyList<(string Property, string Entity, int Variant)> ReferencesOf(string entity)
@@ -359,6 +401,21 @@ public static class FoundrySeed
         {
             cases.Append($@"
             ""{entity.Name}"" => PayloadFor{entity.Name}(),");
+        }
+        return cases.ToString();
+    }
+
+    private static string UniqueCases(IReadOnlyList<Entity> entities, IReadOnlyList<string> names)
+    {
+        var cases = new StringBuilder();
+        foreach (var entity in entities)
+        {
+            var varying = UniquelyIndexedReferences(entity, names);
+            if (varying.Count == 0) continue;
+
+            var quoted = string.Join(", ", varying.Select(v => $@"""{v}"""));
+            cases.Append($@"
+            ""{entity.Name}"" => new[] {{ {quoted} }},");
         }
         return cases.ToString();
     }
@@ -1102,7 +1159,26 @@ public class {name}RestApiTests
 
     /// <summary>Whether leaving this property out would produce a value its own schema rejects.</summary>
     private static bool NeedsAValueToBeValid(Property property)
-        => RangeMinimum(property) is > 0;
+        => property.Attributes.Any(a => a.StartsWith("Range(", StringComparison.Ordinal))
+        || IsFlag(property);
+
+    /// <summary>
+    /// Whether the property is a boolean flag, which a seeded row must set rather than default.
+    /// </summary>
+    /// <remarks>
+    /// A bool omitted from a payload arrives as <c>false</c>, and for a flag that is rarely the
+    /// state anything else can use. Resourcify's seeded Resource was created with
+    /// <c>IsActive: false</c>, and every write referencing it was then refused -- "Resource
+    /// e-35bce2af is inactive" -- so TimesheetEntry and Allocation lost every access-control
+    /// assertion to a fixture that existed and could not be referenced.
+    ///
+    /// The IR does not say <c>IsActive</c> defaults to true; the property is a bare <c>bool</c> and
+    /// the requirement lives in a validator, which is the same shape as referential integrity. So
+    /// this is inference, and it is bounded: a seeded row exists to be referenced, and it should be
+    /// in the state that allows that.
+    /// </remarks>
+    private static bool IsFlag(Property property)
+        => string.Equals(property.Type, "bool", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The lower bound of a <c>Range(min, max)</c> attribute, if the property declares one.</summary>
     private static double? RangeMinimum(Property property)
@@ -1137,8 +1213,13 @@ public class {name}RestApiTests
 
         var name = property.Name.ToLowerInvariant();
 
-        // Inside the declared range, when there is one. A constant 1 is refused by Range(5, 10)
-        // just as surely as the default 0 is refused by Range(1, 10).
+        // Inside the declared range, when there is one, and never at its floor.
+        //
+        // A property declaring Range(0, 168) was omitted entirely, because 0 satisfies the range
+        // and omitting it yields 0. Resourcify then refused the write: "HoursLogged must be > 0 and
+        // <= 24, got 0". The declared range and the hand-written rule disagree -- the schema says
+        // 0 to 168 and the validator says above 0 to 24 -- and a payload that sits at the floor of
+        // the range finds every such disagreement. One inside it does not.
         var min = RangeMinimum(property);
 
         return property.Type.ToLowerInvariant() switch
