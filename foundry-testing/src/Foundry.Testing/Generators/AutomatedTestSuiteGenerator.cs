@@ -137,6 +137,52 @@ public static class FoundryTestEnvironment
         client.DefaultRequestHeaders.Add(""X-Tenant-ID"", Tenant);
         return client;
     }}
+
+    // ---------------------------------------------------------------------------------
+    // Additional identities.
+    //
+    // Owner scoping cannot be asserted with one identity. A suite holding a single token
+    // can observe that a caller sees rows; it cannot observe that a caller is denied
+    // someone else's, which is the entire property. Each accessor below throws with the
+    // variable name rather than skipping, for the same reason Authenticated() does: a
+    // conformance suite that quietly passes because it was not configured reports
+    // coverage it does not have.
+    // ---------------------------------------------------------------------------------
+
+    /// <summary>A second caller in the same tenant, holding no owner-exempt role.</summary>
+    public static HttpClient AsOtherUser() => Identified(
+        ""FOUNDRY_TEST_TOKEN_OTHER"",
+        Tenant,
+        ""a second caller in the same tenant who does not own the rows the primary caller creates"");
+
+    /// <summary>A caller holding one of the entity's declared owner-exempt roles.</summary>
+    public static HttpClient AsExemptRole() => Identified(
+        ""FOUNDRY_TEST_TOKEN_EXEMPT"",
+        Tenant,
+        ""a caller holding one of the ownerExemptRoles this schema declares"");
+
+    /// <summary>A caller in a different tenant.</summary>
+    public static HttpClient AsOtherTenant() => Identified(
+        ""FOUNDRY_TEST_TOKEN_OTHER_TENANT"",
+        Environment.GetEnvironmentVariable(""FOUNDRY_TEST_TENANT_OTHER"") ?? ""tenant-other"",
+        ""a caller belonging to a different tenant"");
+
+    private static HttpClient Identified(string variable, string tenant, string who)
+    {{
+        var token = Environment.GetEnvironmentVariable(variable);
+        if (string.IsNullOrWhiteSpace(token))
+        {{
+            throw new InvalidOperationException(
+                $""{{variable}} is not set. This suite asserts an access-control property that ""
+                + $""needs {{who}}, and cannot assert it with one identity. Set {{variable}} to a ""
+                + ""bearer token for that caller, or the property goes unverified."");
+        }}
+
+        var client = new HttpClient {{ BaseAddress = new Uri(BaseUrl) }};
+        client.DefaultRequestHeaders.Add(""X-Tenant-ID"", tenant);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(""Bearer"", token);
+        return client;
+    }}
 }}
 ";
 
@@ -177,9 +223,13 @@ public static class FoundryTestEnvironment
 
         if (methods.Contains("GET"))
         {
+            // Named for what it asserts. It used to be called GetAll_ReturnsTheCallersOwnRows,
+            // which claims owner scoping while checking a status code -- it passes identically
+            // whether the caller's rows are filtered or every row in the collection comes back.
+            // Owner scoping is asserted below, from the declaration, with a second identity.
             tests.Append($@"
     [Fact]
-    public async Task GetAll_ReturnsTheCallersOwnRows()
+    public async Task GetAll_IsReachableByAnAuthorisedCaller()
     {{
         using var client = FoundryTestEnvironment.Authenticated();
 
@@ -188,6 +238,14 @@ public static class FoundryTestEnvironment
         response.StatusCode.Should().Be(HttpStatusCode.OK);
     }}
 ");
+        }
+
+        // Owner scoping, emitted only where the schema declares it, and only where there is a
+        // write method to create a row to be denied. This is the first assertion in the suite
+        // that is derived from a security declaration rather than from the route existing.
+        if (entity.OwnerScoped && methods.Contains("POST") && methods.Contains("GET"))
+        {
+            tests.Append(GenerateOwnerScopingTests(entity, route));
         }
 
         if (methods.Contains("POST"))
@@ -225,8 +283,12 @@ public static class FoundryTestEnvironment
 
         return $@"// Auto-generated REST API Integration Tests for {name}
 // Route and methods both come from the schema: {string.Join(", ", methods)}
+using System.Collections.Generic;
+using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Xunit;
 using FluentAssertions;
@@ -245,6 +307,141 @@ public class {name}RestApiTests
     /// It used to post <c>new {{ Name = "AutoTest {entity}" }}</c> for every entity, so a POST to an
     /// entity with required properties failed validation and the suite blamed the application.
     /// </remarks>
+    /// <summary>
+    /// Emits the owner-scoping conformance assertions for an entity that declares
+    /// <c>ownerScoped</c>.
+    /// </summary>
+    /// <remarks>
+    /// Three assertions, and the order matters.
+    ///
+    /// The first is a positive control: the owner must be able to read back the row they just
+    /// created. Without it the denial test below passes for the wrong reason -- if the create
+    /// silently failed, or the list route returned nothing at all, "the other caller cannot see
+    /// it" is true and meaningless. That failure mode is not hypothetical here: a real-time probe
+    /// in this project reported "delivers nothing" for exactly this reason, and the claim had to
+    /// be retracted.
+    ///
+    /// The second is the property itself: a second caller in the same tenant must not see the
+    /// row. Same tenant deliberately, so that a passing result cannot be explained by tenant
+    /// isolation doing the work instead.
+    ///
+    /// The third runs only when the schema names owner-exempt roles, and asserts the exemption is
+    /// real. An entity whose exempt roles do nothing is as wrong as one whose owner filter does
+    /// nothing, and only this assertion can tell the two apart.
+    /// </remarks>
+    private static string GenerateOwnerScopingTests(Entity entity, string route)
+    {
+        var ownerKey = (entity.Properties ?? new List<Property>())
+            .FirstOrDefault(p => p.IsOwnerKey)?.Name;
+
+        // An entity cannot reach here without one -- FDY3013 rejects ownerScoped with no owner
+        // key -- but emitting a suite that silently drops the assertion would be worse than
+        // emitting nothing, so say so in the file instead.
+        if (string.IsNullOrWhiteSpace(ownerKey))
+        {
+            return $@"
+    // OWNERSHIP NOT VERIFIED for this entity.
+    // It declares ownerScoped, but no property is marked isOwnerKey, so there is nothing to
+    // scope by and no assertion could be written. FDY3013 should have rejected this pairing at
+    // compile time; if you are reading this comment in a generated file, it did not.
+";
+        }
+
+        var tests = new StringBuilder($@"
+    [Fact]
+    public async Task OwnerScoping_TheOwnerCanReadBackTheirOwnRow()
+    {{
+        // Positive control. Everything below asserts that somebody is refused, and every one of
+        // those assertions is vacuously true if creation or listing is broken.
+        using var owner = FoundryTestEnvironment.Authenticated();
+        var created = await CreateRowAsync(owner);
+
+        var listed = await ReadIdsAsync(owner);
+
+        listed.Should().Contain(created,
+            ""the owner must be able to read back the row they created, or every denial ""
+            + ""assertion in this suite passes for the wrong reason"");
+    }}
+
+    [Fact]
+    public async Task OwnerScoping_AnotherCallerInTheSameTenantIsDeniedTheRow()
+    {{
+        // The property under test. The second caller shares the tenant on purpose: if they were
+        // in a different one, tenant isolation could produce this result with owner scoping
+        // switched off entirely, and the assertion would prove nothing about ownership.
+        using var owner = FoundryTestEnvironment.Authenticated();
+        var created = await CreateRowAsync(owner);
+
+        using var other = FoundryTestEnvironment.AsOtherUser();
+        var listed = await ReadIdsAsync(other);
+
+        listed.Should().NotContain(created,
+            ""'{entity.Name}' declares ownerScoped with owner key '{ownerKey}', so a caller who ""
+            + ""does not own this row must not see it in the collection"");
+    }}
+");
+
+        if (entity.OwnerExemptRoles.Count > 0)
+        {
+            var roles = string.Join(", ", entity.OwnerExemptRoles);
+            tests.Append($@"
+    [Fact]
+    public async Task OwnerScoping_AnExemptRoleStillSeesTheRow()
+    {{
+        // The exemption is a declaration too, and an exemption that does not exempt is as wrong
+        // as a filter that does not filter. Only this assertion distinguishes correct scoping
+        // from a repository that returns nothing to anybody.
+        using var owner = FoundryTestEnvironment.Authenticated();
+        var created = await CreateRowAsync(owner);
+
+        using var exempt = FoundryTestEnvironment.AsExemptRole();
+        var listed = await ReadIdsAsync(exempt);
+
+        listed.Should().Contain(created,
+            ""'{entity.Name}' declares ownerExemptRoles [{roles}], so a caller holding one must ""
+            + ""see rows they do not own"");
+    }}
+");
+        }
+
+        // Helpers, emitted alongside rather than in the shared environment: the route and the
+        // payload shape are per-entity, and the id property name is the compiler's, not a guess.
+        tests.Append($@"
+    private static async Task<string> CreateRowAsync(HttpClient client)
+    {{
+        var payload = {SamplePayload(entity)};
+        var response = await client.PostAsJsonAsync(""{route}"", payload);
+
+        response.StatusCode.Should().BeOneOf(
+            new[] {{ HttpStatusCode.OK, HttpStatusCode.Created }},
+            ""the owner-scoping assertions all depend on this row existing"");
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        return body.GetProperty(""Id"").GetString()!;
+    }}
+
+    private static async Task<IReadOnlyList<string>> ReadIdsAsync(HttpClient client)
+    {{
+        var response = await client.GetAsync(""{route}"");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+
+        // The list route returns either a bare array or a paged envelope depending on the
+        // method the entity declares; read whichever arrived rather than assuming one.
+        var rows = body.ValueKind == JsonValueKind.Array
+            ? body
+            : body.TryGetProperty(""Items"", out var items) ? items : body.GetProperty(""Data"");
+
+        return rows.EnumerateArray()
+            .Select(row => row.GetProperty(""Id"").GetString()!)
+            .ToList();
+    }}
+");
+
+        return tests.ToString();
+    }
+
     private static string SamplePayload(Entity entity)
     {
         var assignments = (entity.Properties ?? new List<Property>())

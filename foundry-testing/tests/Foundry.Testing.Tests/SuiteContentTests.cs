@@ -35,6 +35,28 @@ public class SuiteContentTests
         ]
     };
 
+    private static SchemaModel OwnerScopedSchema(
+        string[]? exemptRoles = null, bool withOwnerKey = true, string[]? methods = null) => new()
+    {
+        Namespace = "Sales.Domain",
+        Entities =
+        [
+            new Entity
+            {
+                Name = "Customer",
+                OwnerScoped = true,
+                OwnerExemptRoles = [.. exemptRoles ?? Array.Empty<string>()],
+                ApiEnabledMethods = [.. methods ?? ["GET", "POST"]],
+                Properties =
+                [
+                    new Property { Name = "Id", Type = "ObjectId", IsKey = true },
+                    new Property { Name = "Email", Type = "string", Attributes = ["Required"] },
+                    new Property { Name = "OwnerId", Type = "string", IsOwnerKey = withOwnerKey }
+                ]
+            }
+        ]
+    };
+
     private static Dictionary<string, string> Generate(SchemaModel schema)
         => AutomatedTestSuiteGenerator.GenerateAllTestSuites(schema);
 
@@ -132,7 +154,12 @@ public class SuiteContentTests
     {
         var suite = Generate(Schema(methods: ["GET"]))["CustomerRestApiTests.cs"];
 
-        Assert.Contains("GetAll_ReturnsTheCallersOwnRows", suite);
+        Assert.Contains("GetAll_IsReachableByAnAuthorisedCaller", suite);
+
+        // Named for what it asserts. The old name, GetAll_ReturnsTheCallersOwnRows, claimed owner
+        // scoping while the body checked a status code -- it read identically whether rows were
+        // filtered to the caller or the whole collection came back.
+        Assert.DoesNotContain("GetAll_ReturnsTheCallersOwnRows", suite);
         Assert.DoesNotContain("Create_ValidPayload_IsAccepted", suite);
         Assert.DoesNotContain("Delete_", suite);
     }
@@ -155,5 +182,105 @@ public class SuiteContentTests
 
         Assert.Contains("Email =", suite);
         Assert.DoesNotContain("AutoTest", suite);
+    }
+
+    // ── Owner scoping ───────────────────────────────────────────────────────
+
+    [Fact]
+    public void AnOwnerScopedEntityGetsAssertionsThatNeedASecondIdentity()
+    {
+        // The whole point of the emission. Before this existed, the only ownership-flavoured thing
+        // in the suite was a test called GetAll_ReturnsTheCallersOwnRows that asserted a status
+        // code, which passes with owner scoping switched off.
+        var suite = Generate(OwnerScopedSchema())["CustomerRestApiTests.cs"];
+
+        Assert.Contains("OwnerScoping_AnotherCallerInTheSameTenantIsDeniedTheRow", suite);
+        Assert.Contains("FoundryTestEnvironment.AsOtherUser()", suite);
+        Assert.Contains("NotContain(created", suite);
+    }
+
+    [Fact]
+    public void TheDenialAssertionShipsWithItsPositiveControl()
+    {
+        // A denial assertion is vacuously true when creation or listing is broken: "the other
+        // caller cannot see it" holds when nobody can see anything. A real-time probe in this
+        // project claimed exactly that and had to be retracted. The control is not optional
+        // decoration, so it is asserted separately rather than assumed to travel with the denial.
+        var suite = Generate(OwnerScopedSchema())["CustomerRestApiTests.cs"];
+
+        Assert.Contains("OwnerScoping_TheOwnerCanReadBackTheirOwnRow", suite);
+        Assert.Contains("Contain(created", suite);
+    }
+
+    [Fact]
+    public void AnEntityThatDoesNotDeclareOwnerScopingGetsNoOwnershipAssertions()
+    {
+        // Emitting them anyway would assert a property the schema never claimed, and fail against
+        // a correct application -- the same defect as the REST and GraphQL suites that used to be
+        // written for every entity regardless of what it declared.
+        var suite = Generate(Schema())["CustomerRestApiTests.cs"];
+
+        Assert.DoesNotContain("OwnerScoping_", suite);
+        Assert.DoesNotContain("AsOtherUser", suite);
+    }
+
+    [Fact]
+    public void TheExemptRoleAssertionAppearsOnlyWhenRolesAreDeclared()
+    {
+        // An exemption that does not exempt is as wrong as a filter that does not filter, and this
+        // is the only assertion that can tell correct scoping from a repository returning nothing
+        // to anybody. It must not be emitted when the schema declares no exempt roles, because
+        // then there is no role to hold.
+        var without = Generate(OwnerScopedSchema())["CustomerRestApiTests.cs"];
+        Assert.DoesNotContain("OwnerScoping_AnExemptRoleStillSeesTheRow", without);
+
+        var with = Generate(OwnerScopedSchema(exemptRoles: ["Admin"]))["CustomerRestApiTests.cs"];
+        Assert.Contains("OwnerScoping_AnExemptRoleStillSeesTheRow", with);
+        Assert.Contains("ownerExemptRoles [Admin]", with);
+    }
+
+    [Fact]
+    public void OwnershipAssertionsAreSkippedWhenThereIsNoWriteMethodToCreateARowWith()
+    {
+        // Every ownership assertion begins by creating a row to be denied. With no POST there is
+        // nothing to create, and emitting them would produce a suite that fails against a correct
+        // read-only entity.
+        var suite = Generate(OwnerScopedSchema(methods: ["GET"]))["CustomerRestApiTests.cs"];
+
+        Assert.DoesNotContain("OwnerScoping_", suite);
+    }
+
+    [Fact]
+    public void OwnerScopedWithNoOwnerKeySaysSoInTheFileRatherThanEmittingNothing()
+    {
+        // FDY3013 should reject this combination at compile time. If it ever does not, the suite
+        // must not silently drop the assertion and read as though ownership were covered.
+        var suite = Generate(OwnerScopedSchema(withOwnerKey: false))["CustomerRestApiTests.cs"];
+
+        Assert.DoesNotContain("OwnerScoping_AnotherCallerInTheSameTenantIsDeniedTheRow", suite);
+        Assert.Contains("no property is marked isOwnerKey", suite);
+    }
+
+    [Fact]
+    public void TheDenialUsesTheSameTenantSoTenancyCannotExplainThePass()
+    {
+        // If the second caller were in another tenant, tenant isolation would produce a passing
+        // result with owner scoping switched off entirely, and the assertion would prove nothing
+        // about ownership. AsOtherUser stays on the primary tenant for exactly this reason.
+        var suite = Generate(OwnerScopedSchema())["CustomerRestApiTests.cs"];
+
+        Assert.Contains("AsOtherUser", suite);
+        Assert.DoesNotContain("AsOtherTenant", suite);
+    }
+
+    [Fact]
+    public void TheEnvironmentRefusesToRunUnconfiguredRatherThanPassingQuietly()
+    {
+        // A suite that skips when its second token is missing reports coverage it does not have.
+        var env = Generate(OwnerScopedSchema())["FoundryTestEnvironment.cs"];
+
+        Assert.Contains("FOUNDRY_TEST_TOKEN_OTHER", env);
+        Assert.Contains("FOUNDRY_TEST_TOKEN_EXEMPT", env);
+        Assert.Contains("throw new InvalidOperationException", env);
     }
 }
