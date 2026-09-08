@@ -30,7 +30,8 @@ public static class MongoDbConventions
             {
                 new CamelCaseElementNameConvention(),
                 new EnumRepresentationConvention(BsonType.String),
-                new IgnoreExtraElementsConvention(true)
+                new IgnoreExtraElementsConvention(true),
+                new UnspecifiedAsUtcDateTimeConvention()
             };
 
             ConventionRegistry.Register(
@@ -39,9 +40,38 @@ public static class MongoDbConventions
                 t => true);
 
             BsonSerializer.RegisterSerializer(new GuidSerializer(GuidRepresentation.Standard));
-            BsonSerializer.RegisterSerializer(new UnspecifiedAsUtcDateTimeSerializer());
 
             _registered = true;
+        }
+    }
+
+    /// <summary>
+    /// Applies <see cref="UnspecifiedAsUtcDateTimeSerializer"/> to every <see cref="DateTime"/> and
+    /// nullable <see cref="DateTime"/> member as its class map is built.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a member-map convention rather than a global
+    /// <c>BsonSerializer.RegisterSerializer(typeof(DateTime), ...)</c>. The registry creates and
+    /// caches a serializer for a type the first time one is asked for, and then refuses to have it
+    /// replaced -- "There is already a serializer registered for type DateTime". A global
+    /// registration therefore only succeeds if it happens before anything in the process has
+    /// serialized a date, which is not something a library can rely on: a host that builds several
+    /// providers, or a test assembly running classes in parallel, will sometimes lose the race and
+    /// throw out of DI setup. A convention runs while each class map is built and has no such
+    /// ordering constraint.
+    /// </remarks>
+    private sealed class UnspecifiedAsUtcDateTimeConvention : ConventionBase, IMemberMapConvention
+    {
+        public void Apply(BsonMemberMap memberMap)
+        {
+            if (memberMap.MemberType == typeof(DateTime))
+            {
+                memberMap.SetSerializer(new UnspecifiedAsUtcDateTimeSerializer());
+            }
+            else if (memberMap.MemberType == typeof(DateTime?))
+            {
+                memberMap.SetSerializer(new NullableSerializer<DateTime>(new UnspecifiedAsUtcDateTimeSerializer()));
+            }
         }
     }
 
