@@ -1026,6 +1026,10 @@ namespace Foundry.Schema.Compiler
 
         private static void ValidateCustomEndpoints(SchemaModel schema, HashSet<string> entityNames, DiagnosticBag bag)
         {
+            var dtoNames = new HashSet<string>((schema.Dtos ?? new List<DtoModel>()).Select(d => d.Name), StringComparer.Ordinal);
+            var responseTypeNames = new HashSet<string>(entityNames, StringComparer.Ordinal);
+            responseTypeNames.UnionWith(dtoNames);
+
             var endpoints = schema.CustomEndpoints ?? new List<CustomEndpoint>();
 
             for (var i = 0; i < endpoints.Count; i++)
@@ -1096,6 +1100,15 @@ namespace Foundry.Schema.Compiler
                         $"Endpoint '{ep.Route}' targets entity '{ep.TargetEntity}', which is not declared.",
                         $"{path}/targetEntity",
                         $"Name one of: {string.Join(", ", entityNames)}.");
+                }
+
+                if (!string.IsNullOrWhiteSpace(ep.ResponseType) && !responseTypeNames.Contains(ep.ResponseType))
+                {
+                    bag.Error(
+                        DiagnosticCatalog.EndpointUnknownResponseType,
+                        $"Endpoint '{ep.Route}' declares responseType '{ep.ResponseType}', which is not a declared entity or DTO.",
+                        $"{path}/responseType",
+                        $"Name one of: {string.Join(", ", responseTypeNames)}.");
                 }
 
                 foreach (var rule in ep.BusinessRules ?? new List<string>())

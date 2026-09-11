@@ -1246,12 +1246,33 @@ namespace {CodeGen.Ns(@namespace)};
         }
 
         /// <summary>
-        /// Computes the MediatR response type for a custom endpoint.
+        /// Generates the response type for a custom endpoint, honouring
+        /// CustomEndpoint.ResponseType when explicitly set (non-null/whitespace),
+        /// defaulting to TargetEntity otherwise. For non-GET endpoints, returns
+        /// an explicit ResponseType if set, or 'bool' if ResponseType is unset.
         /// </summary>
         private static string ResponseTypeFor(CustomEndpoint ep)
-            => ep.Method.Equals("GET", StringComparison.OrdinalIgnoreCase)
-                ? "System.Collections.Generic.IReadOnlyList<" + (string.IsNullOrEmpty(ep.TargetEntity) ? "object" : ep.TargetEntity) + ">"
-                : "bool";
+        {
+            string? explicitType = ep.ResponseType;
+            string effectiveType;
+
+            if (string.IsNullOrWhiteSpace(explicitType))
+            {
+                effectiveType = ep.TargetEntity ?? "";
+                if (string.IsNullOrEmpty(effectiveType))
+                    effectiveType = "object";
+            }
+            else
+            {
+                effectiveType = explicitType;
+            }
+
+            return ep.Method.Equals("GET", StringComparison.OrdinalIgnoreCase)
+                ? $"System.Collections.Generic.IReadOnlyList<{effectiveType}>"
+                : (!string.IsNullOrWhiteSpace(explicitType)
+                    ? explicitType
+                    : "bool");
+        }
 
         /// <summary>
         /// Emits the MediatR request record a custom endpoint's handler and rules are typed against.
@@ -1329,16 +1350,42 @@ public partial record {CodeGen.Ident(ep.RequestType, "Request type")} : IRequest
             var newDtoExpr = $"new {ep.TargetEntity}Dto";
             var newEntityExpr = $"new {ep.TargetEntity}";
 
+            // Hoist responseDiffersFromTarget to be used by both Query and Update branches
+            var responseDiffersFromTarget = !string.IsNullOrWhiteSpace(ep.ResponseType)
+                && !string.Equals(ep.ResponseType, ep.TargetEntity, StringComparison.Ordinal);
+
             string body = "";
             if (ep.OperationType.Equals("Query", StringComparison.OrdinalIgnoreCase))
             {
-                body = $@"        var items = await _repository.FindManyAsync(
+                if (responseDiffersFromTarget)
+                {
+                    // `items` is IReadOnlyList<{TargetEntity}> and the declared response is
+                    // IReadOnlyList<{ResponseType}>, so `return items;` is a guaranteed CS0029/CS0266.
+                    // Not projecting inline either: an entity or DTO with required properties compiles
+                    // those to `required` members, so an empty object initializer is a guaranteed
+                    // CS9035 -- the same hazard the Insert branch above avoids. This is a scaffold the
+                    // developer owns, so it states the work plainly and compiles as written.
+                    body = $@"        var items = await _repository.FindManyAsync(
+            x => {ComparisonFor(ep)},
+            ct: cancellationToken);
+
+        // TODO: project each {ep.TargetEntity} into a {ep.ResponseType}, for example:
+        //
+        //     return items.Select(x => new {ep.ResponseType} {{ /* map properties */ }}).ToList();
+
+        throw new NotImplementedException(
+            ""Project {ep.TargetEntity} into {ep.ResponseType}."");";
+                }
+                else
+                {
+                    body = $@"        var items = await _repository.FindManyAsync(
             x => {ComparisonFor(ep)},
             ct: cancellationToken);
 
         // Returning the entities directly. Project them into a DTO here if the API should not
         // expose the full entity shape — declare that DTO in the schema's ""dtos"" section.
         return items;";
+                }
             }
             else if (ep.OperationType.Equals("Update", StringComparison.OrdinalIgnoreCase))
             {
@@ -1359,7 +1406,9 @@ public partial record {CodeGen.Ident(ep.RequestType, "Request type")} : IRequest
         }};"
                     : "        // No assignments declared on this endpoint; set the properties to update here.";
 
-                body = $@"        var entity = await _repository.GetByIdAsync(request.{IdentifierPropertyFor(ep)});
+                if (!responseDiffersFromTarget)
+                {
+                    body = $@"        var entity = await _repository.GetByIdAsync(request.{IdentifierPropertyFor(ep)});
         if (entity == null)
         {{
             return false;
@@ -1370,6 +1419,28 @@ public partial record {CodeGen.Ident(ep.RequestType, "Request type")} : IRequest
 
         await _repository.UpdateAsync(entity);
         return true;";
+                }
+                else
+                {
+                    body = $@"        var entity = await _repository.GetByIdAsync(request.{IdentifierPropertyFor(ep)});
+        if (entity == null)
+        {{
+            // TODO: Decide what ""not found"" means for this endpoint returning {responseType}.
+            // The method's return type is {responseType}, so a boolean cannot be returned.
+            throw new System.Collections.Generic.KeyNotFoundException($""Entity {{typeof({ep.TargetEntity}).Name}} with ID '{{request.{IdentifierPropertyFor(ep)}}}' not found."");
+        }}
+
+        // Apply visual assignments
+{withBlock}
+
+        // TODO: Persist the updated entity ({ep.TargetEntity}) and project it into {ep.ResponseType}, for example:
+        //
+        //     await _repository.UpdateAsync(entity);
+        //     return new {ep.ResponseType} {{ /* map properties */ }};
+        //
+        throw new NotImplementedException(
+            ""Persist the updated {ep.TargetEntity} and project it into {ep.ResponseType}."");";
+                }
             }
             else if (ep.OperationType.Equals("Insert", StringComparison.OrdinalIgnoreCase))
             {
