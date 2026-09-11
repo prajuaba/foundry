@@ -392,6 +392,17 @@ namespace Foundry.Schema.Compiler
         public List<string>? BusinessRules { get; init; }
         /// <inheritdoc cref="Entity.Description"/>
         public string? Description { get; init; }
+
+        /// <summary>
+        /// The type this endpoint's response is shaped as.
+        /// </summary>
+        /// <remarks>
+        /// Defaults to <see cref="TargetEntity"/> when unset, so every existing schema regenerates
+        /// identically. A report is the case where the two diverge: it reads one entity but returns a
+        /// projection of it — a declared DTO, not the rows it read — and until this existed the DTO had
+        /// no way to be named as a response.
+        /// </remarks>
+        public string? ResponseType { get; init; }
     }
 
     public record AssignmentRule

@@ -411,7 +411,12 @@ public class ManifestConformanceTests
                     nameof(CustomEndpoint.Assignments),
                     nameof(CustomEndpoint.Roles),
                     nameof(CustomEndpoint.BusinessRules),
-                    nameof(CustomEndpoint.Description)
+                    nameof(CustomEndpoint.Description),
+                    // Not access-bearing: it shapes the generated handler's C# return type, the
+                    // same category as TargetEntity/OperationType/Filter*/Assignments above -- none
+                    // of which the manifest carries either. The runtime authorizes and routes a
+                    // custom endpoint from Route/Method/RequestType/Roles/BusinessRules alone.
+                    nameof(CustomEndpoint.ResponseType)
                 }
             },
 

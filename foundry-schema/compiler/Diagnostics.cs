@@ -228,6 +228,9 @@ namespace Foundry.Schema.Compiler
         /// </summary>
         public const string DuplicateTypeName = "FDY2014";
 
+        /// <summary>A custom endpoint's 'responseType' names neither a declared entity nor a declared DTO.</summary>
+        public const string EndpointUnknownResponseType = "FDY2015";
+
         // ---- FDY3xxx: configuration coherence ----
 
         /// <summary>A property is marked <c>isTenantKey</c> but the entity is not multi-tenant.</summary>
@@ -381,6 +384,7 @@ namespace Foundry.Schema.Compiler
             [WorkflowUnknownChoiceNode] = "A transition target must be a declared state or choice node.",
             [DuplicateTransitionTrigger] = "Transition 'trigger' names must be unique; duplicates generate colliding command types.",
             [DuplicateTypeName] = "An entity, enum and DTO all become C# types in one namespace and are written to one file per name, so their names must not collide. A collision silently discards one of them.",
+            [EndpointUnknownResponseType] = "A custom endpoint's 'responseType' must name a declared entity or DTO.",
             [TenantKeyWithoutMultiTenant] = "A property marked 'isTenantKey' requires the entity to set 'multiTenant': true.",
             [MultiTenantWithoutTenantKey] = "An entity with 'multiTenant': true must mark one property 'isTenantKey' or set 'tenantProperty'.",
             [TenantKeyMustBeNamedTenantId] = "The tenant key property must be named 'TenantId'. The data layer builds its tenant filter against the stored field by that name, so any other name compiles to an entity that does not satisfy IMultiTenant -- and, if it did, would filter on a field no document has.",
