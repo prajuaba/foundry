@@ -1,4 +1,5 @@
 using Foundry.Api.Endpoints;
+using Foundry.Core.Http;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Xunit;
@@ -81,5 +82,31 @@ public class CustomEndpointResultTests
         // `result == null` on a value type was the dead comparison that started this. Zero is a
         // legitimate answer -- a count of nothing -- not a missing record.
         Assert.IsNotType<NotFound>(CustomEndpointResult.From(value));
+    }
+
+    [Fact]
+    public void AFileResponseIsAFileDownload()
+    {
+        // If this regresses, file downloads stop producing real file results.
+        var bytes = System.Text.Encoding.UTF8.GetBytes("a,b\n1,2");
+        var fileResponse = new FoundryFileResponse { Content = bytes, FileName = "report.csv", MediaType = "text/csv" };
+        var result = CustomEndpointResult.From(fileResponse);
+
+        var fileResult = Assert.IsType<FileContentHttpResult>(result);
+        Assert.Equal("text/csv", fileResult.ContentType);
+        Assert.Equal("report.csv", fileResult.FileDownloadName);
+    }
+
+    [Fact]
+    public void AFileResponseIsNotSerializedAsJson()
+    {
+        // This test pins the branch ordering: if the file response check moved after JSON fallback,
+        // this would go red even if the first test still passed (a byte array could coincidentally
+        // satisfy weaker checks).
+        var bytes = System.Text.Encoding.UTF8.GetBytes("a,b\n1,2");
+        var fileResponse = new FoundryFileResponse { Content = bytes, FileName = "report.csv", MediaType = "text/csv" };
+        var result = CustomEndpointResult.From(fileResponse);
+
+        Assert.IsNotType<ContentHttpResult>(result);
     }
 }

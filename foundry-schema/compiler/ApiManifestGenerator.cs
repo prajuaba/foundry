@@ -81,14 +81,24 @@ namespace Foundry.Schema.Compiler
                 // manifest. The manifest is the only channel between the compiler and the runtime, so
                 // an absent role list reaches RequireAuthorization() without a role guard, and every
                 // custom endpoint is served to any authenticated caller regardless of the schema.
-                customEndpoints.Add(new JsonObject
+                var customEndpointJson = new JsonObject
                 {
                     ["Route"] = custom.Route,
                     ["Method"] = (custom.Method ?? "GET").ToUpperInvariant(),
                     ["RequestType"] = custom.RequestType ?? string.Empty,
                     ["Roles"] = ToArray(custom.Roles),
                     ["BusinessRules"] = ToArray(custom.BusinessRules)
-                });
+                };
+
+                // The key is added only when set, so an unset value produces a byte-identical manifest
+                // to before this field existed, keeping checked-in api-manifest.json files unchanged in
+                // consuming repos.
+                if (!string.IsNullOrWhiteSpace(custom.ResponseMediaType))
+                {
+                    customEndpointJson["ResponseMediaType"] = custom.ResponseMediaType;
+                }
+
+                customEndpoints.Add(customEndpointJson);
             }
 
             var workflows = new JsonArray();

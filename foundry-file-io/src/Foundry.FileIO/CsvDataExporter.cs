@@ -33,6 +33,12 @@ public sealed class CsvDataExporter<TIn>
         // cannot be forgotten, and so numeric and date columns are untouched by construction.
         csv.Context.TypeConverterCache.AddConverter<string>(new FormulaSafeStringConverter());
 
+        // Without this, CsvHelper has no converter for MongoDB.Bson's ObjectId, treats it as a
+        // complex object, and auto-maps its public members (Timestamp, CreationTime, ...) as separate
+        // columns in place of the id -- the id value itself never appears in the file, and a type
+        // with two ObjectId properties produces two identically-named pairs of columns.
+        csv.Context.TypeConverterCache.AddConverter<MongoDB.Bson.ObjectId>(new ObjectIdConverter());
+
         csv.WriteHeader<TIn>();
         await csv.NextRecordAsync();
 

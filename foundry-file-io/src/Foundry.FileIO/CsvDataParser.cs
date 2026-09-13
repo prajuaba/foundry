@@ -31,6 +31,11 @@ public sealed class CsvDataParser<TOut> : IDataParser<TOut>
         using var reader = new StreamReader(fileStream, leaveOpen: true);
         using var csv = new CsvReader(reader, _config);
 
+        // The exporter writes MongoDB.Bson.ObjectId as its 24-character hex string via
+        // ObjectIdConverter; without the matching converter here, CsvHelper has no way to turn that
+        // string back into an ObjectId and a round-trip of exported data fails to parse.
+        csv.Context.TypeConverterCache.AddConverter<MongoDB.Bson.ObjectId>(new ObjectIdConverter());
+
         if (_config.HasHeaderRecord)
         {
             // A completely empty upload has nothing to import. The result of ReadAsync was previously

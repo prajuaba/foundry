@@ -1111,6 +1111,24 @@ namespace Foundry.Schema.Compiler
                         $"Name one of: {string.Join(", ", responseTypeNames)}.");
                 }
 
+                if (!string.IsNullOrWhiteSpace(ep.ResponseMediaType) && !Vocabulary.ResponseMediaTypes.Contains(ep.ResponseMediaType))
+                {
+                    bag.Error(
+                        DiagnosticCatalog.EndpointUnsupportedResponseMediaType,
+                        $"Endpoint '{ep.Route}' declares an unsupported responseMediaType '{ep.ResponseMediaType}'.",
+                        $"{path}/responseMediaType",
+                        $"Name one of: {string.Join(", ", Vocabulary.ResponseMediaTypes)}.");
+                }
+
+                if (!string.IsNullOrWhiteSpace(ep.ResponseMediaType) && !string.Equals(ep.Method, "GET", StringComparison.OrdinalIgnoreCase))
+                {
+                    bag.Error(
+                        DiagnosticCatalog.EndpointUnsupportedResponseMediaType,
+                        $"Endpoint '{ep.Route}' declares a responseMediaType '{ep.ResponseMediaType}' but method '{ep.Method}' is not GET. A file download is a GET; a POST that returns a file is not supported.",
+                        $"{path}/responseMediaType",
+                        "Either remove 'responseMediaType' or change the method to 'GET'.");
+                }
+
                 foreach (var rule in ep.BusinessRules ?? new List<string>())
                     ValidateIdentifier(rule, $"{path}/businessRules", "Business rule name", bag);
             }

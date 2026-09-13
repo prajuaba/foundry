@@ -378,12 +378,6 @@ namespace Foundry.Schema.Compiler
         /// <summary>
         /// Comparison used against <see cref="FilterField"/>, e.g. <c>Equals</c>.
         /// </summary>
-        /// <remarks>
-        /// Another field Studio emitted into a property the compiler did not declare, so it was
-        /// dropped on load. The generated handler currently always emits an equality comparison;
-        /// honouring other operators is a generator change, but the value now at least survives
-        /// the round trip instead of vanishing.
-        /// </remarks>
         public string? FilterOperator { get; init; }
 
         public string? FilterSourceValue { get; init; }
@@ -403,6 +397,17 @@ namespace Foundry.Schema.Compiler
         /// no way to be named as a response.
         /// </remarks>
         public string? ResponseType { get; init; }
+
+        /// <summary>
+        /// The media type this endpoint's response uses.
+        /// </summary>
+        /// <remarks>
+        /// Unset means application/json, which is what every endpoint answered before this existed, so every
+        /// existing schema regenerates identically; and that a set value means the response is a file
+        /// download, whose bytes are produced by the handler because the endpoint (Foundry.Api) layer does
+        /// not reference Foundry.FileIO and has no file library of its own.
+        /// </remarks>
+        public string? ResponseMediaType { get; init; }
     }
 
     public record AssignmentRule
