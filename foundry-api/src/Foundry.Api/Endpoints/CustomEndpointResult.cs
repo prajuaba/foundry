@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Foundry.Core.Http;
 using Microsoft.AspNetCore.Http;
 
 namespace Foundry.Api.Endpoints;
@@ -27,6 +28,12 @@ namespace Foundry.Api.Endpoints;
 /// handler that needs <c>false</c> to mean something other than "not found" should return a payload
 /// type that says so, rather than a bare boolean.
 /// </para>
+/// <para>
+/// A handler can now return <see cref="FoundryFileResponse"/> to produce a file download, because the
+/// JSON fallback would otherwise serialize its bytes as a JSON array of numbers, which is what
+/// happened before this type existed and the endpoint layer had no way for a handler to say "this is
+/// a file, not a payload".
+/// </para>
 /// </remarks>
 public static class CustomEndpointResult
 {
@@ -48,6 +55,13 @@ public static class CustomEndpointResult
         if (result is null)
         {
             return Results.NoContent();
+        }
+
+        // After the null check because a null file response is still "no content", and before the
+        // JSON fallback because otherwise the bytes would be serialized as a JSON array of numbers.
+        if (result is FoundryFileResponse file)
+        {
+            return Results.File(file.Content, file.MediaType, fileDownloadName: file.FileName);
         }
 
         return Results.Text(

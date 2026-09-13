@@ -148,6 +148,7 @@ namespace Foundry.Api.SourceGenerators
                 var route = GetString(item, "Route");
                 var method = GetString(item, "Method");
                 var requestType = GetString(item, "RequestType");
+                var responseMediaType = GetString(item, "ResponseMediaType");
 
                 if (string.IsNullOrEmpty(route) || string.IsNullOrEmpty(method) || string.IsNullOrEmpty(requestType))
                     continue;
@@ -157,7 +158,8 @@ namespace Foundry.Api.SourceGenerators
                     Route = route!,
                     Method = method!,
                     RequestType = requestType!,
-                    Roles = GetStringArray(item, "Roles")
+                    Roles = GetStringArray(item, "Roles"),
+                    ResponseMediaType = responseMediaType
                 });
             }
 
@@ -505,7 +507,18 @@ namespace Foundry.Api.SourceGenerators
                 sb.AppendLine($"            builder_{localSuffix}.WithMetadata(config_{localSuffix})");
                 sb.AppendLine($"                         .WithName(\"{method}_{localSuffix}\")");
                 sb.AppendLine($"                         .WithTags(\"{customEp.RequestType}\")");
-                sb.AppendLine("                         .Produces(200)");
+                // An endpoint serving a file (e.g. a CSV download) must not advertise
+                // `application/json` in its OpenAPI contract -- generated SDK clients model the
+                // response type from that contract, and a wrong contract means every generated
+                // client mis-models what the endpoint actually returns.
+                if (!string.IsNullOrEmpty(customEp.ResponseMediaType))
+                {
+                    sb.AppendLine($"                         .Produces(200, contentType: \"{customEp.ResponseMediaType}\")");
+                }
+                else
+                {
+                    sb.AppendLine("                         .Produces(200)");
+                }
                 sb.AppendLine("                         .Produces(400, typeof(Microsoft.AspNetCore.Mvc.ProblemDetails))");
                 sb.AppendLine("                         .Produces(401)");
                 sb.AppendLine("                         .Produces(403, typeof(Microsoft.AspNetCore.Mvc.ProblemDetails))");
@@ -777,5 +790,6 @@ namespace Foundry.Api.SourceGenerators
         public string Method { get; set; } = string.Empty;
         public string RequestType { get; set; } = string.Empty;
         public List<string> Roles { get; set; } = new();
+        public string? ResponseMediaType { get; set; }
     }
 }

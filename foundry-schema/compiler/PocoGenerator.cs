@@ -1253,6 +1253,15 @@ namespace {CodeGen.Ns(@namespace)};
         /// </summary>
         private static string ResponseTypeFor(CustomEndpoint ep)
         {
+            // A declared response media type means the endpoint answers with a file, so the handler
+            // is typed against the framework's file carrier rather than against rows. ResponseType
+            // still names what the rows are -- it documents the file's shape and drives the OpenAPI
+            // contract -- but it is no longer what the MediatR request returns. Without this, an
+            // export endpoint generates IRequest<IReadOnlyList<TRow>> and its handler cannot return
+            // a file at all: the type forbids it.
+            if (!string.IsNullOrWhiteSpace(ep.ResponseMediaType))
+                return "Foundry.Core.Http.FoundryFileResponse";
+
             string? explicitType = ep.ResponseType;
             string effectiveType;
 
