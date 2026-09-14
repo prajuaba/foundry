@@ -854,12 +854,29 @@ public static class RealTimeConfiguration
                     ? string.Empty
                     : $", Category = \"{CodeGen.Lit(prop.SensitiveCategory!)}\"";
 
+                // A caller holding any of these roles sees the property unmasked, as an alternative
+                // to carrying the view:{category} scope. EntityAccessPolicy.ShouldMask already
+                // honoured a Roles list on SensitiveDataAttribute at runtime -- only the compiler had
+                // no way to emit one, so the capability was unreachable from any schema until now.
+                var roles = prop.SensitiveRoles == null || prop.SensitiveRoles.Count == 0
+                    ? string.Empty
+                    : $", Roles = new[] {{ {string.Join(", ", prop.SensitiveRoles.Select(r => $"\"{CodeGen.Lit(r)}\""))} }}";
+
+                // Names the property the masker also sets when this one is masked, so a masked
+                // default (e.g. a masked decimal reading as 0) is distinguishable from a real one.
+                var stateProperty = string.IsNullOrWhiteSpace(prop.SensitiveStateProperty)
+                    ? string.Empty
+                    : $", StateProperty = \"{CodeGen.Lit(prop.SensitiveStateProperty!)}\"";
+
                 if (wantsEncrypt)
+                    // Deliberately no roles/stateProperty here: encryption is protection at rest and
+                    // is not conditioned on the caller, so emitting them would imply a behaviour that
+                    // does not exist.
                     attributes.Add("[SensitiveData(Protection = ProtectionType.Encrypt)]");
                 else if (wantsMaskEmail)
-                    attributes.Add($"[SensitiveData(Protection = ProtectionType.Mask, MaskingType = MaskingType.Email{category})]");
+                    attributes.Add($"[SensitiveData(Protection = ProtectionType.Mask, MaskingType = MaskingType.Email{category}{roles}{stateProperty})]");
                 else if (wantsMask)
-                    attributes.Add($"[SensitiveData(Protection = ProtectionType.Mask{category})]");
+                    attributes.Add($"[SensitiveData(Protection = ProtectionType.Mask{category}{roles}{stateProperty})]");
 
                 var attributeLines = string.Join("\n    ", attributes);
                 var attributeLine = string.IsNullOrEmpty(attributeLines) ? "" : $"    {attributeLines}\n";

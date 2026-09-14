@@ -310,6 +310,27 @@ namespace Foundry.Schema.Compiler
         [JsonPropertyName("sensitiveCategory")]
         public string? SensitiveCategory { get; init; }
 
+        /// <summary>
+        /// Roles that also entitle a caller to see the property unmasked, as an alternative to
+        /// carrying the <c>view:{category}</c> scope.
+        /// </summary>
+        /// <remarks>
+        /// The runtime (<c>EntityAccessPolicy.ShouldMask</c>) already honoured a <c>Roles</c> list
+        /// on <c>SensitiveDataAttribute</c> — this was already implemented and working at runtime —
+        /// and only the compiler had no way to emit it into generated code, so the capability was
+        /// unreachable from any schema. Empty by default, purely additive.
+        /// </remarks>
+        [JsonPropertyName("sensitiveRoles")]
+        public List<string> SensitiveRoles { get; init; } = new();
+
+        /// <summary>
+        /// Names another property on the same entity that is set to a canonical "the value was
+        /// masked" state when this property is masked, so a consumer can tell a masked default
+        /// (e.g. a masked decimal that reads as 0) from a real one.
+        /// </summary>
+        [JsonPropertyName("sensitiveStateProperty")]
+        public string? SensitiveStateProperty { get; init; }
+
         /// <inheritdoc cref="Entity.Description"/>
         public string? Description { get; init; }
 

@@ -1536,8 +1536,13 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     ///   the existing guard against writing back the mask is kept in place as a client bug indicator.
     /// </para>
     /// <para>
-    /// Non-string masked properties are skipped because string operations are not reliable on other
-    /// property types in this context.
+    /// Entitlement is checked before type: an unreadable property is restored to its stored value
+    /// for every property type (decimal, int, bool, DateTime, ...), not just string, because
+    /// restoring is a plain property copy and needs no string operations. The mask-echo guard above
+    /// remains string-only -- a masked value type reads as that type's default (0 for decimal/int,
+    /// false for bool), and a genuine default is indistinguishable from a masked one, so applying the
+    /// same echo check to a value type would reject a privileged caller legitimately setting the
+    /// field to its default.
     /// </para>
     /// </remarks>
     private void PreserveMaskedFieldsCallerCannotRead(T incoming, T existing)
@@ -1547,31 +1552,42 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         foreach (var (property, attribute) in EntityEncryptionService<T>.GetSensitiveProperties())
         {
             if (attribute.Protection != Foundry.Core.Entities.ProtectionType.Mask) continue;
-            if (property.PropertyType != typeof(string)) continue; // Skip non-string properties
+
+            // Entitlement decides first, independent of property type: a caller who may not read
+            // this property must not be able to change it via a whole-document replace, whatever
+            // type it is. A masked decimal that reads as 0 and is echoed back on an unrelated-field
+            // PUT used to slip through here because the old check skipped everything but string.
+            if (_accessPolicy.ShouldMask(attribute))
+            {
+                // Restore the stored value to prevent data loss. This is a plain property copy, so
+                // it needs no string operations and applies to every property type (decimal, int,
+                // bool, DateTime, ...), not just string.
+                property.SetValue(incoming, property.GetValue(existing));
+                continue;
+            }
+
+            // Privileged caller: the mask-echo guard below is string-only. A masked value type
+            // reads as that type's default (0 for decimal/int, false for bool), and a genuine
+            // default is indistinguishable from a masked one, so checking for mask-echo on a value
+            // type would reject a legitimate update that sets the field to its default. A
+            // privileged caller read the real value on the way in, so there is nothing to guard
+            // against here for non-string types.
+            if (property.PropertyType != typeof(string)) continue;
 
             var stored = property.GetValue(existing) as string;
             var supplied = property.GetValue(incoming) as string;
 
-            // If the caller cannot view this category, preserve the stored value regardless of what was supplied
-            if (_accessPolicy.ShouldMask(attribute))
-            {
-                // Restore the stored value to prevent data loss
-                property.SetValue(incoming, stored);
-            }
-            else
-            {
-                // Privileged caller: allow update but still guard against mask echo
-                if (string.IsNullOrEmpty(stored) || supplied is null) continue;
-                if (string.Equals(stored, supplied, StringComparison.Ordinal)) continue;
+            // Privileged caller: allow update but still guard against mask echo
+            if (string.IsNullOrEmpty(stored) || supplied is null) continue;
+            if (string.Equals(stored, supplied, StringComparison.Ordinal)) continue;
 
-                if (!string.Equals(attribute.MaskValue(stored), supplied, StringComparison.Ordinal)) continue;
+            if (!string.Equals(attribute.MaskValue(stored), supplied, StringComparison.Ordinal)) continue;
 
-                throw new InvalidOperationException(
-                    $"{typeof(T).Name}.{property.Name} was written back in its masked form, which would "
-                    + "replace the stored value with the mask. Re-read the entity as a caller holding the "
-                    + $"'{ViewSensitiveDataScope.ClaimValue}' scope, or build the update from a value the "
-                    + "caller supplied rather than from a masked read.");
-            }
+            throw new InvalidOperationException(
+                $"{typeof(T).Name}.{property.Name} was written back in its masked form, which would "
+                + "replace the stored value with the mask. Re-read the entity as a caller holding the "
+                + $"'{ViewSensitiveDataScope.ClaimValue}' scope, or build the update from a value the "
+                + "caller supplied rather than from a masked read.");
         }
     }
 

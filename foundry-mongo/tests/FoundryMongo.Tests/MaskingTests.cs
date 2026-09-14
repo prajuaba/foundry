@@ -79,6 +79,15 @@ public class MaskingTests : IDisposable
         public string Reference { get; set; } = string.Empty;
     }
 
+    /// <summary>A masked value-type property, so protection is not tested on strings alone.</summary>
+    public record Ledger : BaseEntity<ObjectId>, IVersionable
+    {
+        [SensitiveData(Protection = ProtectionType.Mask, Category = "financial")]
+        public decimal CostRate { get; set; }
+
+        public string Reference { get; set; } = string.Empty;
+    }
+
     private sealed class FixedUser(string[] scopes, string[] roles) : ICurrentUserContext
     {
         public FixedUser(params string[] scopesAndRoles)
@@ -127,6 +136,22 @@ public class MaskingTests : IDisposable
 
     private Repository<ClaimWithRoles> ClaimsWithRolesFor(params string[] scopesAndRoles)
         => new(_db, userContext: new FixedUser(scopesAndRoles));
+
+    private Repository<Ledger> LedgerFor(params string[] scopes)
+        => new(_db, userContext: new FixedUser(scopes));
+
+    private async Task<ObjectId> SeedLedgerAsync(decimal costRate = 123.45m)
+    {
+        var ledger = new Ledger
+        {
+            Id = ObjectId.GenerateNewId(),
+            CostRate = costRate,
+            Reference = "LED-1"
+        };
+
+        await LedgerFor("view:financial").InsertAsync(ledger);
+        return ledger.Id;
+    }
 
     private async Task<ObjectId> SeedClaimWithRolesAsync()
     {
@@ -661,5 +686,59 @@ public class MaskingTests : IDisposable
         // Verify the stored value was not changed by the failed update attempt
         var stored = await entitledRepository.GetByIdAsync(id);
         Assert.Equal("POL-000012345678", stored!.PolicyNumber);
+    }
+
+    // ── PreserveMaskedFieldsCallerCannotRead must protect value types too, not just strings ─
+
+    [Fact]
+    public async Task CallerWithoutScopeSubmittingMaskedDecimalZero_PreservesStoredValue()
+    {
+        // A masked decimal reads as 0 (the type's default). An unentitled caller who echoes that
+        // 0 back on an unrelated-field update must not have it silently accepted as the real value.
+        var id = await SeedLedgerAsync(costRate: 123.45m);
+        var unentitledRepository = LedgerFor();
+
+        var masked = await unentitledRepository.GetByIdAsync(id);
+        Assert.Equal(0m, masked!.CostRate); // Masked: reads as the decimal default
+
+        await unentitledRepository.UpdateAsync(masked with { Reference = "UPDATED" });
+
+        var stored = await LedgerFor("view:financial").GetByIdAsync(id);
+        Assert.Equal(123.45m, stored!.CostRate); // Preserved, not wiped to 0
+        Assert.Equal("UPDATED", stored.Reference); // Only this should change
+    }
+
+    [Fact]
+    public async Task CallerWithoutScopeSubmittingNewDecimalValue_PreservesStoredValue()
+    {
+        // An unreadable field is unwritable, whatever was supplied -- even a deliberate, non-zero,
+        // plausible-looking new value must be overwritten with the stored value.
+        var id = await SeedLedgerAsync(costRate: 123.45m);
+        var unentitledRepository = LedgerFor();
+
+        var masked = await unentitledRepository.GetByIdAsync(id);
+
+        await unentitledRepository.UpdateAsync(masked! with { CostRate = 999.99m });
+
+        var stored = await LedgerFor("view:financial").GetByIdAsync(id);
+        Assert.Equal(123.45m, stored!.CostRate); // Still overwritten with the stored value
+    }
+
+    [Fact]
+    public async Task CallerWithScopeSettingDecimalToZero_ValueSurvivesWithoutException()
+    {
+        // A privileged caller legitimately setting a masked decimal to 0 must succeed: a masked 0
+        // and a genuine 0 are indistinguishable, so the mask-echo guard must not apply to value
+        // types, and this must not throw InvalidOperationException the way the string guard would.
+        var id = await SeedLedgerAsync(costRate: 123.45m);
+        var entitledRepository = LedgerFor("view:financial");
+
+        var unmasked = await entitledRepository.GetByIdAsync(id);
+        Assert.Equal(123.45m, unmasked!.CostRate); // Entitled: reads the real value
+
+        await entitledRepository.UpdateAsync(unmasked with { CostRate = 0m });
+
+        var stored = await entitledRepository.GetByIdAsync(id);
+        Assert.Equal(0m, stored!.CostRate); // The genuine 0 survives
     }
 }
