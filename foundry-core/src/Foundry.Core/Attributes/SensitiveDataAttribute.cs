@@ -74,6 +74,14 @@ public sealed class SensitiveDataAttribute : Attribute
     public string[] Roles { get; set; } = [];
 
     /// <summary>
+    /// Names another property on the same entity that is set to a canonical "masked" state when
+    /// this property is masked by the masker, so a consumer can distinguish a masked value (e.g. a
+    /// masked decimal reading as 0) from a genuine one. Empty by default, meaning no state property
+    /// is set.
+    /// </summary>
+    public string StateProperty { get; set; } = string.Empty;
+
+    /// <summary>
     /// Masks a raw value using the configuration of this attribute.
     /// </summary>
     public string MaskValue(object? value)

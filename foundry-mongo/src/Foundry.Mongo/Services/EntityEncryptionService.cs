@@ -170,11 +170,61 @@ internal sealed class EntityEncryptionService<T> where T : class, IEntity<Object
                 {
                     if (prop.CanWrite) prop.SetValue(clone, masked);
                     else SetProperty(clone, prop.Name, masked);
+
+                    ApplyMaskedStateProperty(clone, attr);
+                }
+                else
+                {
+                    // OLD BEHAVIOR: the masked value above was computed and then thrown away -- this
+                    // branch did nothing, so the property kept its ORIGINAL, unmasked value and that
+                    // value was returned to a caller the schema says is not entitled to see it. A
+                    // declared control that performs nothing is worse than an absent one: it reads as
+                    // protected when it is not. Fix: write the property type's default instead (0 for
+                    // numeric types, false for bool, default for everything else).
+                    var defaultVal = prop.PropertyType.IsValueType ? Activator.CreateInstance(prop.PropertyType) : null;
+                    if (prop.CanWrite) prop.SetValue(clone, defaultVal);
+                    else SetProperty(clone, prop.Name, defaultVal);
+
+                    ApplyMaskedStateProperty(clone, attr);
                 }
             }
         }
 
         return clone;
+    }
+
+    /// <summary>
+    /// When a property is masked and its <see cref="SensitiveDataAttribute.StateProperty"/> names
+    /// another property on the same clone, sets that property to a canonical "masked" value so a
+    /// consumer can tell a masked default (e.g. a masked decimal reading as 0) from a genuine one.
+    /// </summary>
+    private static void ApplyMaskedStateProperty(object clone, SensitiveDataAttribute attr)
+    {
+        if (string.IsNullOrEmpty(attr.StateProperty)) return;
+
+        var stateProp = clone.GetType().GetProperty(attr.StateProperty, BindingFlags.Public | BindingFlags.Instance);
+        // The named property is found by name on the same type. If it does not exist, do nothing --
+        // a schema naming a property that is not there must not throw at read time.
+        if (stateProp == null) return;
+
+        if (stateProp.PropertyType.IsEnum)
+        {
+            var enumNames = Enum.GetNames(stateProp.PropertyType);
+            var maskedName = enumNames.FirstOrDefault(n => string.Equals(n, "Masked", StringComparison.OrdinalIgnoreCase));
+            if (maskedName != null)
+            {
+                var enumValue = Enum.Parse(stateProp.PropertyType, maskedName);
+                if (stateProp.CanWrite) stateProp.SetValue(clone, enumValue);
+                else SetProperty(clone, attr.StateProperty, enumValue);
+            }
+            // If the enum has no member named "Masked", leave it alone rather than guessing.
+        }
+        else if (stateProp.PropertyType == typeof(bool))
+        {
+            if (stateProp.CanWrite) stateProp.SetValue(clone, true);
+            else SetProperty(clone, attr.StateProperty, true);
+        }
+        // Otherwise leave it alone.
     }
 
     /// <summary>
