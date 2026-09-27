@@ -106,15 +106,16 @@ namespace Foundry.Schema.Compiler
 
         /// <summary>
         /// A media type is listed only once Foundry.FileIO has an exporter that produces it, so a
-        /// schema cannot declare a response nothing can write: CSV (CsvDataExporter) and .xlsx
-        /// (ExcelDataExporter). PDF is absent for the same reason CSV was once alone -- there is no
-        /// writer for it -- and adding it belongs with adding one.
+        /// schema cannot declare a response nothing can write: CSV (CsvDataExporter), .xlsx
+        /// (ExcelDataExporter) and PDF (PdfDataExporter). Adding another belongs with adding its
+        /// writer.
         /// </summary>
         public static readonly IReadOnlySet<string> ResponseMediaTypes =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 "text/csv",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/pdf"
             };
 
         /// <summary>
