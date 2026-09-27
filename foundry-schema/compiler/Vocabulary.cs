@@ -105,13 +105,17 @@ namespace Foundry.Schema.Compiler
             new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Query", "Insert", "Update", "Custom" };
 
         /// <summary>
-        /// The set holds only CSV today because Foundry.FileIO has CsvDataExporter but no Excel writer --
-        /// its only Excel dependency is ExcelDataReader, which cannot write -- so listing a spreadsheet
-        /// media type here would let a schema declare a response no exporter can produce. Adding one
-        /// belongs with adding the exporter.
+        /// A media type is listed only once Foundry.FileIO has an exporter that produces it, so a
+        /// schema cannot declare a response nothing can write: CSV (CsvDataExporter) and .xlsx
+        /// (ExcelDataExporter). PDF is absent for the same reason CSV was once alone -- there is no
+        /// writer for it -- and adding it belongs with adding one.
         /// </summary>
         public static readonly IReadOnlySet<string> ResponseMediaTypes =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "text/csv" };
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "text/csv",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            };
 
         /// <summary>
         /// Connector transport kinds.

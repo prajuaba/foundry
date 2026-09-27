@@ -56,6 +56,26 @@ public class CustomEndpointResponseMediaTypeTests
     }
 
     [Fact]
+    public void GetEndpoint_WithXlsx_ValidatesWithNoErrors()
+    {
+        // Listed with ExcelDataExporter, which is what produces it. If this regresses, every .xlsx
+        // export endpoint is refused at build time.
+        var schema = SchemaWith(new CustomEndpoint
+        {
+            Route = "/api/v1/orders/export/xlsx",
+            Method = "GET",
+            RequestType = "OrderXlsxQuery",
+            OperationType = "Custom",
+            ResponseMediaType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        });
+
+        var diagnostics = SchemaValidator.Validate(schema);
+
+        Assert.DoesNotContain(diagnostics.Items, d => d.Code == DiagnosticCatalog.EndpointUnsupportedResponseMediaType);
+        Assert.False(diagnostics.HasErrors);
+    }
+
+    [Fact]
     public void GetEndpoint_WithApplicationPdf_ProducesFDY2016()
     {
         // If this regresses, a schema could declare a media type no exporter in the framework can
