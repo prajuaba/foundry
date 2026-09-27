@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Text.Json;
 using Foundry.Core.Search;
 using MongoDB.Bson;
 
@@ -69,6 +70,7 @@ public static class DynamicExpressionBuilder
 
     private static object? ConvertToTargetType(Type targetType, object? value)
     {
+        value = FromJson(value);
         if (value == null) return null;
         var actualTarget = Nullable.GetUnderlyingType(targetType) ?? targetType;
         if (actualTarget == typeof(ObjectId))
@@ -78,11 +80,56 @@ public static class DynamicExpressionBuilder
             if (value is string s && ObjectId.TryParse(s, out var parsedOid))
                 return parsedOid;
         }
+
+        if (value is string text)
+        {
+            // Convert.ChangeType reads "2026-09-01T00:00:00Z" as the host's local time, and
+            // Expression.Equal compares ticks, so a date filter matched rows shifted by the host
+            // offset. A value without a zone is taken as UTC, which is how this framework stores it.
+            if (actualTarget == typeof(DateTime))
+                return DateTime.Parse(text, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
+            if (actualTarget == typeof(DateTimeOffset))
+                return DateTimeOffset.Parse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal);
+            if (actualTarget == typeof(Guid))
+                return Guid.Parse(text);
+            if (actualTarget.IsEnum)
+                return Enum.Parse(actualTarget, text, ignoreCase: true);
+        }
+
+        if (actualTarget.IsEnum)
+            return Enum.ToObject(actualTarget, value);
+
         return Convert.ChangeType(value, actualTarget, CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// The CLR value inside a <see cref="JsonElement"/>, or the value unchanged.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SearchCriterion.Value"/> is <c>object?</c>, so a criterion deserialized from a
+    /// request carries a <c>JsonElement</c>. That is not <c>IConvertible</c>, and every filter with a
+    /// concrete value answered 500 over HTTP while every in-process test passed, because the static
+    /// factories are called with real typed values. An array is not <c>IEnumerable</c> either, so an
+    /// <c>In</c> filter quietly matched nothing. An object has no scalar form and is left as it is,
+    /// so the conversion refuses it rather than dropping the filter.
+    /// </remarks>
+    private static object? FromJson(object? value) => value is not JsonElement element
+        ? value
+        : element.ValueKind switch
+        {
+            JsonValueKind.Null or JsonValueKind.Undefined => null,
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Number => element.TryGetInt64(out var whole) ? whole : element.GetDecimal(),
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Array => element.EnumerateArray().Select(item => FromJson(item)).ToList(),
+            _ => element
+        };
+
     private static Expression BuildInExpression(Expression memberAccess, object? value)
     {
+        value = FromJson(value);
         if (value == null)
             return Expression.Constant(false);
 
