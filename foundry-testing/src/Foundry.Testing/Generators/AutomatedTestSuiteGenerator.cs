@@ -468,6 +468,8 @@ public static class FoundrySeed
 //   FOUNDRY_TEST_BASE_URL   where the application is listening (default http://localhost:5000)
 //   FOUNDRY_TEST_TOKEN      a bearer token for a caller holding the roles the schema declares
 //   FOUNDRY_TEST_TENANT     the tenant to send, for multi-tenant entities
+//   FOUNDRY_TEST_TOKEN_UNENTITLED  a caller holding none of the sensitiveRoles any masked
+//                           property declares; needed only when the schema declares some
 using System;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -540,6 +542,19 @@ public static class FoundryTestEnvironment
         ""FOUNDRY_TEST_TOKEN_READ_EXEMPT"",
         Tenant,
         ""a caller holding one of the ownerReadExemptRoles this schema declares"");
+
+    /// <summary>
+    /// A caller in the same tenant, able to read the rows, holding none of the roles any masked
+    /// property declares in <c>sensitiveRoles</c>.
+    /// </summary>
+    /// <remarks>
+    /// The masking assertions read as this caller when a property declares roles that unmask it,
+    /// because the primary caller usually holds one of those roles and is correctly shown the value.
+    /// </remarks>
+    public static HttpClient AsUnentitledToSensitiveData() => Identified(
+        ""FOUNDRY_TEST_TOKEN_UNENTITLED"",
+        Tenant,
+        ""a caller who may read the rows but holds none of the sensitiveRoles the schema declares"");
 
     /// <summary>A caller in a different tenant.</summary>
     public static HttpClient AsOtherTenant() => Identified(
@@ -851,43 +866,119 @@ public class {name}RestApiTests
     /// allowed to read the row: encryption protects the stored document, not the response. An
     /// assertion that the value is absent from an HTTP body would fail against a working system.
     /// </remarks>
-    private static List<(string Name, string Kind)> MaskedProperties(Entity entity)
+    private static List<(Property Property, string Kind)> MaskedProperties(Entity entity)
         => (entity.Properties ?? new List<Property>())
-            .Select(p => (p.Name, Kind: p.Attributes.FirstOrDefault(
+            .Select(p => (Property: p, Kind: p.Attributes.FirstOrDefault(
                 a => a.StartsWith("Mask", StringComparison.Ordinal))))
-            .Where(p => !string.IsNullOrEmpty(p.Kind) && !p.Name.Equals("Id", StringComparison.Ordinal))
-            .Select(p => (p.Name, Kind: p.Kind!))
+            .Where(p => !string.IsNullOrEmpty(p.Kind) && !p.Property.Name.Equals("Id", StringComparison.Ordinal))
+            .Select(p => (p.Property, Kind: p.Kind!))
             .ToList();
 
     /// <summary>
-    /// A value distinctive enough that finding it in a response means the mask did not run, and
-    /// valid enough that the application accepts it in the first place.
+    /// The identity a masking assertion reads as: one the mask applies to.
     /// </summary>
     /// <remarks>
-    /// Both halves matter. A sentinel the application refuses never reaches storage, so the
-    /// assertion that it does not come back is true for the wrong reason -- and it fails as a 400
-    /// on the write rather than saying anything about masking. `SENTINEL-0123456789` in a property
-    /// declaring MaskPhone was refused with "The PhoneNumber field is not a valid phone number",
-    /// which is the application working correctly and the test being wrong.
+    /// A property declaring <c>sensitiveRoles</c> is correctly returned in the clear to a caller
+    /// holding one of them. The primary identity is the caller that can write every entity, which
+    /// in practice means an administrator, and administrators are routinely entitled -- so an
+    /// assertion read as that caller fails against a working system. Resourcify hit exactly this
+    /// the moment it put <c>Admin</c> in its first <c>sensitiveRoles</c> list. The row is still
+    /// written as the primary identity, because a caller outside the roles may not be able to write.
     ///
-    /// The shape follows the mask, since a mask says what kind of value the property holds.
+    /// A property without <c>sensitiveRoles</c> is unmasked only by a scope claim, which the
+    /// primary identity is not expected to carry, so it keeps reading as that identity and needs
+    /// no additional token configured.
     /// </remarks>
-    private static string MaskSentinel(string kind, string propertyName)
+    private static string MaskedReader(Property property)
+        => property.SensitiveRoles is { Count: > 0 }
+            ? "FoundryTestEnvironment.AsUnentitledToSensitiveData()"
+            : "FoundryTestEnvironment.Authenticated()";
+
+    /// <summary>
+    /// What a masking assertion writes, as a C# literal, and what it searches the response for.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The value has to be distinctive enough that finding it means the mask did not run, and
+    /// valid enough that the application accepts it in the first place. A sentinel the application
+    /// refuses never reaches storage, so the assertion fails as a 400 on the write rather than
+    /// saying anything about masking. <c>SENTINEL-0123456789</c> in a property declaring MaskPhone
+    /// was refused as not a phone number, and the same string posted into a <c>decimal</c> was
+    /// refused by the JSON binder -- ten of Resourcify's masking assertions never reached a read.
+    /// So a numeric property gets a number, inside any <c>Range</c> it declares.
+    /// </para>
+    /// <para>
+    /// The needle is what is searched for, and it carries no character a JSON writer escapes.
+    /// System.Text.Json writes <c>+</c> as <c>\u002B</c>, so a body returning <c>+15550137019</c> in
+    /// the clear never contains that literal, and the absence assertion passed against an unmasked
+    /// phone number. The needle is the number's digits alone.
+    /// </para>
+    /// </remarks>
+    private static (string Literal, string Needle) MaskSentinel(Property property, string kind)
     {
-        var name = propertyName.ToLowerInvariant();
+        var name = property.Name.ToLowerInvariant();
+
+        if (IsNumeric(property))
+        {
+            var text = NumericSentinel(property).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+            var suffix = property.Type.ToLowerInvariant() switch
+            {
+                "decimal" => "m",
+                "double" => "d",
+                "float" => "f",
+                "long" => "L",
+                _ => string.Empty
+            };
+            return (text + suffix, text);
+        }
 
         if (kind.Contains("Email", StringComparison.Ordinal) || name.Contains("email", StringComparison.Ordinal))
         {
-            return "unmasked-sentinel@example.com";
+            return ("\"unmasked-sentinel@example.com\"", "unmasked-sentinel@example.com");
         }
 
-        // A number that is recognisably a number, and recognisable in a response.
         if (kind.Contains("Phone", StringComparison.Ordinal) || name.Contains("phone", StringComparison.Ordinal))
         {
-            return "+15550137019";
+            return ("\"+15550137019\"", "15550137019");
         }
 
-        return "SENTINEL-0123456789";
+        return ("\"SENTINEL-0123456789\"", "SENTINEL-0123456789");
+    }
+
+    private static bool IsNumeric(Property property)
+        => property.Type.ToLowerInvariant() is "decimal" or "double" or "float" or "int" or "long";
+
+    /// <summary>
+    /// A number recognisable in a response body, inside the property's declared range.
+    /// </summary>
+    /// <remarks>
+    /// A masked number is written as the type default, and zero, one or a round figure can turn up
+    /// in a body for unrelated reasons. 73519.27 will not. When a range excludes it, the value is
+    /// placed the same fraction of the way through the range instead, which stays distinctive for
+    /// any range wide enough to be a real constraint.
+    /// </remarks>
+    private static decimal NumericSentinel(Property property)
+    {
+        var integral = property.Type.ToLowerInvariant() is "int" or "long";
+        var preferred = integral ? 73519m : 73519.27m;
+
+        var range = property.Attributes.FirstOrDefault(a => a.StartsWith("Range(", StringComparison.Ordinal));
+        if (range is null) return preferred;
+
+        var bounds = range[6..].TrimEnd(')').Split(',');
+        if (bounds.Length < 2
+            || !decimal.TryParse(bounds[0].Trim(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var min)
+            || !decimal.TryParse(bounds[1].Trim(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var max))
+        {
+            return preferred;
+        }
+
+        if (preferred >= min && preferred <= max) return preferred;
+
+        var placed = min + (max - min) * 0.7351927m;
+        return Math.Round(placed, integral ? 0 : 2);
     }
 
     /// <summary>
@@ -907,9 +998,10 @@ public class {name}RestApiTests
 
         var tests = new StringBuilder();
 
-        foreach (var (name, kind) in masked)
+        foreach (var (property, kind) in masked)
         {
-            var sentinel = MaskSentinel(kind, name);
+            var name = property.Name;
+            var (literal, needle) = MaskSentinel(property, kind);
             tests.Append($@"
     [Fact]
     public async Task Protection_{name}_IsNotReturnedInTheClear()
@@ -917,12 +1009,13 @@ public class {name}RestApiTests
         // '{entity.Name}.{name}' declares {kind}. Masking is applied in the repository after the
         // entity is materialised, so it covers REST, GraphQL and the SDKs from one rule -- which
         // is exactly why it must be asserted on more than one of them.
-        using var client = FoundryTestEnvironment.Authenticated();
-        var created = await CreateRowWithAsync(client, ""{name}"", ""{sentinel}"");
+        using var writer = FoundryTestEnvironment.Authenticated();
+        using var reader = {MaskedReader(property)};
+        var created = await CreateRowWithAsync(writer, ""{name}"", {literal});
 
-        var body = await ReadRowAsync(client, created);
+        var body = await ReadRowAsync(reader, created);
 
-        body.Should().NotContain(""{sentinel}"",
+        body.Should().NotContain(""{needle}"",
             ""'{name}' declares {kind}, so a caller without the scope to see it must not receive ""
             + ""the raw value"");
         body.Should().Contain(created,
@@ -1059,7 +1152,7 @@ public class {name}RestApiTests
     /// there. That is the defect this project found in its own showcase, where a redaction step
     /// asserted no card number appeared in a payload it had never set one in.
     /// </remarks>
-    private static async Task<string> CreateRowWithAsync(HttpClient client, string property, string value)
+    private static async Task<string> CreateRowWithAsync(HttpClient client, string property, object value)
     {{
         var payload = await FoundrySeed.PayloadForAsync(client, ""{entity.Name}"");
         payload[property] = value;
@@ -1327,9 +1420,10 @@ public class {name}GraphQLTests
     }}");
         }
 
-        foreach (var (property, kind) in MaskedProperties(entity))
+        foreach (var (masked, kind) in MaskedProperties(entity))
         {
-            var sentinel = MaskSentinel(kind, property);
+            var property = masked.Name;
+            var (literal, needle) = MaskSentinel(masked, kind);
             tests.Append($@"
 
     [Fact]
@@ -1337,12 +1431,13 @@ public class {name}GraphQLTests
     {{
         // Findings 7 and 8 were exactly this: '{property}' protected over REST and raw over
         // GraphQL, because the resolver had no materialised entity to mask.
-        using var client = FoundryTestEnvironment.Authenticated();
-        var created = await client_RowWithAsync(client, ""{property}"", ""{sentinel}"");
+        using var writer = FoundryTestEnvironment.Authenticated();
+        using var reader = {MaskedReader(masked)};
+        var created = await client_RowWithAsync(writer, ""{property}"", {literal});
 
-        var body = await QueryFieldAsync(client, ""{GraphQlField(property)}"");
+        var body = await QueryFieldAsync(reader, ""{GraphQlField(property)}"");
 
-        body.Should().NotContain(""{sentinel}"",
+        body.Should().NotContain(""{needle}"",
             ""'{property}' declares {kind}, so the resolver must not return the raw value"");
         body.Should().Contain(created,
             ""the row must come back, or the assertion above is satisfied by an empty result"");
@@ -1389,7 +1484,7 @@ public class {name}GraphQLTests
         return created.GetProperty(""Id"").GetString()!;
     }}
 
-    private static async Task<string> client_RowWithAsync(HttpClient client, string property, string value)
+    private static async Task<string> client_RowWithAsync(HttpClient client, string property, object value)
     {{
         var payload = await FoundrySeed.PayloadForAsync(client, ""{name}"");
         payload[property] = value;
