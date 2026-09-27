@@ -100,6 +100,11 @@ public sealed class ExcelDataExporter<TIn>
         {
             case null:
                 return;
+            // A non-nullable date that was never set; written, it is a real-looking date in year 1.
+            case DateTime unset when unset == DateTime.MinValue:
+                return;
+            case DateTimeOffset unset when unset == DateTimeOffset.MinValue:
+                return;
             case string text:
                 cell.SetValue(text);
                 return;

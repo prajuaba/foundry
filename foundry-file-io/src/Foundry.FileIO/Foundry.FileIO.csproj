@@ -10,10 +10,19 @@
     <PackageReference Include="CsvHelper" />
     <PackageReference Include="ClosedXML" />
     <PackageReference Include="ExcelDataReader" />
+    <PackageReference Include="PDFsharp-MigraDoc" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\foundry-core\src\Foundry.Core\Foundry.Core.csproj" />
+  </ItemGroup>
+
+  <!-- DejaVu Sans, embedded so a PDF renders the same on a developer machine and in a container
+       with no fonts installed. Unmodified, under the Bitstream Vera licence shipped beside it. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Fonts\DejaVuSans.ttf" LogicalName="Foundry.FileIO.Fonts.DejaVuSans.ttf" />
+    <EmbeddedResource Include="Fonts\DejaVuSans-Bold.ttf" LogicalName="Foundry.FileIO.Fonts.DejaVuSans-Bold.ttf" />
+    <None Include="Fonts\DejaVu-LICENSE.txt" Pack="true" PackagePath="licenses" />
   </ItemGroup>
 
   <!-- TryConvert is where the cell-conversion defect lived; tested directly rather than made public. -->

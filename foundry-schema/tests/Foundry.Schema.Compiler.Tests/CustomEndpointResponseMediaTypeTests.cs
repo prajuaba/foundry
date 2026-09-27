@@ -76,7 +76,27 @@ public class CustomEndpointResponseMediaTypeTests
     }
 
     [Fact]
-    public void GetEndpoint_WithApplicationPdf_ProducesFDY2016()
+    public void GetEndpoint_WithPdf_ValidatesWithNoErrors()
+    {
+        // Listed with PdfDataExporter. This media type was the example of an unsupported one until
+        // that exporter existed.
+        var schema = SchemaWith(new CustomEndpoint
+        {
+            Route = "/api/v1/orders/export/pdf",
+            Method = "GET",
+            RequestType = "OrderPdfQuery",
+            OperationType = "Custom",
+            ResponseMediaType = "application/pdf"
+        });
+
+        var diagnostics = SchemaValidator.Validate(schema);
+
+        Assert.DoesNotContain(diagnostics.Items, d => d.Code == DiagnosticCatalog.EndpointUnsupportedResponseMediaType);
+        Assert.False(diagnostics.HasErrors);
+    }
+
+    [Fact]
+    public void GetEndpoint_WithAMediaTypeNoExporterProduces_ProducesFDY2016()
     {
         // If this regresses, a schema could declare a media type no exporter in the framework can
         // produce, and the endpoint would build without ever generating the bytes it promises.
@@ -88,7 +108,7 @@ public class CustomEndpointResponseMediaTypeTests
             Method = "GET",
             RequestType = "OrderExportQuery",
             OperationType = "Custom",
-            ResponseMediaType = "application/pdf"
+            ResponseMediaType = "application/msword"
         });
 
         // Act
