@@ -331,6 +331,22 @@ namespace Foundry.Schema.Compiler
         [JsonPropertyName("sensitiveStateProperty")]
         public string? SensitiveStateProperty { get; init; }
 
+        /// <summary>
+        /// A value the application accepts for this property, used by <c>foundry test</c> when it
+        /// builds a row. Nothing else reads it: the compiler emits no default from it.
+        /// </summary>
+        /// <remarks>
+        /// The suite derives payloads from the IR, and a hand-written business rule is invisible
+        /// there. A rule refusing sprints on Waterfall projects met a generated Project whose
+        /// omitted <c>SdlcType</c> defaulted to <c>Waterfall</c>, the enum's first member -- so every
+        /// generated Sprint was refused, correctly, before any access-control assertion ran. The
+        /// alternatives were weakening the rule to fit the fixture or raising the failure ratchet.
+        /// This states a valid example where the schema author knows one. Written as it would
+        /// appear in JSON: an enum member name, a number, <c>true</c>, or an ISO-8601 date.
+        /// </remarks>
+        [JsonPropertyName("sampleValue")]
+        public string? SampleValue { get; init; }
+
         /// <inheritdoc cref="Entity.Description"/>
         public string? Description { get; init; }
 
