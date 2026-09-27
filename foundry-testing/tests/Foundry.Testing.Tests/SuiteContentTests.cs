@@ -562,6 +562,58 @@ public class SuiteContentTests
         Assert.Contains(needle, unmasked);
     }
 
+    // ── Declared sample values ──────────────────────────────────────────────
+
+    private static string SeedWith(params Property[] properties)
+        => Generate(new SchemaModel
+        {
+            Namespace = "Sales.Domain",
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Customer",
+                    ApiEnabledMethods = ["GET", "POST"],
+                    Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }, .. properties]
+                }
+            ]
+        })["FoundrySeed.cs"];
+
+    [Fact]
+    public void ADeclaredSampleForAnOptionalEnumIsSent()
+    {
+        // Omitted, an enum arrives as its first member. A rule refusing that member -- sprints on a
+        // Waterfall project -- then refused every generated row, before any assertion ran.
+        var seed = SeedWith(new Property { Name = "Kind", Type = "SdlcType", IsEnum = true, SampleValue = "Agile" });
+
+        Assert.Contains(@"[""Kind""] = ""Agile"",", seed);
+    }
+
+    [Fact]
+    public void ADeclaredSampleOverridesTheInferredValueInsideARange()
+    {
+        // Inferred, a Range(0, 10000) property is sent as 1.0 so it never sits on the floor; a
+        // rule requiring 0 on create refused that. The declaration is sent bare, as a number.
+        var seed = SeedWith(new Property
+        {
+            Name = "Completed", Type = "decimal", Attributes = ["Range(0, 10000)"], SampleValue = "0"
+        });
+
+        Assert.Contains(@"[""Completed""] = 0,", seed);
+        Assert.DoesNotContain(@"[""Completed""] = 1.0", seed);
+    }
+
+    [Fact]
+    public void WithoutADeclarationNothingChanges()
+    {
+        var seed = SeedWith(
+            new Property { Name = "Kind", Type = "SdlcType", IsEnum = true },
+            new Property { Name = "Completed", Type = "decimal", Attributes = ["Range(0, 10000)"] });
+
+        Assert.DoesNotContain(@"[""Kind""]", seed);
+        Assert.Contains(@"[""Completed""] = 1.0,", seed);
+    }
+
     [Fact]
     public void OwnerScopingIsAlsoAssertedThroughTheResolver()
     {

@@ -385,7 +385,7 @@ public static class FoundrySeed
         var entries = new StringBuilder();
 
         foreach (var property in (entity.Properties ?? new List<Property>())
-                     .Where(p => !p.IsKey && (p.Attributes.Contains("Required") || NeedsAValueToBeValid(p))))
+                     .Where(p => !p.IsKey && (p.Attributes.Contains("Required") || NeedsAValueToBeValid(p) || p.SampleValue != null)))
         {
             entries.Append($@"
             [""{property.Name}""] = {SampleValueFor(property)},");
@@ -1199,7 +1199,7 @@ public class {name}RestApiTests
     private static string SamplePayload(Entity entity)
     {
         var assignments = (entity.Properties ?? new List<Property>())
-            .Where(p => !p.IsKey && (p.Attributes.Contains("Required") || NeedsAValueToBeValid(p)))
+            .Where(p => !p.IsKey && (p.Attributes.Contains("Required") || NeedsAValueToBeValid(p) || p.SampleValue != null))
             .Select(p => $"{CodeGen.Ident(p.Name, "Property")} = {SampleValueFor(p)}")
             .ToList();
 
@@ -1302,6 +1302,10 @@ public class {name}RestApiTests
     /// </remarks>
     private static string SampleValueFor(Property property)
     {
+        // The schema's own example wins over anything inferred: it is the one value here that
+        // someone who knows the business rules chose.
+        if (property.SampleValue is { } declared) return DeclaredSample(property, declared);
+
         if (property.IsEnum) return "\"\"";
 
         var name = property.Name.ToLowerInvariant();
@@ -1327,6 +1331,30 @@ public class {name}RestApiTests
                 => UniqueString(property, name, suffix: "@example.com"),
             _ => UniqueString(property, name, suffix: "")
         };
+    }
+
+    /// <summary>A declared <c>sampleValue</c> as a C# expression of the property's JSON shape.</summary>
+    /// <remarks>
+    /// Numbers and booleans are emitted bare so they serialise as JSON numbers and booleans; a
+    /// quoted "0" posted into a decimal is refused by the binder. Everything else -- enum member
+    /// names, dates, strings -- is a string literal, which is how the API reads each of them.
+    /// </remarks>
+    private static string DeclaredSample(Property property, string declared)
+    {
+        var isNumber = property.Type.ToLowerInvariant() is "int" or "long" or "decimal" or "double" or "float";
+        if (isNumber && decimal.TryParse(declared, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var number))
+        {
+            return number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        if (string.Equals(property.Type, "bool", StringComparison.OrdinalIgnoreCase)
+            && bool.TryParse(declared, out var flag))
+        {
+            return flag ? "true" : "false";
+        }
+
+        return "\"" + declared.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
     }
 
     private static string GenerateGraphQLTest(Entity entity, string ns)
