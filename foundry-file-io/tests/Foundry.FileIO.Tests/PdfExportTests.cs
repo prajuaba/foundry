@@ -156,6 +156,31 @@ public class PdfExportTests
         Assert.Equal(1, TableOf(new PdfDataExporter<Row>("Empty Report").BuildDocument([], Generated)).Rows.Count);
     }
 
+    [Fact]
+    public void ADateThatWasNeverSetIsBlankNotYearOne()
+    {
+        // A project with no baseline printed "0001-01-01" in Baseline End Date.
+        Assert.Equal(string.Empty, PdfDataExporter<Row>.Format(DateTime.MinValue));
+    }
+
+    public sealed class Wide
+    {
+        public int A1 { get; set; } public int A2 { get; set; } public int A3 { get; set; } public int A4 { get; set; }
+        public int A5 { get; set; } public int A6 { get; set; } public int A7 { get; set; } public int A8 { get; set; }
+        public int A9 { get; set; } public int A10 { get; set; } public int A11 { get; set; } public int A12 { get; set; }
+        public int A13 { get; set; } public int A14 { get; set; } public int A15 { get; set; } public int A16 { get; set; }
+    }
+
+    [Fact]
+    public void AReportWiderThanFifteenColumnsIsSetSmallEnoughForADateToFitItsColumn()
+    {
+        var wide = new PdfDataExporter<Wide>("Wide").BuildDocument([new Wide()], Generated);
+        var narrow = new PdfDataExporter<Row>("Narrow").BuildDocument([Sample()], Generated);
+
+        Assert.Equal(6, wide.Styles[StyleNames.Normal]!.Font.Size.Point);
+        Assert.Equal(8, narrow.Styles[StyleNames.Normal]!.Font.Size.Point);
+    }
+
     [Theory]
     [InlineData("ScheduleVarianceDays", "Schedule Variance Days")]
     [InlineData("HTMLParser", "HTML Parser")]

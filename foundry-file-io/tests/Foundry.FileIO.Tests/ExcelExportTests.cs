@@ -134,6 +134,15 @@ public class ExcelExportTests
     }
 
     [Fact]
+    public async Task ADateThatWasNeverSetIsABlankCellNotYearOne()
+    {
+        using var file = await Export(new Row { Name = "No baseline", Start = DateTime.MinValue });
+        using var book = new XLWorkbook(file);
+
+        Assert.True(book.Worksheet(1).Cell(2, 4).IsEmpty());
+    }
+
+    [Fact]
     public async Task NoRowsIsAHeaderOnlyWorkbook()
     {
         using var file = await Export<Row>();

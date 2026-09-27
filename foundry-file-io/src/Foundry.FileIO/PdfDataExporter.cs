@@ -28,7 +28,8 @@ namespace Foundry.FileIO;
 /// <para>
 /// Values are formatted as the .xlsx cells are: numbers right-aligned with grouping, dates as
 /// <c>yyyy-MM-dd</c> in UTC (a Local-kind value is converted first), enums by name, an ObjectId as
-/// its hex string, null as an empty cell. The header row repeats on every page.
+/// its hex string, null -- and <c>DateTime.MinValue</c>, which a non-nullable date holds when never
+/// set -- as an empty cell. The header row repeats on every page.
 /// </para>
 /// <para>
 /// Text is set in DejaVu Sans, embedded in this assembly, so a PDF renders identically on a
@@ -86,8 +87,9 @@ public sealed class PdfDataExporter<TIn>
         document.Info.Title = _title;
         document.Styles[StyleNames.Normal]!.Font.Name = FontFamily;
 
-        // Narrower type for wide reports, so a 17-column row stays legible rather than one word per line.
-        var fontSize = Columns.Length > 12 ? 6.5 : 8;
+        // Narrower type for wide reports. At 17 columns a column is ~1.3 cm of text, and 6.5 pt broke
+        // every date at its hyphen ("2026-02-" / "02"); 6 pt keeps a date on one line.
+        var fontSize = Columns.Length > 15 ? 6 : Columns.Length > 12 ? 6.5 : 8;
         document.Styles[StyleNames.Normal]!.Font.Size = fontSize;
 
         var section = document.AddSection();
@@ -162,6 +164,9 @@ public sealed class PdfDataExporter<TIn>
     internal static string Format(object? value) => value switch
     {
         null => string.Empty,
+        // A non-nullable date that was never set. Printed, it reads as a real date in year 1.
+        DateTime date when date == DateTime.MinValue => string.Empty,
+        DateTimeOffset offset when offset == DateTimeOffset.MinValue => string.Empty,
         string text => text,
         bool flag => flag ? "Yes" : "No",
         DateTime date => (date.Kind == DateTimeKind.Local ? date.ToUniversalTime() : date) is var utc
