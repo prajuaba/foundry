@@ -374,6 +374,23 @@ public static class KafkaRegistrations
                 var allowedExtsList = string.Join(", ", allowedExts.Select(e => $"\"{e}\""));
                 var switchBody = string.Join("\n", switchArms);
 
+                // Export mirrors import: a type that may be read from .xlsx may be written to it.
+                // Until ExcelDataExporter existed the service exported CSV only, so "the CSV and
+                // XLSX file services are generated" held for import and not for export. Emitted
+                // only where .xlsx is allowed, so a CSV-only type is unchanged.
+                var xlsxAllowed = allowedExts.Contains(".xlsx");
+                var xlsxField = xlsxAllowed
+                    ? $"\n    private readonly ExcelDataExporter<{target.Name}> _xlsxExporter = new();"
+                    : "";
+                var xlsxMethod = xlsxAllowed
+                    ? $@"
+
+    /// <summary>Writes a single-sheet .xlsx workbook with typed cells. See ExcelDataExporter.</summary>
+    public Task ExportToXlsxAsync(
+        IAsyncEnumerable<{target.Name}> items, Stream outputStream, CancellationToken ct = default)
+        => _xlsxExporter.ExportAsync(items, outputStream, ct);"
+                    : "";
+
                 result[$"Services/{target.Name}FileService"] = $@"using System;
 using System.Collections.Generic;
 using System.IO;
@@ -397,7 +414,7 @@ public class {target.Name}FileService
 
     private readonly CsvDataParser<{target.Name}> _csvParser = new();
     private readonly ExcelDataParser<{target.Name}> _excelParser = new();
-    private readonly CsvDataExporter<{target.Name}> _csvExporter = new();
+    private readonly CsvDataExporter<{target.Name}> _csvExporter = new();{xlsxField}
 
     /// <summary>Streams rows out of a file, without holding the whole file in memory.</summary>
     public IAsyncEnumerable<{target.Name}> ImportAsync(
@@ -428,7 +445,7 @@ public class {target.Name}FileService
 
     public Task ExportToCsvAsync(
         IAsyncEnumerable<{target.Name}> items, Stream outputStream, CancellationToken ct = default)
-        => _csvExporter.ExportAsync(items, outputStream, ct);
+        => _csvExporter.ExportAsync(items, outputStream, ct);{xlsxMethod}
 }}
 ";
             }

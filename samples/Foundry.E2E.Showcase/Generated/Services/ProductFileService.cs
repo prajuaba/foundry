@@ -32,6 +32,7 @@ public class ProductFileService
     private readonly CsvDataParser<Product> _csvParser = new();
     private readonly ExcelDataParser<Product> _excelParser = new();
     private readonly CsvDataExporter<Product> _csvExporter = new();
+    private readonly ExcelDataExporter<Product> _xlsxExporter = new();
 
     /// <summary>Streams rows out of a file, without holding the whole file in memory.</summary>
     public IAsyncEnumerable<Product> ImportAsync(
@@ -64,4 +65,9 @@ public class ProductFileService
     public Task ExportToCsvAsync(
         IAsyncEnumerable<Product> items, Stream outputStream, CancellationToken ct = default)
         => _csvExporter.ExportAsync(items, outputStream, ct);
+
+    /// <summary>Writes a single-sheet .xlsx workbook with typed cells. See ExcelDataExporter.</summary>
+    public Task ExportToXlsxAsync(
+        IAsyncEnumerable<Product> items, Stream outputStream, CancellationToken ct = default)
+        => _xlsxExporter.ExportAsync(items, outputStream, ct);
 }
