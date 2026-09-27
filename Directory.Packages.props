@@ -30,6 +30,7 @@
   <ItemGroup>
     <PackageVersion Include="Confluent.Kafka" Version="2.8.0" />
     <PackageVersion Include="CsvHelper" Version="33.0.1" />
+    <PackageVersion Include="ClosedXML" Version="0.105.1" />
     <PackageVersion Include="ExcelDataReader" Version="3.7.0" />
     <PackageVersion Include="FluentValidation" Version="11.11.0" />
     <PackageVersion Include="FluentValidation.DependencyInjectionExtensions" Version="11.11.0" />

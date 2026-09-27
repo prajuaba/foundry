@@ -83,7 +83,7 @@ public class GeneratedSuitesCompileTests
 
     private static (int ExitCode, string Output) RunDotnetBuild(string directory)
     {
-        using var process = Process.Start(new ProcessStartInfo("dotnet", "build --nologo -v q")
+        using var process = Process.Start(new ProcessStartInfo("dotnet", "build --nologo -v q -nodeReuse:false")
         {
             WorkingDirectory = directory,
             RedirectStandardOutput = true,

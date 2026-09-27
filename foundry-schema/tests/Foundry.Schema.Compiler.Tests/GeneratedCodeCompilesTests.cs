@@ -288,6 +288,10 @@ public class GeneratedCodeCompilesTests
         psi.ArgumentList.Add("-v");
         psi.ArgumentList.Add("q");
         psi.ArgumentList.Add("--nologo");
+        // Without this MSBuild leaves reusable worker nodes running that inherit the redirected
+        // stdout, so ReadToEnd below waits on them rather than on the build -- measured at a
+        // 15-minute stall on a developer machine, ended only by the nodes' idle timeout.
+        psi.ArgumentList.Add("-nodeReuse:false");
 
         using var process = Process.Start(psi);
         if (process is null) return (0, ""); // SDK unavailable; treat as skipped.
