@@ -99,6 +99,30 @@ public class SuiteContentTests
         ]
     };
 
+    private static SchemaModel SensitiveSchema(Property masked, bool graphQl = false) => new()
+    {
+        Namespace = "Sales.Domain",
+        Entities =
+        [
+            new Entity
+            {
+                Name = "Customer",
+                GraphQlEnabled = graphQl,
+                ApiEnabledMethods = ["GET", "POST"],
+                Properties = [new Property { Name = "Id", Type = "ObjectId", IsKey = true }, masked]
+            }
+        ]
+    };
+
+    /// <summary>The source of one generated test method, so assertions cannot match its neighbours.</summary>
+    private static string Method(string suite, string name)
+    {
+        var start = suite.IndexOf($"Task {name}()", StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{name} was not generated");
+        var end = suite.IndexOf("[Fact]", start, StringComparison.Ordinal);
+        return end < 0 ? suite[start..] : suite[start..end];
+    }
+
     private static Dictionary<string, string> Generate(SchemaModel schema)
         => AutomatedTestSuiteGenerator.GenerateAllTestSuites(schema);
 
@@ -438,6 +462,104 @@ public class SuiteContentTests
         // Queried by the name GraphQL exposes. Asking for the PascalCase name returns an unknown
         // field error, and the sentinel really is absent from an error response.
         Assert.Contains("email", suite);
+    }
+
+    [Fact]
+    public void AMaskedPropertyWithSensitiveRolesIsReadAsACallerOutsideThem()
+    {
+        // Resourcify put Admin in sensitiveRoles and every masking assertion read as the primary
+        // identity -- an Admin -- which was correctly shown the value. The row is still written by
+        // the primary identity; only the read moves.
+        var masked = new Property
+        {
+            Name = "Phone", Type = "string", Attributes = ["Mask"], SensitiveRoles = ["Admin"]
+        };
+
+        foreach (var (file, test) in new[]
+        {
+            ("CustomerRestApiTests.cs", "Protection_Phone_IsNotReturnedInTheClear"),
+            ("CustomerGraphQLTests.cs", "Protection_Phone_IsNotReturnedInTheClearThroughTheResolver")
+        })
+        {
+            var method = Method(Generate(SensitiveSchema(masked, graphQl: true))[file], test);
+
+            Assert.Contains("using var writer = FoundryTestEnvironment.Authenticated();", method);
+            Assert.Contains("using var reader = FoundryTestEnvironment.AsUnentitledToSensitiveData();", method);
+            Assert.Matches(@"RowWithAsync\(writer,", method);
+            Assert.Matches(@"(ReadRowAsync|QueryFieldAsync)\(reader,", method);
+        }
+    }
+
+    [Fact]
+    public void AMaskedPropertyWithoutSensitiveRolesNeedsNoExtraIdentity()
+    {
+        // Only a scope claim unmasks it, which the primary identity is not expected to carry.
+        // Requiring a fourth token here would break every suite that never declared a role.
+        var method = Method(Generate(MaskedSchema())["CustomerRestApiTests.cs"],
+            "Protection_Email_IsNotReturnedInTheClear");
+
+        Assert.Contains("using var reader = FoundryTestEnvironment.Authenticated();", method);
+        Assert.DoesNotContain("AsUnentitledToSensitiveData", method);
+    }
+
+    [Fact]
+    public void TheEnvironmentNamesTheUnentitledIdentitysVariable()
+    {
+        var environment = Generate(MaskedSchema())["FoundryTestEnvironment.cs"];
+
+        Assert.Contains("public static HttpClient AsUnentitledToSensitiveData()", environment);
+        Assert.Contains("FOUNDRY_TEST_TOKEN_UNENTITLED", environment);
+    }
+
+    [Theory]
+    [InlineData("decimal", "Range(0, 100000)", "73519.27m")]
+    [InlineData("decimal", null, "73519.27m")]
+    [InlineData("int", "Range(0, 100000)", "73519")]
+    [InlineData("decimal", "Range(0, 100)", "73.52m")]
+    [InlineData("int", "Range(10, 20)", "17")]
+    public void AMaskedNumberIsProbedWithANumberItsRangeAccepts(string type, string? range, string literal)
+    {
+        // A string sentinel posted into a decimal was refused by the binder with 400, so ten of
+        // Resourcify's masking assertions failed on the write and never reached a read.
+        var masked = new Property
+        {
+            Name = "Rate", Type = type,
+            Attributes = range is null ? ["Mask"] : ["Mask", range]
+        };
+
+        var method = Method(Generate(SensitiveSchema(masked))["CustomerRestApiTests.cs"],
+            "Protection_Rate_IsNotReturnedInTheClear");
+
+        Assert.Contains($@"CreateRowWithAsync(writer, ""Rate"", {literal});", method);
+        Assert.DoesNotContain("SENTINEL", method);
+        Assert.Contains($@"NotContain(""{literal.TrimEnd('m')}""", method);
+    }
+
+    [Theory]
+    [InlineData("Phone", "string", "Mask", "+15550137019")]
+    [InlineData("Contact", "string", "MaskEmail", "unmasked-sentinel@example.com")]
+    [InlineData("Code", "string", "Mask", "SENTINEL-0123456789")]
+    [InlineData("Rate", "decimal", "Mask", 73519.27)]
+    public void TheNeedleIsFoundInAnUnmaskedBodyAsTheApplicationWritesIt(
+        string name, string type, string attribute, object value)
+    {
+        // Resourcify's REST phone assertion passed against an unmasked number: System.Text.Json
+        // writes '+' as \u002B, so the literal the test searched for was never in the body. This
+        // serialises a genuinely unmasked row the way ASP.NET does and requires the generated
+        // needle to find it -- the assertion must be able to fail.
+        var masked = new Property { Name = name, Type = type, Attributes = [attribute] };
+        var method = Method(Generate(SensitiveSchema(masked))["CustomerRestApiTests.cs"],
+            $"Protection_{name}_IsNotReturnedInTheClear");
+
+        var needle = System.Text.RegularExpressions.Regex
+            .Match(method, @"NotContain\(""([^""]+)""").Groups[1].Value;
+        Assert.NotEmpty(needle);
+
+        var unmasked = System.Text.Json.JsonSerializer.Serialize(
+            new Dictionary<string, object> { [name] = type == "decimal" ? Convert.ToDecimal(value) : value },
+            new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+
+        Assert.Contains(needle, unmasked);
     }
 
     [Fact]
