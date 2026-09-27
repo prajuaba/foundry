@@ -181,6 +181,25 @@ public class PdfExportTests
         Assert.Equal(8, narrow.Styles[StyleNames.Normal]!.Font.Size.Point);
     }
 
+    public sealed class Mixed
+    {
+        public int N { get; set; }
+        public string State { get; set; } = string.Empty;
+    }
+
+    [Fact]
+    public void AColumnOfLongUnbreakableWordsIsWiderThanAColumnOfSmallNumbers()
+    {
+        // In a real 17-column report "NoPlannedEffort" ran past the table's edge: MigraDoc breaks
+        // only at spaces, and every column was the same width however long its words were.
+        var table = TableOf(new PdfDataExporter<Mixed>("Mixed").BuildDocument(
+            [new Mixed { N = 1, State = "NoPlannedEffortRecordedAnywhere" }], Generated));
+
+        Assert.True(table.Columns[1].Width.Point > table.Columns[0].Width.Point * 2,
+            $"{table.Columns[1].Width.Point} vs {table.Columns[0].Width.Point}");
+        Assert.Equal(Unit.FromCentimeter(26.7).Point, table.Columns[0].Width.Point + table.Columns[1].Width.Point, 1);
+    }
+
     [Theory]
     [InlineData("ScheduleVarianceDays", "Schedule Variance Days")]
     [InlineData("HTMLParser", "HTML Parser")]

@@ -113,17 +113,27 @@ public sealed class PdfDataExporter<TIn>
 
         if (Columns.Length == 0) return document;
 
+        var headers = Columns.Select(p => Words(p.Name)).ToArray();
+        var cells = rows.Select(item => Columns.Select(p => Format(p.GetValue(item))).ToArray()).ToList();
+
         var table = section.AddTable();
         table.Borders.Width = 0.25;
         table.Borders.Color = Colors.LightGray;
         table.Format.Font.Size = fontSize;
 
-        // A4 landscape is 29.7 cm wide; the margins take 3.
-        var width = Unit.FromCentimeter(26.7 / Columns.Length);
-        foreach (var property in Columns)
+        // A4 landscape is 29.7 cm wide; the margins take 3. Shared out by each column's longest
+        // unbreakable word, because MigraDoc breaks lines only at spaces: with equal widths an enum
+        // state like "NoPlannedEffort" ran past the table's edge while a column of small numbers
+        // sat mostly empty. Clamped, so one very long value cannot starve every other column.
+        var weights = Enumerable.Range(0, Columns.Length)
+            .Select(c => (double)Math.Clamp(
+                cells.Select(r => LongestWord(r[c])).Append(LongestWord(headers[c])).Max(), 4, 24))
+            .ToArray();
+        var total = weights.Sum();
+        for (var c = 0; c < Columns.Length; c++)
         {
-            var column = table.AddColumn(width);
-            column.Format.Alignment = IsNumeric(property.PropertyType) ? ParagraphAlignment.Right : ParagraphAlignment.Left;
+            var column = table.AddColumn(Unit.FromCentimeter(26.7 * weights[c] / total));
+            column.Format.Alignment = IsNumeric(Columns[c].PropertyType) ? ParagraphAlignment.Right : ParagraphAlignment.Left;
         }
 
         var header = table.AddRow();
@@ -132,20 +142,23 @@ public sealed class PdfDataExporter<TIn>
         header.Shading.Color = Colors.WhiteSmoke;
         for (var c = 0; c < Columns.Length; c++)
         {
-            header.Cells[c].AddParagraph(Words(Columns[c].Name));
+            header.Cells[c].AddParagraph(headers[c]);
         }
 
-        foreach (var item in rows)
+        foreach (var values in cells)
         {
             var row = table.AddRow();
             for (var c = 0; c < Columns.Length; c++)
             {
-                row.Cells[c].AddParagraph(Format(Columns[c].GetValue(item)));
+                row.Cells[c].AddParagraph(values[c]);
             }
         }
 
         return document;
     }
+
+    private static int LongestWord(string text)
+        => text.Length == 0 ? 0 : text.Split(' ').Max(word => word.Length);
 
     internal static string Words(string pascalCase)
     {
