@@ -234,6 +234,9 @@ namespace Foundry.Schema.Compiler
         /// <summary>A custom endpoint declares a 'responseMediaType' that is not a supported media type, or pairs one with a non-GET method.</summary>
         public const string EndpointUnsupportedResponseMediaType = "FDY2016";
 
+        /// <summary>A custom endpoint declares a 'responseShape' that is not List or Page, or asks for Page where there is no JSON list to page.</summary>
+        public const string EndpointUnsupportedResponseShape = "FDY2017";
+
         // ---- FDY3xxx: configuration coherence ----
 
         /// <summary>A property is marked <c>isTenantKey</c> but the entity is not multi-tenant.</summary>
@@ -389,6 +392,7 @@ namespace Foundry.Schema.Compiler
             [DuplicateTypeName] = "An entity, enum and DTO all become C# types in one namespace and are written to one file per name, so their names must not collide. A collision silently discards one of them.",
             [EndpointUnknownResponseType] = "A custom endpoint's 'responseType' must name a declared entity or DTO.",
             [EndpointUnsupportedResponseMediaType] = "A custom endpoint's 'responseMediaType' must be one of the supported media types, and must only be set on a GET endpoint.",
+            [EndpointUnsupportedResponseShape] = "A custom endpoint's 'responseShape' must be List or Page, and Page applies only to a GET endpoint answering JSON: a file or a single result has no rows to page.",
             [TenantKeyWithoutMultiTenant] = "A property marked 'isTenantKey' requires the entity to set 'multiTenant': true.",
             [MultiTenantWithoutTenantKey] = "An entity with 'multiTenant': true must mark one property 'isTenantKey' or set 'tenantProperty'.",
             [TenantKeyMustBeNamedTenantId] = "The tenant key property must be named 'TenantId'. The data layer builds its tenant filter against the stored field by that name, so any other name compiles to an entity that does not satisfy IMultiTenant -- and, if it did, would filter on a field no document has.",

@@ -110,6 +110,13 @@ namespace Foundry.Schema.Compiler
         /// (ExcelDataExporter) and PDF (PdfDataExporter). Adding another belongs with adding its
         /// writer.
         /// </summary>
+        /// <summary>
+        /// The shapes a custom GET endpoint's JSON response may take: a bare list, or a page carrying
+        /// the matching total (<c>Foundry.Core.Paging.PagedResult</c>).
+        /// </summary>
+        public static readonly IReadOnlySet<string> ResponseShapes =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "List", "Page" };
+
         public static readonly IReadOnlySet<string> ResponseMediaTypes =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {

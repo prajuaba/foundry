@@ -417,6 +417,10 @@ public class ManifestConformanceTests
                     // of which the manifest carries either. The runtime authorizes and routes a
                     // custom endpoint from Route/Method/RequestType/Roles/BusinessRules alone.
                     nameof(CustomEndpoint.ResponseType),
+                    // Not access-bearing, for the same reason as ResponseType: it only changes the
+                    // handler's C# return type, a list or a PagedResult of it. JSON custom endpoints
+                    // are registered as an untyped .Produces(200), so the runtime never needs it.
+                    nameof(CustomEndpoint.ResponseShape),
                     // Access-bearing, unlike ResponseType directly above: the runtime route generator
                     // reads this from the manifest to emit the endpoint's declared content type, so an
                     // absent value here reaches the runtime as "application/json" regardless of the
