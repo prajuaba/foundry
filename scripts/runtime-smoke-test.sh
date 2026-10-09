@@ -912,7 +912,9 @@ pass "view:financial unmasks only its own category"
 # never carried the definitions, the scaffolder never registered the engine, and no route could send
 # a transition command. Every layer downstream was in place and waiting for a list that arrived
 # empty. This drives one from a running application.
-log "A new record starts outside the workflow"
+# A new record starts in the workflow's initial state. It used to start with no state at all,
+# which the first transition adopted as initial but which a ?currentState=Draft filter never matched.
+log "A new record starts in the initial state"
 authenticate_as "$ACME_ADMIN"
 expect_status 201 "POST /api/invoices for the workflow" \
   -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' -d '{"reference":"WF-001"}'
@@ -920,9 +922,22 @@ WF_ID=$(json_field "$WORK_DIR/body.json" Id id)
 
 expect_status 200 "GET the new invoice" "$BASE/api/invoices/$WF_ID"
 WF_STATE=$(json_field "$WORK_DIR/body.json" CurrentState currentState)
-[[ -z "$WF_STATE" ]] \
-  || fail "a new record already reports state '$WF_STATE'; it should not have entered the workflow yet"
-pass "the invoice has no workflow state yet"
+[[ "$WF_STATE" == "Draft" ]] \
+  || fail "a new record should start in the initial state 'Draft', got '$WF_STATE'"
+pass "the invoice starts in Draft"
+
+# Only a transition moves a state. A body that names one is ignored rather than trusted, or a
+# client could create a record past the transitions and roles that guard it.
+log "A create cannot choose its own state"
+expect_status 201 "POST /api/invoices claiming a later state" \
+  -X POST "$BASE/api/invoices" -H 'Content-Type: application/json' \
+  -d '{"reference":"WF-002","currentState":"Submitted"}'
+WF_CLAIM_ID=$(json_field "$WORK_DIR/body.json" Id id)
+expect_status 200 "GET the claiming invoice" "$BASE/api/invoices/$WF_CLAIM_ID"
+WF_STATE=$(json_field "$WORK_DIR/body.json" CurrentState currentState)
+[[ "$WF_STATE" == "Draft" ]] \
+  || fail "a create that claimed 'Submitted' is in state '$WF_STATE'; the body chose its own state"
+pass "the claimed state was ignored"
 
 log "A transition advances the record and is persisted"
 expect_status 200 "POST /api/invoices/transitions/submitinvoice" \

@@ -65,6 +65,8 @@ public static class WorkflowServiceCollectionExtensions
         // so scoped is the lifetime its dependencies always implied.
         services.TryAddScoped<IWorkflowStateStore, MongoWorkflowStateStore>();
         services.AddTransient(typeof(IPipelineBehavior<,>), typeof(WorkflowTransitionBehavior<,>));
+        // Only a transition moves an entity's state; a POST or PUT cannot. See WorkflowFieldGuardBehavior.
+        services.AddTransient(typeof(IPipelineBehavior<,>), typeof(WorkflowFieldGuardBehavior<,>));
 
         return services;
     }
