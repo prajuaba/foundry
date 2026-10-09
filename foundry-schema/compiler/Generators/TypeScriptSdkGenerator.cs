@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace Foundry.Schema.Compiler.Generators;
@@ -58,37 +59,88 @@ public static class TypeScriptSdkGenerator
         sb.AppendLine("  return res;");
         sb.AppendLine("}\n");
 
+        // Enums as string unions: the API reads and writes them by name, and a union costs nothing at
+        // runtime. All of them used to be erased to `string`, so the values a caller got wrong were
+        // exactly the ones the schema knew ("Engineering" for a TeamType, "Lead" for a SkillLevel).
+        var enumNames = new HashSet<string>(StringComparer.Ordinal);
+        RefuseNameCollisions(schema);
+        foreach (var enumDef in schema.Enums ?? new List<Enum>())
+        {
+            if (enumDef.Values is not { Count: > 0 }) continue;
+            if (!string.IsNullOrEmpty(enumDef.Description)) EmitJsDoc(sb, enumDef.Description, 0);
+            sb.AppendLine($"export type {enumDef.Name} = {string.Join(" | ", enumDef.Values.Select(Quote))};\n");
+            enumNames.Add(enumDef.Name);
+        }
+
         foreach (var entity in schema.Entities ?? new List<Entity>())
         {
-            // Only emit JSDoc if entity has authored description
+            var workflow = (schema.Workflows ?? new List<WorkflowModel>())
+                .FirstOrDefault(w => w.Entity.Equals(entity.Name, StringComparison.OrdinalIgnoreCase));
+            var properties = entity.Properties ?? new List<Property>();
+
+            if (workflow is not null && workflow.States.Count > 0)
+            {
+                sb.AppendLine($"/** The states of the {workflow.Name} workflow. */");
+                sb.AppendLine($"export type {entity.Name}WorkflowState = {string.Join(" | ", workflow.States.Select(s => Quote(s.Name)))};\n");
+            }
+
+            // The entity as the API returns it.
             if (!string.IsNullOrEmpty(entity.Description))
             {
                 EmitJsDoc(sb, entity.Description, 0);
             }
             sb.AppendLine($"export interface {entity.Name} {{");
 
-            foreach (var prop in entity.Properties ?? new List<Property>())
+            // Every property is present on a read: the API serialises them all, a value never set as
+            // its default. Marking them optional here made the one correct way to update -- read the
+            // record, change a field, send it all back -- fail to type-check against the update body.
+            foreach (var prop in properties)
             {
-                var propType = MapTypeScriptType(prop.Type);
-
-                // Optional unless the schema says the caller must supply it. Only the key used to be
-                // optional, so a caller had to build every field -- including the tenant and owner
-                // keys the server stamps from their token and refuses to take from a body.
-                var optional = SdkSurface.IsRequired(prop) ? "" : "?";
-
-                // Only emit JSDoc if property has authored description
-                if (!string.IsNullOrEmpty(prop.Description))
-                {
-                    EmitJsDoc(sb, prop.Description, 2);
-                }
-
-                // Emitted exactly as declared. These were lower-cased, and the API applies no naming
-                // policy -- it serialises "FullName", not "fullname" -- so every field on every
-                // generated interface read back as undefined. TypeScript compiled it happily.
-                sb.AppendLine($"  {prop.Name}{optional}: {propType};");
+                EmitProperty(sb, prop, "", enumNames);
             }
 
-            sb.AppendLine("}\n"); // Note: \n is already in the string literal for spacing
+            // What the server stamps and always returns. None of these is an IR property, so this
+            // used to omit them all -- and a PUT that does not echo Version is refused with 409, so the
+            // only update that works could not be written without a cast.
+            sb.AppendLine("  /** Optimistic-concurrency token. Send it back on update; a stale one is refused with 409. */");
+            sb.AppendLine("  readonly Version: number;");
+            sb.AppendLine("  readonly CreatedAtUtc: string;");
+            sb.AppendLine("  readonly UpdatedAtUtc: string;");
+
+            if (workflow is not null)
+            {
+                // Only a transition moves these; the API ignores them on create and update. A row
+                // written before the server stamped the initial state on create still reads "".
+                var stateType = workflow.States.Count > 0 ? $"{entity.Name}WorkflowState | ''" : "string";
+                sb.AppendLine("  /** Set by the server: the initial state on create, then each transition. */");
+                sb.AppendLine($"  readonly CurrentState: {stateType};");
+                sb.AppendLine("  readonly WorkflowId: string;");
+                sb.AppendLine("  readonly WorkflowVersion: string;");
+            }
+
+            sb.AppendLine("}\n");
+
+            // What a caller sends. Separate from the read shape because the server owns the key, the
+            // tenant and owner keys, Version's increment and the workflow fields; `Partial<T>` of the
+            // read shape invited every one of them, and none of the fields that are actually required.
+            if (SdkSurface.HasCreate(entity) || SdkSurface.HasUpdate(entity))
+            {
+                sb.AppendLine($"/** The body of a create: what the caller supplies. */");
+                sb.AppendLine($"export interface {entity.Name}Create {{");
+                foreach (var prop in SdkSurface.CallerProperties(entity))
+                {
+                    EmitProperty(sb, prop, SdkSurface.IsRequired(prop) ? "" : "?", enumNames);
+                }
+                sb.AppendLine("}\n");
+            }
+
+            if (SdkSurface.HasUpdate(entity))
+            {
+                // A PUT replaces the whole document, so a field left out is reset rather than kept:
+                // every caller field is required, and so is the Version the caller read.
+                sb.AppendLine("/** The body of an update. A PUT replaces the whole record, so every field is sent. */");
+                sb.AppendLine($"export type {entity.Name}Update = Required<{entity.Name}Create> & {{ Version: number }};\n");
+            }
         }
 
         foreach (var entity in schema.Entities ?? new List<Entity>())
@@ -126,7 +178,7 @@ public static class TypeScriptSdkGenerator
 
             if (SdkSurface.HasCreate(entity))
             {
-                sb.AppendLine($"  async create(data: Partial<{name}>): Promise<{name}> {{");
+                sb.AppendLine($"  async create(data: {name}Create): Promise<{name}> {{");
                 sb.AppendLine($"    const url = `${{this.config.baseUrl}}{route}`;");
                 sb.AppendLine("    const res = await fetch(url, {");
                 sb.AppendLine("      method: 'POST',");
@@ -139,7 +191,7 @@ public static class TypeScriptSdkGenerator
 
             if (SdkSurface.HasUpdate(entity))
             {
-                sb.AppendLine($"  async update(id: string, data: Partial<{name}>): Promise<{name}> {{");
+                sb.AppendLine($"  async update(id: string, data: {name}Update): Promise<{name}> {{");
                 sb.AppendLine($"    const url = `${{this.config.baseUrl}}{route}/${{id}}`;");
                 sb.AppendLine("    const res = await fetch(url, {");
                 sb.AppendLine("      method: 'PUT',");
@@ -185,6 +237,47 @@ public static class TypeScriptSdkGenerator
         }
         sb.AppendLine($"{indent} */");
     }
+
+    private static void EmitProperty(StringBuilder sb, Property prop, string optional, HashSet<string> enumNames)
+    {
+        if (!string.IsNullOrEmpty(prop.Description))
+        {
+            EmitJsDoc(sb, prop.Description, 2);
+        }
+
+        // Emitted exactly as declared. These were lower-cased, and the API applies no naming
+        // policy -- it serialises "FullName", not "fullname" -- so every field on every
+        // generated interface read back as undefined. TypeScript compiled it happily.
+        var type = enumNames.Contains(prop.Type) ? prop.Type : MapTypeScriptType(prop.Type);
+        sb.AppendLine($"  {prop.Name}{optional}: {type};");
+    }
+
+    /// <summary>
+    /// Refuses a schema whose own names clash with the types generated beside them.
+    /// </summary>
+    /// <remarks>
+    /// An enum named <c>OrderCreate</c> next to an entity <c>Order</c> would emit two declarations of
+    /// one name, which TypeScript rejects in the consumer's build rather than here. Failing at
+    /// generation names the clash; the alternative is a client that does not compile.
+    /// </remarks>
+    private static void RefuseNameCollisions(SchemaModel schema)
+    {
+        var declared = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var e in schema.Enums ?? new List<Enum>()) declared.Add(e.Name);
+        foreach (var e in schema.Entities ?? new List<Entity>()) declared.Add(e.Name);
+
+        foreach (var entity in schema.Entities ?? new List<Entity>())
+        {
+            foreach (var generated in new[] { entity.Name + "Create", entity.Name + "Update", entity.Name + "WorkflowState" })
+            {
+                if (declared.Contains(generated))
+                    throw new InvalidOperationException(
+                        $"The schema declares '{generated}', which the TypeScript SDK generates for entity '{entity.Name}'. Rename one of them.");
+            }
+        }
+    }
+
+    private static string Quote(string value) => "'" + value.Replace("\\", "\\\\").Replace("'", "\\'") + "'";
 
     private static string MapTypeScriptType(string type)
     {

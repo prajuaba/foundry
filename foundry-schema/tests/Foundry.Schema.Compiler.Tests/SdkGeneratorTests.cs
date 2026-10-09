@@ -162,11 +162,141 @@ public class SdkGeneratorTests
         Assert.DoesNotContain("creditlimit", code);
     }
 
-    [Fact]
-    public void TheTypeScriptSdkMarksTheKeyOptional()
+    // ── The TypeScript SDK describes the API that is served ─────────────────
+    //
+    // It used to derive a different shape from the IR than the C# entity generator did: enums erased
+    // to string, no Version, no workflow fields, `Partial<T>` for both create and update, and a
+    // property that the server rejects when omitted marked optional. Each cost the one real client
+    // a runtime failure or an `as any`.
+
+    private static string Block(string code, string header)
     {
-        // A client creating a record does not supply the id.
-        Assert.Contains("Id?: string;", TypeScriptSdkGenerator.Generate(Schema()));
+        var start = code.IndexOf(header, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"'{header}' was not emitted");
+        return code[start..code.IndexOf("\n}", start, StringComparison.Ordinal)];
+    }
+
+    [Fact]
+    public void ACreateBodyLeavesOutWhatTheServerAssigns()
+    {
+        // The test this replaces asserted "Id?: string;" anywhere in the output, which any optional
+        // foreign key such as "CategoryId?: string;" satisfied. What it meant is this.
+        var code = TypeScriptSdkGenerator.Generate(SurfaceSchema("GET", "POST", "PUT"));
+        var create = Block(code, "export interface OrderCreate {");
+
+        Assert.DoesNotContain("  Id", create);
+        Assert.DoesNotContain("TenantId", create);
+        Assert.Contains("  Reference: string;", create);
+        Assert.Contains("  Note?: string;", create);
+        Assert.Contains("async create(data: OrderCreate): Promise<Order>", code);
+
+        // A read carries every field, the key included, so a record read back can be sent as an update.
+        var read = Block(code, "export interface Order {");
+        Assert.Contains("  Id: string;", read);
+        Assert.Contains("  Note: string;", read);
+    }
+
+    [Fact]
+    public void AnUpdateSendsEveryFieldAndTheVersionItRead()
+    {
+        // A PUT is a whole-document replace guarded by optimistic concurrency: a field left out is
+        // reset, and a body without Version is refused with 409.
+        var code = TypeScriptSdkGenerator.Generate(SurfaceSchema("GET", "PUT"));
+
+        Assert.Contains("export type OrderUpdate = Required<OrderCreate> & { Version: number };", code);
+        Assert.Contains("async update(id: string, data: OrderUpdate): Promise<Order>", code);
+        Assert.DoesNotContain("Partial<", code);
+    }
+
+    [Fact]
+    public void AReadCarriesTheFieldsTheServerStamps()
+    {
+        var read = Block(TypeScriptSdkGenerator.Generate(SurfaceSchema("GET")), "export interface Order {");
+
+        Assert.Contains("readonly Version: number;", read);
+        Assert.Contains("readonly CreatedAtUtc: string;", read);
+        Assert.Contains("readonly UpdatedAtUtc: string;", read);
+        Assert.DoesNotContain("CurrentState", read);
+    }
+
+    [Fact]
+    public void EnumsAreUnionsOfTheirValuesAndPropertiesUseThem()
+    {
+        var code = TypeScriptSdkGenerator.Generate(Schema());
+
+        Assert.Contains("export type CustomerTier = 'Standard' | 'Premium';", code);
+        Assert.Contains("  Tier: CustomerTier;", Block(code, "export interface Customer {"));
+    }
+
+    [Fact]
+    public void AWorkflowEntityReadsItsStateAndCannotSendIt()
+    {
+        var schema = SurfaceSchema("GET", "POST", "PUT") with
+        {
+            Workflows =
+            [
+                new WorkflowModel
+                {
+                    Id = "order-flow", Name = "Order flow", Entity = "Order", IsActive = true,
+                    States = [new WorkflowStateModel { Name = "Draft", IsInitial = true }, new WorkflowStateModel { Name = "Shipped" }]
+                }
+            ]
+        };
+        var code = TypeScriptSdkGenerator.Generate(schema);
+
+        Assert.Contains("export type OrderWorkflowState = 'Draft' | 'Shipped';", code);
+        var read = Block(code, "export interface Order {");
+        // '' remains possible for a row written before the server stamped the initial state on create.
+        Assert.Contains("readonly CurrentState: OrderWorkflowState | '';", read);
+        Assert.Contains("readonly WorkflowId: string;", read);
+        Assert.DoesNotContain("CurrentState", Block(code, "export interface OrderCreate {"));
+    }
+
+    [Fact]
+    public void ANumberWhoseRangeExcludesZeroIsRequired()
+    {
+        // F-G: an omitted int binds 0, and Range(1, 10) refuses 0. The schema never said Required.
+        var schema = SurfaceSchema("GET", "POST") with
+        {
+            Entities =
+            [
+                new Entity
+                {
+                    Name = "Unit",
+                    ApiEnabledMethods = ["GET", "POST"],
+                    Properties =
+                    [
+                        new Property { Name = "Id", Type = "ObjectId", IsKey = true },
+                        new Property { Name = "PriorityWeight", Type = "int", Attributes = ["Range(1, 10)"] },
+                        new Property { Name = "Discount", Type = "decimal", Attributes = ["Range(-5.5, -0.5)"] },
+                        new Property { Name = "Headcount", Type = "int", Attributes = ["Range(0, 100)"] },
+                        new Property { Name = "Rating", Type = "int?", Attributes = ["Range(1, 5)"] },
+                        new Property { Name = "Garbled", Type = "int", Attributes = ["Range(1.2.3, 5)"] },
+                    ]
+                }
+            ]
+        };
+        var create = Block(TypeScriptSdkGenerator.Generate(schema), "export interface UnitCreate {");
+
+        Assert.Contains("  PriorityWeight: number;", create);
+        Assert.Contains("  Discount: number;", create);
+        Assert.Contains("  Headcount?: number;", create);
+        // A nullable number binds null when omitted, not 0, so its range says nothing about omission.
+        Assert.Contains("  Rating?:", create);
+        // A malformed range is left for the validator to report; the generator does not crash on it.
+        Assert.Contains("  Garbled?: number;", create);
+    }
+
+    [Fact]
+    public void ASchemaNameThatClashesWithAGeneratedTypeIsRefused()
+    {
+        var schema = SurfaceSchema("GET", "POST") with
+        {
+            Enums = [new Foundry.Schema.Compiler.Enum { Name = "OrderCreate", Values = ["A"] }]
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() => TypeScriptSdkGenerator.Generate(schema));
+        Assert.Contains("'OrderCreate'", ex.Message);
     }
 
     // ── The surface each SDK exposes ────────────────────────────────────────
@@ -279,14 +409,16 @@ public class SdkGeneratorTests
         // Only the key used to be optional, so a caller had to construct every field to satisfy the
         // type -- including the tenant key, which the server stamps from their token and refuses to
         // take from a request body.
-        var sdk = TypeScriptSdkGenerator.Generate(SurfaceSchema("GET", "POST"));
+        // The create body is where that is decided now: the server-assigned keys are absent from it
+        // rather than optional in a shape that also describes reads.
+        var create = Block(TypeScriptSdkGenerator.Generate(SurfaceSchema("GET", "POST")), "export interface OrderCreate {");
 
-        Assert.Contains("Id?: string;", sdk);
-        Assert.Contains("TenantId?: string;", sdk);
-        Assert.Contains("Note?: string;", sdk);
+        Assert.DoesNotContain("  Id", create);
+        Assert.DoesNotContain("TenantId", create);
+        Assert.Contains("  Note?: string;", create);
 
         // The control: a property the schema marks Required stays required.
-        Assert.Contains("Reference: string;", sdk);
+        Assert.Contains("  Reference: string;", create);
     }
 
     // ── Descriptions ────────────────────────────────────────────────────────
