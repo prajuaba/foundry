@@ -273,8 +273,8 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
             {
                 if (isLocalSession) actualSession.StartTransaction();
 
-                // Save to deleted repository
-                await _deletedRepository.InsertAsync(entity, actualSession, ct);
+                // Save to deleted repository. A move, not a new value, so not range-checked.
+                await _deletedRepository.InsertStoredAsync(entity, actualSession, ct);
                 
                 // Hard delete from source collection
                 var filter = Builders<T>.Filter.Eq(e => e.Id, objectId);

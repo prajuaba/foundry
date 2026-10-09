@@ -182,10 +182,23 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
     // ─── Create operations ────────────────────────────────────────────────
 
-    public async Task InsertAsync(T entity, IClientSessionHandle? session = null, CancellationToken ct = default)
+    public Task InsertAsync(T entity, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(entity);
+        EntityWriteGuard<T>.EnsureInRange(entity);
+        return InsertCoreAsync(entity, session, ct);
+    }
 
+    /// <summary>
+    /// Inserts a row that is already stored elsewhere -- a partitioned soft delete moving it to its
+    /// deleted collection -- without the range check a new value gets. A row written before the
+    /// check existed must still be deletable.
+    /// </summary>
+    internal Task InsertStoredAsync(T entity, IClientSessionHandle? session, CancellationToken ct)
+        => InsertCoreAsync(entity, session, ct);
+
+    private async Task InsertCoreAsync(T entity, IClientSessionHandle? session, CancellationToken ct)
+    {
         _writeGuard.StampTenant(entity);
         _accessPolicy.StampOwner(entity);
 
@@ -255,6 +268,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         var now = DateTime.UtcNow;
         foreach (var entity in list)
         {
+            EntityWriteGuard<T>.EnsureInRange(entity);
             _writeGuard.StampTenant(entity);
             _accessPolicy.StampOwner(entity);
             entity.CreatedAtUtc = now;
@@ -554,6 +568,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         var entityAfter = updateSelector(entity);
         if (entityAfter == null)
             throw new InvalidOperationException("Update selector returned a null entity.");
+        EntityWriteGuard<T>.EnsureInRange(entityAfter);
 
         if (oldValues.TryGetValue("CreatedAtUtc", out var cat) && cat is DateTime catTime)
         {
@@ -668,6 +683,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
         DecryptEntity(existing);
         PreserveMaskedFieldsCallerCannotRead(entity, existing);
+        EntityWriteGuard<T>.EnsureInRange(entity);
 
         var oldValues = new Dictionary<string, object?>();
         var properties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);
@@ -811,6 +827,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
             var entityAfter = updateSelector(entity);
             if (entityAfter == null) continue;
+            EntityWriteGuard<T>.EnsureInRange(entityAfter);
 
             if (oldValues.TryGetValue("CreatedAtUtc", out var cat) && cat is DateTime catTime)
             {
@@ -941,6 +958,7 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
 
             DecryptEntity(existing);
             PreserveMaskedFieldsCallerCannotRead(entity, existing);
+            EntityWriteGuard<T>.EnsureInRange(entity);
 
             var oldValues = new Dictionary<string, object?>();
             var properties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);

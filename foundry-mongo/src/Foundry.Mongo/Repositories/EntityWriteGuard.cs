@@ -1,3 +1,6 @@
+using System.ComponentModel.DataAnnotations;
+using System.Globalization;
+using System.Reflection;
 using Foundry.Core.Entities;
 using MongoDB.Bson;
 using MongoDB.Driver;
@@ -109,6 +112,94 @@ internal sealed class EntityWriteGuard<T> where T : class, IEntity<ObjectId>
 
         tenanted.TenantId = _tenantContext.TenantId!;
     }
+
+    /// <summary>
+    /// Refuses a write that would store a value outside a property's declared <c>[Range]</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The attribute used to be checked on the request path only, by model validation, so it
+    /// constrained a client's POST and nothing else. A server-side writer going straight to the
+    /// repository stored whatever it computed: <c>DemandForecastEntry.CoveragePercent</c>, declared
+    /// <c>Range(0, 1000)</c>, held 351,379.5, and the API returned to clients a value it would have
+    /// refused from them. The declaration read like an invariant and was a rule about one route.
+    /// </para>
+    /// <para>
+    /// Every write path calls this on the entity as it will be stored -- after an update selector
+    /// has run, after masked fields are restored -- and the bulk paths call it for every row before
+    /// writing any, so one bad row cannot leave a batch half-written. Moving a row that is already
+    /// stored (a partitioned soft delete) is not a new value and is not checked.
+    /// </para>
+    /// <para>
+    /// Throws the DataAnnotations <see cref="ValidationException"/>, which the API maps to 400: a
+    /// client sending such a value learns what it sent wrong, and a server-side writer fails loudly
+    /// instead of storing it.
+    /// </para>
+    /// </remarks>
+    public static void EnsureInRange(T entity)
+    {
+        foreach (var (property, range) in RangedProperties)
+        {
+            var value = property.GetValue(entity);
+            if (value is null || IsWithin(value, range)) continue;
+
+            throw new ValidationException(
+                $"{typeof(T).Name}.{property.Name} is {Convert.ToString(value, CultureInfo.InvariantCulture)}, "
+                + $"outside its declared Range({Convert.ToString(range.Minimum, CultureInfo.InvariantCulture)}, "
+                + $"{Convert.ToString(range.Maximum, CultureInfo.InvariantCulture)}).");
+        }
+    }
+
+    // Compared as decimal where the value and both bounds are numbers, rather than through
+    // RangeAttribute.IsValid, which converts the value to the operand type: Range(0, 1000) has int
+    // operands, so a decimal 1000.4 rounded to 1000 and passed. Anything decimal cannot hold -- a date
+    // range, double.MaxValue as an open upper bound -- is left to IsValid, which knows how to compare
+    // those; treating it as "not within" refused every value, valid ones included.
+    private static bool IsWithin(object value, RangeAttribute range)
+    {
+        if (TryDecimal(value, out var number)
+            && TryDecimal(range.Minimum, out var min)
+            && TryDecimal(range.Maximum, out var max))
+        {
+            return number >= min && number <= max;
+        }
+
+        try
+        {
+            return range.IsValid(value);
+        }
+        catch (Exception ex) when (ex is OverflowException or FormatException or InvalidCastException or InvalidOperationException)
+        {
+            // An operand the attribute itself cannot interpret: nothing it could accept.
+            return false;
+        }
+    }
+
+    private static bool TryDecimal(object? candidate, out decimal result)
+    {
+        result = 0m;
+        if (candidate is not (sbyte or byte or short or ushort or int or uint or long or ulong or float or double or decimal or string))
+            return false;
+        if (candidate is double d && (double.IsNaN(d) || double.IsInfinity(d))) return false;
+        if (candidate is float f && (float.IsNaN(f) || float.IsInfinity(f))) return false;
+
+        try
+        {
+            result = Convert.ToDecimal(candidate, CultureInfo.InvariantCulture);
+            return true;
+        }
+        catch (Exception ex) when (ex is OverflowException or FormatException)
+        {
+            return false;
+        }
+    }
+
+    private static readonly (PropertyInfo Property, RangeAttribute Range)[] RangedProperties = typeof(T)
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Select(p => (Property: p, Range: p.GetCustomAttribute<RangeAttribute>()))
+        .Where(x => x.Range is not null && x.Property.CanRead)
+        .Select(x => (x.Property, x.Range!))
+        .ToArray();
 
     /// <summary>
     /// The version that was read, as the update paths recorded it before applying the caller's changes.
