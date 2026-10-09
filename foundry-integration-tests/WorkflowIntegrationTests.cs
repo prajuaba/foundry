@@ -134,7 +134,11 @@ public class WorkflowIntegrationTests
         var provider = services.BuildServiceProvider();
 
         // 4. Resolve behavior
-        var behavior = provider.GetRequiredService<IPipelineBehavior<TestTransitionCommand, Unit>>();
+        // By type, not the last registration: AddFoundryWorkflows registers more than one behaviour
+        // (WorkflowFieldGuardBehavior too), and MediatR runs them all where a single resolve sees one.
+        var behavior = provider.GetServices<IPipelineBehavior<TestTransitionCommand, Unit>>()
+            .OfType<WorkflowTransitionBehavior<TestTransitionCommand, Unit>>()
+            .Single();
         var request = new TestTransitionCommand { EntityId = entityId.ToString() };
 
         // Act
