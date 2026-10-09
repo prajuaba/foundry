@@ -1111,6 +1111,24 @@ namespace Foundry.Schema.Compiler
                         $"Name one of: {string.Join(", ", responseTypeNames)}.");
                 }
 
+                if (!string.IsNullOrWhiteSpace(ep.ResponseShape) && !Vocabulary.ResponseShapes.Contains(ep.ResponseShape))
+                {
+                    bag.Error(
+                        DiagnosticCatalog.EndpointUnsupportedResponseShape,
+                        $"Endpoint '{ep.Route}' declares an unsupported responseShape '{ep.ResponseShape}'.",
+                        $"{path}/responseShape",
+                        $"Name one of: {string.Join(", ", Vocabulary.ResponseShapes)}.");
+                }
+                else if (PocoGenerator.IsPaged(ep)
+                    && (!string.Equals(ep.Method, "GET", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(ep.ResponseMediaType)))
+                {
+                    bag.Error(
+                        DiagnosticCatalog.EndpointUnsupportedResponseShape,
+                        $"Endpoint '{ep.Route}' declares responseShape 'Page', but only a GET endpoint answering JSON returns rows to page.",
+                        $"{path}/responseShape",
+                        "Remove responseShape, or make the endpoint a GET without a responseMediaType.");
+                }
+
                 if (!string.IsNullOrWhiteSpace(ep.ResponseMediaType) && !Vocabulary.ResponseMediaTypes.Contains(ep.ResponseMediaType))
                 {
                     bag.Error(

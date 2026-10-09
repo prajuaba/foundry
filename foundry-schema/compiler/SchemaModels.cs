@@ -436,6 +436,18 @@ namespace Foundry.Schema.Compiler
         public string? ResponseType { get; init; }
 
         /// <summary>
+        /// Whether a GET endpoint answers with a bare list of rows (<c>List</c>, the default) or with
+        /// a page: the rows plus the total that matched (<c>Page</c>, Foundry's <c>PagedResult</c>).
+        /// </summary>
+        /// <remarks>
+        /// A list endpoint that clamps its rows cannot tell its caller it did: 500 rows of 2,340 and
+        /// 500 rows of 500 arrive identically. The generated CRUD routes have a paged twin that
+        /// reports the total; a custom endpoint had no way to declare one. Unset means <c>List</c>, so
+        /// every existing schema regenerates identically.
+        /// </remarks>
+        public string? ResponseShape { get; init; }
+
+        /// <summary>
         /// The media type this endpoint's response uses.
         /// </summary>
         /// <remarks>

@@ -1310,12 +1310,17 @@ namespace {CodeGen.Ns(@namespace)};
                 effectiveType = explicitType;
             }
 
-            return ep.Method.Equals("GET", StringComparison.OrdinalIgnoreCase)
-                ? $"System.Collections.Generic.IReadOnlyList<{effectiveType}>"
-                : (!string.IsNullOrWhiteSpace(explicitType)
-                    ? explicitType
-                    : "bool");
+            if (!ep.Method.Equals("GET", StringComparison.OrdinalIgnoreCase))
+                return !string.IsNullOrWhiteSpace(explicitType) ? explicitType : "bool";
+
+            return IsPaged(ep)
+                ? $"Foundry.Core.Paging.PagedResult<{effectiveType}>"
+                : $"System.Collections.Generic.IReadOnlyList<{effectiveType}>";
         }
+
+        /// <summary>Whether a custom endpoint answers with a page (rows plus their total) rather than a bare list.</summary>
+        internal static bool IsPaged(CustomEndpoint ep)
+            => string.Equals(ep.ResponseShape, "Page", StringComparison.OrdinalIgnoreCase);
 
         /// <summary>
         /// Emits the MediatR request record a custom endpoint's handler and rules are typed against.
@@ -1418,6 +1423,18 @@ public partial record {CodeGen.Ident(ep.RequestType, "Request type")} : IRequest
 
         throw new NotImplementedException(
             ""Project {ep.TargetEntity} into {ep.ResponseType}."");";
+                }
+                else if (IsPaged(ep))
+                {
+                    body = $@"        // Counted with the same filter, so the caller can tell a clamped answer from a whole one.
+        var total = await _repository.CountAsync(
+            x => {ComparisonFor(ep)},
+            ct: cancellationToken);
+        var items = await _repository.FindManyAsync(
+            x => {ComparisonFor(ep)},
+            ct: cancellationToken);
+
+        return Foundry.Core.Paging.PagedResult<{ep.TargetEntity}>.From(items, total, 1, items.Count);";
                 }
                 else
                 {
