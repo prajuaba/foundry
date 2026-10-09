@@ -189,14 +189,6 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
         return InsertCoreAsync(entity, session, ct);
     }
 
-    /// <summary>
-    /// Inserts a row that is already stored elsewhere -- a partitioned soft delete moving it to its
-    /// deleted collection -- without the range check a new value gets. A row written before the
-    /// check existed must still be deletable.
-    /// </summary>
-    internal Task InsertStoredAsync(T entity, IClientSessionHandle? session, CancellationToken ct)
-        => InsertCoreAsync(entity, session, ct);
-
     private async Task InsertCoreAsync(T entity, IClientSessionHandle? session, CancellationToken ct)
     {
         _writeGuard.StampTenant(entity);
@@ -1447,6 +1439,18 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
             CollectionName, objectId.ToString(), nextVersion, doc,
             operatorId, $"Restore (v{version})", session, ct);
 
+        if (_auditSink != null)
+        {
+            // Diffed against the row it replaced, decrypted as an update's is, so the diff compares
+            // plaintext with plaintext. With no row to replace, the restore brought one back.
+            if (existing is not null) DecryptEntity(existing);
+            var entry = existing is null
+                ? AuditLogEntry.ForRestore(operatorId, typeof(T).FullName ?? typeof(T).Name, objectId.ToString(), CollectionName)
+                : AuditLogEntry.ForUpdate(operatorId, typeof(T).FullName ?? typeof(T).Name, objectId.ToString(), CollectionName,
+                    Diff(existing, entity));
+            await WriteAuditAsync(entry, ct);
+        }
+
         return entity;
     }
 
@@ -1714,6 +1718,29 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     private void DecryptEntity(T? entity)
     {
         _encryptionService.DecryptEntity(entity);
+    }
+
+    /// <summary>The readable properties, other than Id, whose values differ between two rows.</summary>
+    private static List<PropertyDiff> Diff(T before, T after)
+    {
+        var diffs = new List<PropertyDiff>();
+        foreach (var prop in typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (!prop.CanRead || prop.Name == "Id" || prop.GetIndexParameters().Length > 0) continue;
+
+            var oldVal = prop.GetValue(before);
+            var newVal = prop.GetValue(after);
+            if (!object.Equals(oldVal, newVal))
+            {
+                diffs.Add(new PropertyDiff
+                {
+                    PropertyName = prop.Name,
+                    OldValue = GetDiffValue(prop, oldVal),
+                    NewValue = GetDiffValue(prop, newVal)
+                });
+            }
+        }
+        return diffs;
     }
 
     private static object? GetDiffValue(PropertyInfo prop, object? val)

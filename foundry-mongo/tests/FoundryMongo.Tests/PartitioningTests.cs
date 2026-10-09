@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Foundry.Core.Attributes;
+using Foundry.Core.Audit;
 using Foundry.Core.Entities;
 using Foundry.Core.Tenant;
 using Foundry.Mongo.Repositories;
@@ -224,6 +225,83 @@ public class PartitioningTests : IDisposable
             .CountDocumentsAsync(Builders<BsonDocument>.Filter.Eq("_id", oldId));
 
         Assert.Equal(0, remaining);
+    }
+
+    // ── Audit ───────────────────────────────────────────────────────────────
+
+    [Partitioned(1)]
+    public record SoftLedger : BaseEntity<ObjectId>, IMultiTenant, ISoftDelete
+    {
+        public string TenantId { get; set; } = string.Empty;
+        public string Reference { get; set; } = string.Empty;
+        public bool IsDeleted { get; init; }
+        public DateTime? DeletedAt { get; init; }
+    }
+
+    private sealed class RecordingSink : IAuditSink
+    {
+        public readonly List<AuditLogEntry> Written = new();
+
+        public Task WriteAsync(AuditLogEntry entry, CancellationToken ct = default)
+        {
+            Written.Add(entry);
+            return Task.CompletedTask;
+        }
+
+        public Task WriteManyAsync(IReadOnlyList<AuditLogEntry> entries, CancellationToken ct = default)
+        {
+            Written.AddRange(entries);
+            return Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public async Task ASoftDeleteIsAudited()
+    {
+        // A partitioned soft delete moves the row to the _Deleted collection itself rather than
+        // calling the source repository's delete, which is where soft deletes are audited -- so it
+        // left no entry at all.
+        await RequireReplicaSetAsync();
+        var sink = new RecordingSink();
+        var repo = new PartitionedRepository<SoftLedger>(_db, auditSink: sink, tenantContext: new FixedTenant("acme"));
+        var ledger = new SoftLedger { Id = ObjectId.GenerateNewId(), TenantId = "acme", Reference = "TO-DELETE" };
+        await repo.InsertAsync(ledger);
+        sink.Written.Clear();
+
+        await repo.DeleteByObjectIdAsync(ledger.Id, "operator-1");
+
+        var entry = Assert.Single(sink.Written);
+        Assert.Equal(AuditAction.DeletedSoft, entry.Action);
+        Assert.Equal("operator-1", entry.OperatorId);
+        Assert.Equal(ledger.Id.ToString(), entry.EntityId);
+        Assert.Equal("SoftLedgers", entry.CollectionName);
+        Assert.Equal("acme", entry.TenantId);
+    }
+
+    [Fact]
+    public async Task ASoftDeleteMovesTheRowAsStored()
+    {
+        // The move went through the deleted collection's own insert, which stamped the row as new:
+        // CreatedAtUtc became the time of the delete and Version went back to 1.
+        await RequireReplicaSetAsync();
+        var repo = new PartitionedRepository<SoftLedger>(_db, tenantContext: new FixedTenant("acme"));
+        var ledger = new SoftLedger { Id = ObjectId.GenerateNewId(), TenantId = "acme", Reference = "KEEP-DATES" };
+        await repo.InsertAsync(ledger);
+        var created = DateTime.UtcNow.AddDays(-30);
+        await _db.GetCollection<BsonDocument>("SoftLedgers").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("_id", ledger.Id),
+            Builders<BsonDocument>.Update.Set("createdAtUtc", created).Set("version", 4));
+
+        await repo.DeleteByObjectIdAsync(ledger.Id, "operator-1");
+
+        var moved = await _db.GetCollection<BsonDocument>("SoftLedgers_Deleted")
+            .Find(Builders<BsonDocument>.Filter.Eq("_id", ledger.Id)).SingleAsync();
+        Assert.Equal(created, moved["createdAtUtc"].ToUniversalTime(), TimeSpan.FromSeconds(1));
+        Assert.Equal(5, moved["version"].AsInt32);
+        Assert.True(moved["isDeleted"].AsBoolean);
+        Assert.Equal("KEEP-DATES", moved["reference"].AsString);
+        Assert.Equal(0, await _db.GetCollection<BsonDocument>("SoftLedgers")
+            .CountDocumentsAsync(Builders<BsonDocument>.Filter.Eq("_id", ledger.Id)));
     }
 
     // ── The transactional path ──────────────────────────────────────────────

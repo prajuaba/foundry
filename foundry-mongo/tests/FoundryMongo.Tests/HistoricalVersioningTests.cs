@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Foundry.Core.Audit;
 using Foundry.Core.Entities;
 using Foundry.Mongo.Repositories;
 using MongoDB.Bson;
@@ -146,5 +147,64 @@ public class HistoricalVersioningTests
             null,
             Arg.Any<CancellationToken>()
         );
+    }
+
+    [Fact]
+    public async Task RestoreVersionAsync_IsAudited_AsAnUpdateAgainstTheRowItReplaced()
+    {
+        // A restore rewrites the row and its history, and wrote no audit entry: the trail showed
+        // the version before and the version after with nothing in between.
+        var mockDb = Substitute.For<IMongoDatabase>();
+        var mockCollection = Substitute.For<IMongoCollection<VersionedProduct>>();
+        mockCollection.CollectionNamespace.Returns(new CollectionNamespace(new DatabaseNamespace("TestDb"), "VersionedProducts"));
+        mockCollection.Database.Returns(mockDb);
+        mockDb.GetCollection<VersionedProduct>(Arg.Any<string>()).Returns(mockCollection);
+        var mockHistoryCollection = Substitute.For<IMongoCollection<EntityRevision>>();
+        mockDb.GetCollection<EntityRevision>("VersionedProducts_History").Returns(mockHistoryCollection);
+
+        var entityId = ObjectId.Parse("507f1f77bcf86cd799439011");
+        var historical = new VersionedProduct { Id = entityId, Sku = "VP-Original", Price = 80, Version = 1 };
+        mockHistoryCollection.FindAsync(
+            Arg.Any<FilterDefinition<EntityRevision>>(),
+            Arg.Any<FindOptions<EntityRevision, EntityRevision>>(),
+            Arg.Any<CancellationToken>()
+        ).Returns(Task.FromResult<IAsyncCursor<EntityRevision>>(new TestAsyncCursor<EntityRevision>(
+            new EntityRevision { EntityId = entityId.ToString(), Version = 1, Data = historical.ToBsonDocument(), Action = "Insert" })));
+        mockCollection.FindAsync(
+            Arg.Any<FilterDefinition<VersionedProduct>>(),
+            Arg.Any<FindOptions<VersionedProduct, VersionedProduct>>(),
+            Arg.Any<CancellationToken>()
+        ).Returns(Task.FromResult<IAsyncCursor<VersionedProduct>>(new TestAsyncCursor<VersionedProduct>(
+            new VersionedProduct { Id = entityId, Sku = "VP-Modified", Price = 150, Version = 2 })));
+
+        var sink = new RecordingSink();
+        var repository = new Repository<VersionedProduct>(mockDb, auditSink: sink);
+
+        await repository.RestoreVersionAsync(entityId, 1);
+
+        var entry = Assert.Single(sink.Written);
+        Assert.Equal(AuditAction.Updated, entry.Action);
+        Assert.Equal(entityId.ToString(), entry.EntityId);
+        var sku = Assert.Single(entry.PropertyDiffs, d => d.PropertyName == "Sku");
+        Assert.Equal("VP-Modified", sku.OldValue);
+        Assert.Equal("VP-Original", sku.NewValue);
+        Assert.Contains(entry.PropertyDiffs, d => d.PropertyName == "Price");
+    }
+
+    private sealed class RecordingSink : IAuditSink
+    {
+        public readonly List<AuditLogEntry> Written = new();
+
+        public Task WriteAsync(AuditLogEntry entry, CancellationToken ct = default)
+        {
+            Written.Add(entry);
+            return Task.CompletedTask;
+        }
+
+        public Task WriteManyAsync(IReadOnlyList<AuditLogEntry> entries, CancellationToken ct = default)
+        {
+            Written.AddRange(entries);
+            return Task.CompletedTask;
+        }
     }
 }
