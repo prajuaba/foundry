@@ -263,22 +263,33 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
 
         if (entity is ISoftDelete)
         {
-            SetProperty(entity, "IsDeleted", true);
-            SetProperty(entity, "DeletedAt", DateTime.UtcNow);
-
             var actualSession = session ?? await _db.Client.StartSessionAsync(cancellationToken: ct);
             var isLocalSession = session == null;
+            var moved = false;
 
             try
             {
                 if (isLocalSession) actualSession.StartTransaction();
 
-                // Save to deleted repository. A move, not a new value, so not range-checked.
-                await _deletedRepository.InsertStoredAsync(entity, actualSession, ct);
-                
-                // Hard delete from source collection
+                // The lookup above is the access check; what moves is the row as stored. The entity
+                // it returned is decrypted and masked for the caller, and inserting it through the
+                // repository stamped a new CreatedAtUtc and Version 1, audited an insert, and -- for
+                // a caller who may not read a masked field -- would store the mask in place of the
+                // value. A range check does not apply either: the row is not a new value.
                 var filter = Builders<T>.Filter.Eq(e => e.Id, objectId);
-                await sourceRepo.Collection.DeleteOneAsync(actualSession, filter, cancellationToken: ct);
+                var stored = await sourceRepo.Collection.Find(actualSession, filter).FirstOrDefaultAsync(ct);
+                if (stored != null)
+                {
+                    var now = DateTime.UtcNow;
+                    SetProperty(stored, "IsDeleted", true);
+                    SetProperty(stored, "DeletedAt", now);
+                    stored.UpdatedAtUtc = now;
+                    stored.Version += 1;
+
+                    await _deletedRepository.Collection.InsertOneAsync(actualSession, stored, cancellationToken: ct);
+                    await sourceRepo.Collection.DeleteOneAsync(actualSession, filter, cancellationToken: ct);
+                    moved = true;
+                }
 
                 if (isLocalSession) await actualSession.CommitTransactionAsync(ct);
             }
@@ -290,6 +301,19 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
             finally
             {
                 if (isLocalSession) actualSession.Dispose();
+            }
+
+            // The move bypasses the source repository's own delete, which is where every other
+            // soft delete is audited, so it is audited here -- unless the row went between the
+            // lookup and the move, when there was nothing to delete.
+            if (moved && _auditSink != null)
+            {
+                var entry = AuditLogEntry.ForSoftDelete(
+                    operatorId,
+                    typeof(T).FullName ?? typeof(T).Name,
+                    objectId.ToString(),
+                    sourceRepo.CollectionName);
+                await _auditSink.WriteAsync(entry with { TenantId = _tenantContext?.TenantId }, ct);
             }
         }
         else
