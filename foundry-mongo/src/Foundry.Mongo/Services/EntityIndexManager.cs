@@ -35,9 +35,58 @@ internal sealed class EntityIndexManager<T> where T : class, IEntity<ObjectId>
 
         if (indexModels.Count > 0)
         {
+            if (IsMultiTenant) await DropGlobalUniqueIndexesAsync(indexModels, ct);
             await _collection.Indexes.CreateManyAsync(indexModels, null, ct);
         }
     }
+
+    private static bool IsMultiTenant => typeof(Foundry.Core.Tenant.IMultiTenant).IsAssignableFrom(typeof(T));
+
+    private const string TenantField = nameof(Foundry.Core.Tenant.IMultiTenant.TenantId);
+
+    /// <summary>
+    /// Drops a unique index left from before uniqueness was scoped per tenant, so it does not go on
+    /// enforcing uniqueness across every tenant beside the scoped one that replaces it.
+    /// </summary>
+    /// <remarks>
+    /// Only an index whose keys are exactly a scoped index's keys minus the leading tenant is dropped:
+    /// that is the index this one replaces, and nothing else here is touched. Replacing a global unique
+    /// index with a per-tenant one only loosens it, so the create that follows cannot fail on data.
+    /// </remarks>
+    private async Task DropGlobalUniqueIndexesAsync(IReadOnlyList<CreateIndexModel<T>> models, CancellationToken ct)
+    {
+        var args = new RenderArgs<T>(_collection.DocumentSerializer, _collection.Settings.SerializerRegistry);
+        var replaced = models
+            .Where(m => m.Options?.Unique == true)
+            .Select(m => m.Keys.Render(args))
+            .Where(keys => keys.ElementCount > 1)
+            .Select(keys => new BsonDocument(keys.Elements.Skip(1)))
+            .ToList();
+        if (replaced.Count == 0) return;
+
+        using var cursor = await _collection.Indexes.ListAsync(ct);
+        foreach (var existing in await cursor.ToListAsync(ct))
+        {
+            if (!existing.GetValue("unique", false).ToBoolean()) continue;
+            if (existing.GetValue("key", null) is not BsonDocument key) continue;
+            if (!replaced.Any(r => r.Equals(key))) continue;
+
+            await _collection.Indexes.DropOneAsync(existing["name"].AsString, ct);
+        }
+    }
+
+    /// <summary>
+    /// A unique index on a multi-tenant entity is unique within its tenant.
+    /// </summary>
+    /// <remarks>
+    /// The keys were taken as declared, so every unique index was global: a second tenant could not
+    /// create a project whose code another tenant already used, and the 409 that refused it told them
+    /// the code existed somewhere else. Isolation must not depend on how an index was declared.
+    /// </remarks>
+    private static IndexKeysDefinition<T> ScopedToTenant(IndexKeysDefinition<T> keys, bool unique, string firstField)
+        => unique && IsMultiTenant && !string.Equals(firstField, TenantField, StringComparison.Ordinal)
+            ? Builders<T>.IndexKeys.Combine(Builders<T>.IndexKeys.Ascending(TenantField), keys)
+            : keys;
 
     /// <summary>
     /// Builds index models by scanning entity properties for index attributes.
@@ -66,7 +115,7 @@ internal sealed class EntityIndexManager<T> where T : class, IEntity<ObjectId>
                     Name = indexedAttr.Name
                 };
 
-                indexModels.Add(new CreateIndexModel<T>(indexKeys, options));
+                indexModels.Add(new CreateIndexModel<T>(ScopedToTenant(indexKeys, indexedAttr.Unique, prop.Name), options));
             }
 
             // Check for [TextIndexed]
@@ -94,6 +143,7 @@ internal sealed class EntityIndexManager<T> where T : class, IEntity<ObjectId>
 
             if (keys is null) continue;
 
+            keys = ScopedToTenant(keys, compound.Unique, compound.Fields[0]);
             indexModels.Add(new CreateIndexModel<T>(keys, new CreateIndexOptions
             {
                 Unique = compound.Unique,
