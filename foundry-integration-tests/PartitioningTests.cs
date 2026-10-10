@@ -108,9 +108,12 @@ public class PartitioningTests
         // Mock database collection names listing
         var mockCursor = Substitute.For<IAsyncCursor<string>>();
         mockCursor.MoveNext(Arg.Any<CancellationToken>()).Returns(true, false);
+        mockCursor.MoveNextAsync(Arg.Any<CancellationToken>()).Returns(true, false);
         mockCursor.Current.Returns(new List<string> { "TestPartitionedEntities_2024", "TestPartitionedEntities_2025" });
         mockDb.ListCollectionNames(Arg.Any<ListCollectionNamesOptions>(), Arg.Any<CancellationToken>())
             .Returns(mockCursor);
+        mockDb.ListCollectionNamesAsync(Arg.Any<ListCollectionNamesOptions>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(mockCursor));
 
         // Mock collection aggregation call
         var mockCursorResult = Substitute.For<IAsyncCursor<BsonDocument>>();
@@ -145,7 +148,18 @@ public class PartitioningTests
                 p.Render(new RenderArgs<TestPartitionedEntity>(
                     BsonSerializer.LookupSerializer<TestPartitionedEntity>(), 
                     BsonSerializer.SerializerRegistry))
-                .Documents.Any(d => d.Contains("$unionWith") && d["$unionWith"]["coll"] == "TestPartitionedEntities_2025")
+                .Documents.Any(d => d.Contains("$unionWith") && d["$unionWith"]["coll"] == "TestPartitionedEntities_2025") &&
+                // Read filters first, and inside every archive branch: the union must not widen what
+                // the caller may read.
+                p.Render(new RenderArgs<TestPartitionedEntity>(
+                    BsonSerializer.LookupSerializer<TestPartitionedEntity>(),
+                    BsonSerializer.SerializerRegistry))
+                .Documents.First().Contains("$match") &&
+                p.Render(new RenderArgs<TestPartitionedEntity>(
+                    BsonSerializer.LookupSerializer<TestPartitionedEntity>(),
+                    BsonSerializer.SerializerRegistry))
+                .Documents.Where(d => d.Contains("$unionWith"))
+                .All(d => d["$unionWith"]["pipeline"][0].AsBsonDocument.Contains("$match"))
             ),
             Arg.Any<AggregateOptions>(),
             Arg.Any<CancellationToken>()

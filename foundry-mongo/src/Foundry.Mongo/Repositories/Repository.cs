@@ -115,6 +115,15 @@ public sealed class Repository<T> : IRepository<T> where T : class, IEntity<Obje
     /// <inheritdoc />
     public IQueryable<T> Query() => _collection.AsQueryable().Where(_accessPolicy.ApplyReadFilters(null));
 
+    /// <summary>The read filters -- soft delete, tenant, owner -- applied to <paramref name="filter"/>, for a partitioned union.</summary>
+    internal FilterDefinition<T> ReadFilter(FilterDefinition<T> filter) => _accessPolicy.ApplyReadFilters(filter);
+
+    /// <summary>Tenant and owner scope only, for reading rows the soft-delete predicate would hide.</summary>
+    internal FilterDefinition<T> CallerScope(FilterDefinition<T> filter) => _accessPolicy.ScopeToOwner(_accessPolicy.ScopeToTenant(filter));
+
+    /// <summary>The predicate <see cref="SearchPagedAsync"/> pages by.</summary>
+    internal Expression<Func<T, bool>> SearchExpression(SearchCriterion[] criteria) => _searchTranslator.BuildExpression(criteria);
+
     public Repository(
         IMongoDatabase db,
         IAuditSink? auditSink = null,
