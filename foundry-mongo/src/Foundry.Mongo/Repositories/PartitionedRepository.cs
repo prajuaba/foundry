@@ -17,6 +17,7 @@ using Humanizer;
 using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
 using MongoDB.Driver;
+using MongoDB.Driver.Linq;
 
 namespace Foundry.Mongo.Repositories;
 
@@ -55,9 +56,21 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
     public IMongoCollection<T> Collection => _activeRepository.Collection;
 
     /// <inheritdoc />
-    /// <remarks>Hot partition only, matching <see cref="Collection"/>. Archived years are reached
-    /// through the date-range aware read methods, not through a composed query.</remarks>
-    public IQueryable<T> Query() => _activeRepository.Query();
+    /// <remarks>
+    /// Every partition: the active collection, then each archive through <c>$unionWith</c>, each
+    /// branch under the same read filters. What the caller composes on top -- filters, sorting,
+    /// paging -- runs after the union, so it sees one collection. It used to be the active
+    /// collection only, and an archived row was simply absent from every composed query.
+    /// </remarks>
+    public IQueryable<T> Query()
+    {
+        var query = _activeRepository.Query();
+        foreach (var archive in GetArchiveCollectionNames())
+        {
+            query = query.AppendStage<T, T>(UnionWith(archive));
+        }
+        return query;
+    }
     public string CollectionName => _activeRepository.CollectionName;
     public int MaxDepthCap { get => _activeRepository.MaxDepthCap; set => _activeRepository.MaxDepthCap = value; }
 
@@ -105,10 +118,75 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
         });
     }
 
-    private Repository<T> GetRepositoryForId(ObjectId id)
+    /// <summary>
+    /// The partition holding <paramref name="id"/>. An id past the threshold belongs in its year's
+    /// archive, but stays in the active collection until the archival worker has moved it, so the
+    /// archive is checked rather than assumed.
+    /// </summary>
+    private async Task<Repository<T>> LocateAsync(ObjectId id, IClientSessionHandle? session, CancellationToken ct)
     {
-        int year = id.CreationTime.Year;
-        return IsInArchive(year) ? GetArchiveRepository(year) : _activeRepository;
+        var year = id.CreationTime.Year;
+        if (!IsInArchive(year)) return _activeRepository;
+
+        var archive = GetArchiveRepository(year);
+        var filter = Builders<T>.Filter.Eq(e => e.Id, id);
+        var options = new CountOptions { Limit = 1 };
+        var found = session != null
+            ? await archive.Collection.CountDocumentsAsync(session, filter, options, ct)
+            : await archive.Collection.CountDocumentsAsync(filter, options, ct);
+        return found > 0 ? archive : _activeRepository;
+    }
+
+    /// <summary>The active collection, then every archive that exists, newest year first.</summary>
+    private async Task<IReadOnlyList<Repository<T>>> PartitionsAsync(CancellationToken ct)
+    {
+        var partitions = new List<Repository<T>> { _activeRepository };
+        foreach (var name in (await GetArchiveCollectionNamesAsync(ct)).OrderByDescending(n => n, StringComparer.Ordinal))
+        {
+            partitions.Add(GetArchiveRepository(int.Parse(name[(name.LastIndexOf('_') + 1)..])));
+        }
+        return partitions;
+    }
+
+    /// <summary>
+    /// Rows from several partitions in one order. Each partition has already sorted and limited its
+    /// own rows by the same key, so the first N of the merge are the first N overall.
+    /// </summary>
+    private static IEnumerable<T> Merge(IEnumerable<T> rows, string? fieldName, SortOrder order)
+    {
+        if (string.IsNullOrWhiteSpace(fieldName)) return rows;
+
+        var property = fieldName == "_id"
+            ? typeof(T).GetProperty(nameof(IEntity<ObjectId>.Id))
+            : typeof(T).GetProperty(fieldName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+        if (property == null) return rows;
+
+        // Ordinal for strings, as MongoDB compares them without a collation.
+        var comparer = Comparer<object?>.Create((a, b) => a is string x && b is string y
+            ? string.CompareOrdinal(x, y)
+            : Comparer<object?>.Default.Compare(a, b));
+        return order == SortOrder.Ascending
+            ? rows.OrderBy(r => property.GetValue(r), comparer)
+            : rows.OrderByDescending(r => property.GetValue(r), comparer);
+    }
+
+    /// <summary>The sort an offset page is read in: the request's, or insertion order.</summary>
+    private static (string Field, SortOrder Order) PageSort(PagedRequest request)
+        => request.SortBy != null
+            ? (request.SortBy.FieldName, request.SortBy.Order)
+            : (nameof(IEntity<ObjectId>.Id), SortOrder.Ascending);
+
+    /// <summary>A <c>$unionWith</c> stage reading <paramref name="archive"/> under the active collection's read filters.</summary>
+    private PipelineStageDefinition<T, T> UnionWith(string archive)
+    {
+        var serializer = BsonSerializer.LookupSerializer<T>();
+        var match = _activeRepository.ReadFilter(Builders<T>.Filter.Empty)
+            .Render(new RenderArgs<T>(serializer, BsonSerializer.SerializerRegistry));
+        return new BsonDocument("$unionWith", new BsonDocument
+        {
+            ["coll"] = archive,
+            ["pipeline"] = new BsonArray { new BsonDocument("$match", match) }
+        });
     }
 
     private static void SetProperty(object obj, string propertyName, object? value)
@@ -130,11 +208,10 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
     public async Task<T?> GetByIdAsync(object id, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
         var objectId = ConvertId(id);
-        int year = objectId.CreationTime.Year;
-
-        if (IsInArchive(year))
+        var repo = await LocateAsync(objectId, session, ct);
+        if (repo != _activeRepository)
         {
-            return await GetArchiveRepository(year).GetByIdAsync(objectId, session, ct);
+            return await repo.GetByIdAsync(objectId, session, ct);
         }
 
         var activeResult = await _activeRepository.GetByIdAsync(objectId, session, ct);
@@ -155,26 +232,21 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
 
     public async Task<IReadOnlyList<T>> FindManyAsync(Expression<Func<T, bool>>? filter = null, string? sortBy = null, SortOrder sortOrder = SortOrder.Descending, int limit = 100, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        var repos = RouteRepositoriesByDateFilter(filter);
-        if (repos.Count == 1)
+        // Every partition, whatever the filter names. Rows are archived by the year in their id,
+        // so a filter on any other field says nothing about where they are; routing on the filter
+        // read only the active collection for all of them.
+        var rows = new List<T>();
+        foreach (var repo in await PartitionsAsync(ct))
         {
-            return await repos[0].FindManyAsync(filter, sortBy, sortOrder, limit, session, ct);
+            rows.AddRange(await repo.FindManyAsync(filter, sortBy, sortOrder, limit, session, ct));
         }
-
-        var results = new List<T>();
-        foreach (var repo in repos)
-        {
-            var items = await repo.FindManyAsync(filter, sortBy, sortOrder, limit, session, ct);
-            results.AddRange(items);
-        }
-        return results.Take(limit).ToList();
+        return Merge(rows, sortBy, sortOrder).Take(limit).ToList();
     }
 
     public async Task<long> CountAsync(Expression<Func<T, bool>>? filter = null, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        var repos = RouteRepositoriesByDateFilter(filter);
         long total = 0;
-        foreach (var repo in repos)
+        foreach (var repo in await PartitionsAsync(ct))
         {
             total += await repo.CountAsync(filter, session, ct);
         }
@@ -183,58 +255,103 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
 
     public async Task<PagedResult<T>> GetPagedAsync(PagedRequest request, Expression<Func<T, bool>>? filter = null, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        var repos = RouteRepositoriesByDateFilter(filter);
-        if (repos.Count == 1)
+        ArgumentNullException.ThrowIfNull(request);
+        var partitions = await PartitionsAsync(ct);
+        if (partitions.Count == 1)
         {
-            return await repos[0].GetPagedAsync(request, filter, session, ct);
+            return await _activeRepository.GetPagedAsync(request, filter, session, ct);
         }
 
-        var items = new List<T>();
-        long total = 0;
-        foreach (var repo in repos)
+        if (request.CursorInfo != null)
         {
-            var res = await repo.GetPagedAsync(request, filter, session, ct);
-            items.AddRange(res.Items);
-            total += res.TotalRecords;
+            // Each partition seeks past the same cursor, so the next page is the first PageSize of
+            // their merge, and there is a next page if any partition had more.
+            var rows = new List<T>();
+            var more = false;
+            foreach (var repo in partitions)
+            {
+                var page = await repo.GetPagedAsync(request, filter, session, ct);
+                rows.AddRange(page.Items);
+                more |= page.NextCursor != null;
+            }
+
+            var merged = Merge(rows, request.CursorInfo.FieldName, request.CursorInfo.Order).ToList();
+            var items = merged.Take(request.PageSize).ToList();
+            more |= merged.Count > request.PageSize;
+            if (!more || items.Count == 0)
+            {
+                return new PagedResult<T> { Items = items, TotalRecords = items.Count, PageNumber = request.PageNumber, PageSize = request.PageSize };
+            }
+
+            var next = CursorSeekInfo.FromValue(items[^1], request.CursorInfo.FieldName, request.CursorInfo.Order);
+            return PagedResult<T>.WithCursor(items, items.Count + 1, request.PageNumber, request.PageSize, next);
         }
-        return new PagedResult<T> { Items = items.Take(request.PageSize).ToList(), TotalRecords = total, PageNumber = request.PageNumber, PageSize = request.PageSize };
+
+        return PagedResult<T>.From(
+            await OffsetPageAsync(partitions, request, filter, session, ct),
+            await CountAsync(filter, session, ct),
+            request.PageNumber,
+            request.PageSize);
     }
 
     public async Task<IReadOnlyList<T>> GetPagedItemsAsync(PagedRequest request, Expression<Func<T, bool>>? filter = null, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        var repos = RouteRepositoriesByDateFilter(filter);
-        if (repos.Count == 1)
+        ArgumentNullException.ThrowIfNull(request);
+        var partitions = await PartitionsAsync(ct);
+        if (partitions.Count == 1 || request.CursorInfo != null)
         {
-            return await repos[0].GetPagedItemsAsync(request, filter, session, ct);
+            return partitions.Count == 1
+                ? await _activeRepository.GetPagedItemsAsync(request, filter, session, ct)
+                : (await GetPagedAsync(request, filter, session, ct)).Items;
         }
 
-        var items = new List<T>();
-        foreach (var repo in repos)
+        return await OffsetPageAsync(partitions, request, filter, session, ct);
+    }
+
+    /// <summary>
+    /// One offset page across partitions. Page N of the whole is not page N of each partition, so
+    /// each is read from its start to the page's end, in the page's order, and the merge is cut.
+    /// </summary>
+    private static async Task<IReadOnlyList<T>> OffsetPageAsync(
+        IReadOnlyList<Repository<T>> partitions, PagedRequest request, Expression<Func<T, bool>>? filter,
+        IClientSessionHandle? session, CancellationToken ct)
+    {
+        OffsetPaginationHelper.ValidatePageNumber(request.PageNumber);
+        OffsetPaginationHelper.ValidatePageSize(request.PageSize);
+        var depth = OffsetPaginationHelper.CheckDepth(request.PageNumber, request.PageSize, request.MaxDepthCap);
+        if (depth.IsExceeded)
         {
-            items.AddRange(await repo.GetPagedItemsAsync(request, filter, session, ct));
+            throw new ArgumentException($"Offset pagination depth ({depth.TotalDepthUsed}) exceeds configured MaxDepthCap ({request.MaxDepthCap}). Use cursor-based pagination instead.");
         }
-        return items.Take(request.PageSize).ToList();
+
+        var (field, order) = PageSort(request);
+        var end = request.PageNumber * request.PageSize;
+        var rows = new List<T>();
+        foreach (var repo in partitions)
+        {
+            rows.AddRange(await repo.FindManyAsync(filter, field, order, end, session, ct));
+        }
+        return Merge(rows, field, order).Skip(end - request.PageSize).Take(request.PageSize).ToList();
     }
 
     public async Task UpdateByObjectIdAsync(object id, Func<T, T> updateSelector, string operatorId, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
         var objectId = ConvertId(id);
-        var repo = GetRepositoryForId(objectId);
+        var repo = await LocateAsync(objectId, session, ct);
         await repo.UpdateByObjectIdAsync(objectId, updateSelector, operatorId, session, ct);
     }
 
     public async Task UpdateAsync(T entity, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
         var objectId = ConvertId(entity.Id);
-        var repo = GetRepositoryForId(objectId);
+        var repo = await LocateAsync(objectId, session, ct);
         await repo.UpdateAsync(entity, session, ct);
     }
 
     public async Task<IReadOnlyList<UpdateResult>> BulkUpdateManyAsync(Expression<Func<T, bool>> filter, Func<T, T> updateSelector, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        var repos = RouteRepositoriesByDateFilter(filter);
         var results = new List<UpdateResult>();
-        foreach (var repo in repos)
+        foreach (var repo in await PartitionsAsync(ct))
         {
             var res = await repo.BulkUpdateManyAsync(filter, updateSelector, session, ct);
             results.AddRange(res);
@@ -244,19 +361,21 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
 
     public async Task BulkUpdateAsync(IEnumerable<T> entities, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        var groups = entities.GroupBy(e => ConvertId(e.Id).CreationTime.Year);
-        foreach (var group in groups)
+        var located = new List<(Repository<T> Repo, T Entity)>();
+        foreach (var entity in entities)
         {
-            var repo = IsInArchive(group.Key) ? GetArchiveRepository(group.Key) : _activeRepository;
-            await repo.BulkUpdateAsync(group, session, ct);
+            located.Add((await LocateAsync(ConvertId(entity.Id), session, ct), entity));
+        }
+        foreach (var group in located.GroupBy(x => x.Repo))
+        {
+            await group.Key.BulkUpdateAsync(group.Select(x => x.Entity), session, ct);
         }
     }
 
     public async Task DeleteByObjectIdAsync(object id, string operatorId, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
         var objectId = ConvertId(id);
-        int year = objectId.CreationTime.Year;
-        var sourceRepo = IsInArchive(year) ? GetArchiveRepository(year) : _activeRepository;
+        var sourceRepo = await LocateAsync(objectId, session, ct);
 
         var entity = await sourceRepo.GetByIdAsync(objectId, session, ct);
         if (entity == null) return;
@@ -329,57 +448,33 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
 
     public async Task<IReadOnlyList<T>> FindByCriteriaAsync(SearchCriterion[] criteria, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        // For search criteria, fallback to active + deleted + all archives
-        var activeResults = await _activeRepository.FindByCriteriaAsync(criteria, session, ct);
-        var results = activeResults.ToList();
-
-        foreach (var repo in _archiveRepositories.Values)
+        var rows = new List<T>();
+        foreach (var repo in await PartitionsAsync(ct))
         {
-            var res = await repo.FindByCriteriaAsync(criteria, session, ct);
-            results.AddRange(res);
+            rows.AddRange(await repo.FindByCriteriaAsync(criteria, session, ct));
         }
-
-        return results;
+        return rows;
     }
 
-    public async Task<PagedResult<UnifiedSearchResult>> CrossCollectionSearchAsync(CrossCollectionSearchRequest request, IClientSessionHandle? session = null, CancellationToken ct = default)
+    /// <remarks>
+    /// The active repository's alone. A cross-collection search reads the collections of the entity
+    /// types it is asked for, not this repository's, so asking each archive as well returned every
+    /// result once per archive.
+    /// </remarks>
+    public Task<PagedResult<UnifiedSearchResult>> CrossCollectionSearchAsync(CrossCollectionSearchRequest request, IClientSessionHandle? session = null, CancellationToken ct = default)
+        => _activeRepository.CrossCollectionSearchAsync(request, session, ct);
+
+    public Task<PagedResult<T>> SearchPagedAsync(SearchCriterion[] criteria, PagedRequest pageRequest, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
-        // Parallel cross collection search on active + archives
-        var activeResults = await _activeRepository.CrossCollectionSearchAsync(request, session, ct);
-        var results = activeResults.Items.ToList();
-        long total = activeResults.TotalRecords;
-
-        foreach (var repo in _archiveRepositories.Values)
-        {
-            var res = await repo.CrossCollectionSearchAsync(request, session, ct);
-            results.AddRange(res.Items);
-            total += res.TotalRecords;
-        }
-
-        return new PagedResult<UnifiedSearchResult> { Items = results, TotalRecords = total, PageNumber = activeResults.PageNumber, PageSize = activeResults.PageSize };
-    }
-
-    public async Task<PagedResult<T>> SearchPagedAsync(SearchCriterion[] criteria, PagedRequest pageRequest, IClientSessionHandle? session = null, CancellationToken ct = default)
-    {
-        var activePage = await _activeRepository.SearchPagedAsync(criteria, pageRequest, session, ct);
-        var results = activePage.Items.ToList();
-        long total = activePage.TotalRecords;
-
-        foreach (var repo in _archiveRepositories.Values)
-        {
-            var res = await repo.SearchPagedAsync(criteria, pageRequest, session, ct);
-            results.AddRange(res.Items);
-            total += res.TotalRecords;
-        }
-
-        return new PagedResult<T> { Items = results.Take(pageRequest.PageSize).ToList(), TotalRecords = total, PageNumber = pageRequest.PageNumber, PageSize = pageRequest.PageSize };
+        ArgumentNullException.ThrowIfNull(criteria);
+        return GetPagedAsync(pageRequest, _activeRepository.SearchExpression(criteria), session, ct);
     }
 
     public async Task CreateIndexesAsync(CancellationToken ct = default)
     {
         await _activeRepository.CreateIndexesAsync(ct);
         await _deletedRepository.CreateIndexesAsync(ct);
-        foreach (var repo in _archiveRepositories.Values)
+        foreach (var repo in (await PartitionsAsync(ct)).Skip(1))
         {
             await repo.CreateIndexesAsync(ct);
         }
@@ -388,8 +483,7 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
     public async Task<IReadOnlyList<EntityRevision>> GetRevisionsAsync(object id, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
         var objectId = ConvertId(id);
-        int year = objectId.CreationTime.Year;
-        var repo = IsInArchive(year) ? GetArchiveRepository(year) : _activeRepository;
+        var repo = await LocateAsync(objectId, session, ct);
         var revisions = await repo.GetRevisionsAsync(objectId, session, ct);
 
         if (!revisions.Any())
@@ -403,8 +497,7 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
     public async Task<EntityRevision?> GetRevisionByVersionAsync(object id, int version, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
         var objectId = ConvertId(id);
-        int year = objectId.CreationTime.Year;
-        var repo = IsInArchive(year) ? GetArchiveRepository(year) : _activeRepository;
+        var repo = await LocateAsync(objectId, session, ct);
         var revision = await repo.GetRevisionByVersionAsync(objectId, version, session, ct);
 
         if (revision == null)
@@ -418,8 +511,7 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
     public async Task<T> RestoreVersionAsync(object id, int version, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
         var objectId = ConvertId(id);
-        int year = objectId.CreationTime.Year;
-        var repo = IsInArchive(year) ? GetArchiveRepository(year) : _activeRepository;
+        var repo = await LocateAsync(objectId, session, ct);
         return await repo.RestoreVersionAsync(objectId, version, session, ct);
     }
 
@@ -437,28 +529,35 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
 
     public async Task RestoreDeletedAsync(ObjectId id, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
+        // Scoped to the caller's tenant and ownership, as every other way to the row is. It was
+        // found by id alone, so any tenant could restore any other tenant's deleted row.
         var filter = Builders<T>.Filter.Eq(e => e.Id, id);
-        var entity = await _deletedRepository.Collection.Find(session, filter).FirstOrDefaultAsync(ct);
-        if (entity == null) return;
-
-        SetProperty(entity, "IsDeleted", false);
-        SetProperty(entity, "DeletedAt", null as DateTime?);
-
-        int year = id.CreationTime.Year;
-        var targetRepo = IsInArchive(year) ? GetArchiveRepository(year) : _activeRepository;
-
+        var scoped = _deletedRepository.CallerScope(filter);
         var actualSession = session ?? await _db.Client.StartSessionAsync(cancellationToken: ct);
         var isLocalSession = session == null;
+        var restored = false;
 
         try
         {
             if (isLocalSession) actualSession.StartTransaction();
 
-            // Insert into active/archive
-            await targetRepo.InsertAsync(entity, actualSession, ct);
-            
-            // Remove from deleted collection
-            await _deletedRepository.Collection.DeleteOneAsync(actualSession, filter, cancellationToken: ct);
+            // Moved as stored, the reverse of DeleteByObjectIdAsync. It went through the target's
+            // insert, which encrypted values that were already ciphertext, and stamped the row as
+            // new -- CreatedAtUtc of the restore, Version 1.
+            var stored = await _deletedRepository.Collection.Find(actualSession, scoped).FirstOrDefaultAsync(ct);
+            if (stored != null)
+            {
+                SetProperty(stored, "IsDeleted", false);
+                SetProperty(stored, "DeletedAt", null as DateTime?);
+                stored.UpdatedAtUtc = DateTime.UtcNow;
+                stored.Version += 1;
+
+                var year = id.CreationTime.Year;
+                var target = IsInArchive(year) ? GetArchiveRepository(year) : _activeRepository;
+                await target.Collection.InsertOneAsync(actualSession, stored, cancellationToken: ct);
+                await _deletedRepository.Collection.DeleteOneAsync(actualSession, filter, cancellationToken: ct);
+                restored = true;
+            }
 
             if (isLocalSession) await actualSession.CommitTransactionAsync(ct);
         }
@@ -471,31 +570,50 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
         {
             if (isLocalSession) actualSession.Dispose();
         }
+
+        if (restored && _auditSink != null)
+        {
+            var entry = AuditLogEntry.ForRestore(
+                _userContext?.OperatorId ?? "system",
+                typeof(T).FullName ?? typeof(T).Name,
+                id.ToString(),
+                CollectionName);
+            await _auditSink.WriteAsync(entry with { TenantId = _tenantContext?.TenantId }, ct);
+        }
     }
 
-    private List<string> GetArchiveCollectionNames()
+    private ListCollectionNamesOptions ArchiveNameFilter() => new()
     {
-        var baseCollectionName = typeof(T).Name.Pluralize();
-        var filter = new BsonDocument("name", new BsonRegularExpression($"^{baseCollectionName}_\\d{{4}}$"));
-        var collections = _db.ListCollectionNames(new ListCollectionNamesOptions { Filter = filter }).ToList();
-        return collections;
-    }
+        Filter = new BsonDocument("name", new BsonRegularExpression($"^{typeof(T).Name.Pluralize()}_\\d{{4}}$"))
+    };
+
+    private List<string> GetArchiveCollectionNames()
+        => _db.ListCollectionNames(ArchiveNameFilter()).ToList();
+
+    private async Task<List<string>> GetArchiveCollectionNamesAsync(CancellationToken ct)
+        => await (await _db.ListCollectionNamesAsync(ArchiveNameFilter(), ct)).ToListAsync(ct);
 
     public async Task<IReadOnlyList<TResult>> AggregateAsync<TResult>(PipelineDefinition<T, TResult> pipeline, IClientSessionHandle? session = null, CancellationToken ct = default)
     {
+        ArgumentNullException.ThrowIfNull(pipeline);
         var serializer = BsonSerializer.LookupSerializer<T>();
-        var rendered = pipeline.Render(new RenderArgs<T>(serializer, BsonSerializer.SerializerRegistry));
-        var stagesList = rendered.Documents.ToList();
+        var args = new RenderArgs<T>(serializer, BsonSerializer.SerializerRegistry);
 
-        var newStages = new List<BsonDocument>();
-        var archives = GetArchiveCollectionNames();
-        foreach (var archive in archives)
+        // The read filters first on the active collection and inside every archive branch, then the
+        // caller's stages over the union -- the same rule Repository.AggregateAsync follows. The
+        // archives were unioned in unfiltered and nothing was applied to the active collection, so
+        // the caller's pipeline ran over every tenant's rows.
+        var stages = new List<BsonDocument>
         {
-            newStages.Add(new BsonDocument("$unionWith", new BsonDocument("coll", archive)));
+            new("$match", _activeRepository.ReadFilter(Builders<T>.Filter.Empty).Render(args))
+        };
+        foreach (var archive in await GetArchiveCollectionNamesAsync(ct))
+        {
+            stages.Add(((PipelineStageDefinition<T, T>)UnionWith(archive)).Render(new RenderArgs<T>(serializer, BsonSerializer.SerializerRegistry)).Document);
         }
-        newStages.AddRange(stagesList);
+        stages.AddRange(pipeline.Render(args).Documents);
 
-        var finalPipeline = PipelineDefinition<T, TResult>.Create(newStages);
+        var finalPipeline = PipelineDefinition<T, TResult>.Create(stages);
         var collection = Collection.WithReadPreference(ReadPreference.SecondaryPreferred);
 
         var cursor = session != null
@@ -503,133 +621,5 @@ public sealed class PartitionedRepository<T> : IRepository<T> where T : class, I
             : await collection.AggregateAsync(finalPipeline, cancellationToken: ct);
 
         return await cursor.ToListAsync(ct);
-    }
-
-    private List<Repository<T>> RouteRepositoriesByDateFilter(Expression<Func<T, bool>>? filter)
-    {
-        var result = new List<Repository<T>>();
-        if (filter == null)
-        {
-            result.Add(_activeRepository);
-            return result;
-        }
-
-        var visitor = new DateRangeVisitor();
-        visitor.Visit(filter);
-
-        if (visitor.StartDate.HasValue || visitor.EndDate.HasValue)
-        {
-            var currentYear = DateTime.UtcNow.Year;
-            var activeStartYear = currentYear - _thresholdYears + 1;
-            
-            var startYear = visitor.StartDate?.Year ?? (currentYear - 10);
-            var endYear = visitor.EndDate?.Year ?? currentYear;
-
-            for (int y = startYear; y <= endYear; y++)
-            {
-                if (y < activeStartYear)
-                {
-                    result.Add(GetArchiveRepository(y));
-                }
-                else
-                {
-                    if (!result.Contains(_activeRepository))
-                        result.Add(_activeRepository);
-                }
-            }
-        }
-        else
-        {
-            result.Add(_activeRepository);
-        }
-
-        return result;
-    }
-
-    private class DateRangeVisitor : System.Linq.Expressions.ExpressionVisitor
-    {
-        public DateTime? StartDate { get; private set; }
-        public DateTime? EndDate { get; private set; }
-
-        protected override Expression VisitBinary(BinaryExpression node)
-        {
-            if (IsDateTimeComparison(node))
-            {
-                var dateValue = GetDateFromExpression(node.Right) ?? GetDateFromExpression(node.Left);
-                if (dateValue.HasValue)
-                {
-                    switch (node.NodeType)
-                    {
-                        case ExpressionType.GreaterThan:
-                        case ExpressionType.GreaterThanOrEqual:
-                            StartDate = dateValue;
-                            break;
-                        case ExpressionType.LessThan:
-                        case ExpressionType.LessThanOrEqual:
-                            EndDate = dateValue;
-                            break;
-                        case ExpressionType.Equal:
-                            StartDate = dateValue;
-                            EndDate = dateValue;
-                            break;
-                    }
-                }
-            }
-
-            return base.VisitBinary(node);
-        }
-
-        private bool IsDateTimeComparison(BinaryExpression node)
-        {
-            if (node.Left is MemberExpression leftMember)
-            {
-                var memberName = leftMember.Member.Name;
-                if ((memberName == "CreatedAt" || memberName == "CreatedAtUtc" || memberName == "Id") &&
-                    (node.Right.Type == typeof(DateTime) || node.Right.Type == typeof(DateTime?)))
-                    return true;
-            }
-            if (node.Right is MemberExpression rightMember)
-            {
-                var memberName = rightMember.Member.Name;
-                if ((memberName == "CreatedAt" || memberName == "CreatedAtUtc" || memberName == "Id") &&
-                    (node.Left.Type == typeof(DateTime) || node.Left.Type == typeof(DateTime?)))
-                    return true;
-            }
-            return false;
-        }
-
-        private DateTime? GetDateFromExpression(Expression expr)
-        {
-            while (expr.NodeType == ExpressionType.Convert)
-            {
-                expr = ((UnaryExpression)expr).Operand;
-            }
-
-            if (expr is ConstantExpression constExpr && constExpr.Value is DateTime dt)
-            {
-                return dt;
-            }
-
-            if (expr is MemberExpression memberExpr && memberExpr.Member is PropertyInfo prop &&
-                prop.PropertyType == typeof(DateTime))
-            {
-                try
-                {
-                    return (DateTime?)prop.GetValue(null);
-                }
-                catch
-                {
-                    // Fallback
-                }
-            }
-            return null;
-        }
-
-        protected override Expression VisitLambda<TLambda>(Expression<TLambda> node)
-        {
-            StartDate = null;
-            EndDate = null;
-            return base.VisitLambda(node);
-        }
     }
 }

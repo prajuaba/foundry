@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Foundry.Core.Attributes;
 using Foundry.Core.Audit;
+using Foundry.Core.Paging;
 using Foundry.Core.Entities;
 using Foundry.Core.Tenant;
 using Foundry.Mongo.Repositories;
@@ -119,15 +120,139 @@ public class PartitioningTests : IDisposable
     }
 
     [Fact]
-    public async Task AnAgedRecordIsNotLookedForInTheActiveCollection()
+    public async Task AnAgedRecordNotYetArchivedIsStillFoundInTheActiveCollection()
     {
-        // A row left in the active collection past the threshold becomes unreachable, because reads
-        // route by id age alone and never fall back. Recorded because it is the failure mode of an
-        // archival sweep that does not run.
+        // A row past the threshold stays in the active collection until the archival sweep moves
+        // it. Reads routed by id age alone and never fell back, so it was unreachable -- by id,
+        // for update and for delete -- for as long as the sweep had not run.
         var oldId = AgedId(3);
         await SeedRawAsync(Plural, oldId, "acme", "STRANDED");
+        var repo = RepoFor("acme");
 
-        Assert.Null(await RepoFor("acme").GetByIdAsync(oldId));
+        var found = await repo.GetByIdAsync(oldId);
+
+        Assert.Equal("STRANDED", found!.Reference);
+        found.Reference = "STRANDED-EDITED";
+        await repo.UpdateAsync(found);
+        Assert.Equal("STRANDED-EDITED", (await repo.GetByIdAsync(oldId))!.Reference);
+    }
+
+    // ── Reads span every partition ──────────────────────────────────────────
+    //
+    // Rows are archived by the year in their id. Reads chose partitions from date comparisons on
+    // CreatedAtUtc in the filter, and read only the active collection for every other filter -- so
+    // a report filtering on a period, or on nothing, silently left out every archived row.
+
+    private async Task<(ObjectId Cold, ObjectId Hot)> OneColdOneHotAsync(string tenant = "acme")
+    {
+        var cold = AgedId(3);
+        await SeedRawAsync($"{Plural}_{cold.CreationTime.Year}", cold, tenant, "R-COLD");
+        var hot = ObjectId.GenerateNewId();
+        await RepoFor(tenant).InsertAsync(new Ledger { Id = hot, Reference = "R-HOT" });
+        return (cold, hot);
+    }
+
+    [Fact]
+    public async Task AFilterOnAnyFieldReadsTheArchives()
+    {
+        await OneColdOneHotAsync();
+        var repo = RepoFor("acme");
+
+        var rows = await repo.FindManyAsync(r => r.Reference.StartsWith("R-"));
+
+        Assert.Equal(["R-COLD", "R-HOT"], rows.Select(r => r.Reference).Order());
+        Assert.Equal(2, await repo.CountAsync(r => r.Reference.StartsWith("R-")));
+        Assert.Equal(2, await repo.CountAsync());
+    }
+
+    [Fact]
+    public async Task ASortedLimitedReadIsInOrderAcrossPartitions()
+    {
+        await OneColdOneHotAsync();
+        var repo = RepoFor("acme");
+
+        var first = await repo.FindManyAsync(sortBy: "Reference", sortOrder: SortOrder.Ascending, limit: 1);
+        var last = await repo.FindManyAsync(sortBy: "Reference", sortOrder: SortOrder.Descending, limit: 1);
+
+        Assert.Equal("R-COLD", Assert.Single(first).Reference);
+        Assert.Equal("R-HOT", Assert.Single(last).Reference);
+    }
+
+    [Fact]
+    public async Task OffsetPagesAreOfTheWholeNotOfEachPartition()
+    {
+        // Page 2 used to be page 2 of each partition, concatenated: here, nothing at all.
+        await OneColdOneHotAsync();
+        var repo = RepoFor("acme");
+        var sort = new SortRequest { FieldName = "Reference", Order = SortOrder.Ascending };
+
+        var page1 = await repo.GetPagedAsync(new PagedRequest { PageNumber = 1, PageSize = 1, SortBy = sort });
+        var page2 = await repo.GetPagedAsync(new PagedRequest { PageNumber = 2, PageSize = 1, SortBy = sort });
+
+        Assert.Equal("R-COLD", Assert.Single(page1.Items).Reference);
+        Assert.Equal("R-HOT", Assert.Single(page2.Items).Reference);
+        Assert.Equal(2, page2.TotalRecords);
+    }
+
+    [Fact]
+    public async Task AComposedQueryReadsTheArchivesWithinTheTenant()
+    {
+        await OneColdOneHotAsync("acme");
+        await OneColdOneHotAsync("globex");
+
+        var acme = RepoFor("acme").Query().Where(r => r.Reference.StartsWith("R-")).ToList();
+
+        Assert.Equal(2, acme.Count);
+        Assert.All(acme, r => Assert.Equal("acme", r.TenantId));
+    }
+
+    [Fact]
+    public async Task AnAggregationIsTenantScopedInEveryPartition()
+    {
+        // The archives were unioned in unfiltered and the active collection was not filtered at
+        // all, so a pipeline ran over every tenant's rows.
+        await OneColdOneHotAsync("acme");
+        await OneColdOneHotAsync("globex");
+        var pipeline = PipelineDefinition<Ledger, Ledger>.Create(new BsonDocument("$match", new BsonDocument()));
+
+        var rows = await RepoFor("acme").AggregateAsync(pipeline);
+
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, r => Assert.Equal("acme", r.TenantId));
+    }
+
+    // ── Restoring a soft delete ─────────────────────────────────────────────
+
+    [Fact]
+    public async Task ADeletedRowIsRestoredOnlyForItsOwnTenant_AndAsStored()
+    {
+        // It was found by id alone, so any tenant could restore another's row; and it went back
+        // through the encrypting insert, stamped as new.
+        await RequireReplicaSetAsync();
+        var sink = new RecordingSink();
+        var acme = new PartitionedRepository<SoftLedger>(_db, auditSink: sink, tenantContext: new FixedTenant("acme"));
+        var globex = new PartitionedRepository<SoftLedger>(_db, tenantContext: new FixedTenant("globex"));
+        var ledger = new SoftLedger { Id = ObjectId.GenerateNewId(), TenantId = "acme", Reference = "BACK" };
+        await acme.InsertAsync(ledger);
+        var created = DateTime.UtcNow.AddDays(-30);
+        await _db.GetCollection<BsonDocument>("SoftLedgers").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("_id", ledger.Id),
+            Builders<BsonDocument>.Update.Set("createdAtUtc", created));
+        await acme.DeleteByObjectIdAsync(ledger.Id, "operator-1");
+        sink.Written.Clear();
+
+        await globex.RestoreDeletedAsync(ledger.Id);
+        Assert.Null(await acme.GetByIdAsync(ledger.Id));
+
+        await acme.RestoreDeletedAsync(ledger.Id);
+
+        var restored = await _db.GetCollection<BsonDocument>("SoftLedgers")
+            .Find(Builders<BsonDocument>.Filter.Eq("_id", ledger.Id)).SingleAsync();
+        Assert.False(restored["isDeleted"].AsBoolean);
+        Assert.Equal(created, restored["createdAtUtc"].ToUniversalTime(), TimeSpan.FromSeconds(1));
+        Assert.Equal(3, restored["version"].AsInt32);
+        Assert.Equal(AuditAction.Restored, Assert.Single(sink.Written).Action);
+        Assert.Equal("BACK", (await acme.GetByIdAsync(ledger.Id))!.Reference);
     }
 
     // ── Tenant isolation across the partition boundary ──────────────────────
