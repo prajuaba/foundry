@@ -16,12 +16,17 @@
     purely to move off advisory-affected versions.
   -->
   <ItemGroup>
-    <!-- GHSA-vh6j-jc39-fggf (high) and 8 moderate advisories against 2.5.187.
-         Held on the 2.x line: 3.x is a major release and SignalR's MessagePack
-         hub protocol is version-sensitive. -->
-    <PackageVersion Include="MessagePack" Version="2.5.302" />
-    <!-- 7 high-severity advisories against 8.0.2. -->
-    <PackageVersion Include="System.Security.Cryptography.Xml" Version="10.0.10" />
+    <!-- GHSA-vh6j-jc39-fggf (high) and 8 moderate advisories against 2.5.187, and
+         GHSA-qhrr-8q5h-9q3h (moderate) against 2.5.302. Held on the 2.x line: 3.x is a
+         major release and SignalR's MessagePack hub protocol is version-sensitive. -->
+    <PackageVersion Include="MessagePack" Version="2.5.303" />
+    <!-- 7 high-severity advisories against 8.0.2, and GHSA-r955-8q5j-3h83 (high)
+         against 10.0.0-10.0.12. -->
+    <PackageVersion Include="System.Security.Cryptography.Xml" Version="10.0.13" />
+    <!-- GHSA-846f-f764-76mx (high) against 8.0.0-8.0.1 and 10.0.0-10.0.12. It arrived
+         at both 8.0.1 (FileIO, the CLI) and 10.0.10 (beside Cryptography.Xml); one
+         version is pinned solution-wide. -->
+    <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <!-- GHSA-v5pm-xwqc-g5wc (high) against 2.0.0, which arrives transitively via
          Microsoft.AspNetCore.OpenApi. -->
     <PackageVersion Include="Microsoft.OpenApi" Version="2.11.0" />

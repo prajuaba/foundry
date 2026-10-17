@@ -87,17 +87,23 @@ internal sealed class EntityIndexManager<T> where T : class, IEntity<ObjectId>
     /// link index gained two fields: under the old keys, a project could hold only one link of the new
     /// kind. Only an index of a declared name whose keys or uniqueness differ is dropped. A changed
     /// index that is now stricter than the data allows still fails on create, loudly, as a new one
-    /// would.
+    /// would. A text index is never compared: the server stores it under different keys from the
+    /// ones declared, so it would be dropped and rebuilt on every start.
     /// </remarks>
     private async Task DropRedeclaredIndexesAsync(IReadOnlyList<CreateIndexModel<T>> models, CancellationToken ct)
     {
-        var args = new RenderArgs<T>(_collection.DocumentSerializer, _collection.Settings.SerializerRegistry);
-        var declared = models
-            .Where(m => !string.IsNullOrWhiteSpace(m.Options?.Name))
-            .ToDictionary(m => m.Options!.Name!, m => (Keys: m.Keys.Render(args), Unique: m.Options!.Unique == true));
+        var named = models.Where(m => !string.IsNullOrWhiteSpace(m.Options?.Name)).ToList();
+        if (named.Count == 0) return;
+
+        var args = new RenderArgs<T>(_collection.DocumentSerializer, _collection.Settings?.SerializerRegistry ?? MongoDB.Bson.Serialization.BsonSerializer.SerializerRegistry);
+        var declared = named
+            .Select(m => (Name: m.Options!.Name!, Keys: m.Keys.Render(args), Unique: m.Options!.Unique == true))
+            .Where(d => !d.Keys.Values.Any(v => v.IsString && v.AsString == "text"))
+            .ToDictionary(d => d.Name, d => (d.Keys, d.Unique));
         if (declared.Count == 0) return;
 
         using var cursor = await _collection.Indexes.ListAsync(ct);
+        if (cursor == null) return;
         foreach (var existing in await cursor.ToListAsync(ct))
         {
             var name = existing.GetValue("name", BsonNull.Value);

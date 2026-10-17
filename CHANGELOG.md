@@ -15,6 +15,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   keys, a project could hold only one link of the new kind. Only an index of a declared name whose
   keys or uniqueness differ is dropped first.
 
+### Security
+
+- **MessagePack 2.5.303, System.Security.Cryptography.Xml 10.0.13 and
+  System.Security.Cryptography.Pkcs 10.0.13**, for GHSA-qhrr-8q5h-9q3h (moderate),
+  GHSA-r955-8q5j-3h83 (high) and GHSA-846f-f764-76mx (high), all published 13-15 October 2026.
+  Pkcs is newly pinned, solution-wide and in scaffolded projects: it had arrived at both 8.0.1 and
+  10.0.10, and the runtime smoke test failed on the generated project's copy.
+
 ## [2.8.1] - 2026-08-22
 
 The first release cut through the preflight gate, and the reason the gate exists: **2.5.0, 2.6.0,

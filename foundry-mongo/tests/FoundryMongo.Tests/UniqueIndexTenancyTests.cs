@@ -136,6 +136,37 @@ public class UniqueIndexTenancyTests : IDisposable
         Assert.Equal(new BsonDocument { { "tenantId", 1 }, { "region", 1 }, { "day", 1 } }, index["key"].AsBsonDocument);
     }
 
+    public record Article : BaseEntity<ObjectId>
+    {
+        [Indexed(Name = "ix_slug")]
+        public string Slug { get; init; } = string.Empty;
+
+        [TextIndexed]
+        public string Title { get; init; } = string.Empty;
+    }
+
+    [Fact]
+    public async Task ATextIndexIsNotRebuiltOnEveryStart()
+    {
+        // The server stores a text index under keys that never match the declared ones, so a plain
+        // comparison would call it changed and drop it on every start. Watch the wire for the drop.
+        var drops = new List<string>();
+        var settings = MongoClientSettings.FromConnectionString("mongodb://localhost:27017");
+        settings.ClusterConfigurator = cb => cb.Subscribe<MongoDB.Driver.Core.Events.CommandStartedEvent>(e =>
+        {
+            if (e.CommandName == "dropIndexes") lock (drops) drops.Add(e.Command.ToString());
+        });
+        var repo = new Repository<Article>(new MongoClient(settings).GetDatabase(_dbName));
+
+        await repo.CreateIndexesAsync();
+        await repo.CreateIndexesAsync();
+
+        Assert.Empty(drops);
+        var names = (await (await repo.Collection.Indexes.ListAsync()).ToListAsync()).Select(i => i["name"].AsString).ToList();
+        Assert.Contains("TextIndex", names);
+        Assert.Contains("ix_slug", names);
+    }
+
     [Fact]
     public async Task AnUnchangedNamedIndexIsLeftAlone()
     {
