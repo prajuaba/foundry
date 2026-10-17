@@ -118,6 +118,38 @@ public class UniqueIndexTenancyTests : IDisposable
     }
 
     [Fact]
+    public async Task ANamedIndexWhoseFieldsChangedIsReplaced_NotLeftEnforcingTheOldKeys()
+    {
+        // As a database holds it after an earlier schema declared ux_region_day on Region alone.
+        var holidays = _db.GetCollection<BsonDocument>("Holidays");
+        await holidays.Indexes.CreateOneAsync(new CreateIndexModel<BsonDocument>(
+            new BsonDocument { { "tenantId", 1 }, { "region", 1 } }, new CreateIndexOptions { Unique = true, Name = "ux_region_day" }));
+
+        var repo = For<Holiday>("acme");
+        await repo.CreateIndexesAsync();
+
+        // Under the old keys, a second holiday in the same region was a duplicate.
+        await repo.InsertAsync(new Holiday { Id = ObjectId.GenerateNewId(), Region = "TH", Day = new DateTime(2026, 4, 13, 0, 0, 0, DateTimeKind.Utc) });
+        await repo.InsertAsync(new Holiday { Id = ObjectId.GenerateNewId(), Region = "TH", Day = new DateTime(2026, 4, 14, 0, 0, 0, DateTimeKind.Utc) });
+
+        var index = (await (await repo.Collection.Indexes.ListAsync()).ToListAsync()).Single(i => i["name"] == "ux_region_day");
+        Assert.Equal(new BsonDocument { { "tenantId", 1 }, { "region", 1 }, { "day", 1 } }, index["key"].AsBsonDocument);
+    }
+
+    [Fact]
+    public async Task AnUnchangedNamedIndexIsLeftAlone()
+    {
+        var repo = For<Holiday>("acme");
+        await repo.CreateIndexesAsync();
+        var before = (await (await repo.Collection.Indexes.ListAsync()).ToListAsync()).Single(i => i["name"] == "ux_region_day");
+
+        await repo.CreateIndexesAsync();
+
+        var after = (await (await repo.Collection.Indexes.ListAsync()).ToListAsync()).Single(i => i["name"] == "ux_region_day");
+        Assert.Equal(before, after);
+    }
+
+    [Fact]
     public async Task AnEntityWithNoTenantKeepsItsUniqueIndexGlobal()
     {
         var repo = new Repository<Currency>(_db);

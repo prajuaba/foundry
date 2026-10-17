@@ -36,6 +36,7 @@ internal sealed class EntityIndexManager<T> where T : class, IEntity<ObjectId>
         if (indexModels.Count > 0)
         {
             if (IsMultiTenant) await DropGlobalUniqueIndexesAsync(indexModels, ct);
+            await DropRedeclaredIndexesAsync(indexModels, ct);
             await _collection.Indexes.CreateManyAsync(indexModels, null, ct);
         }
     }
@@ -72,6 +73,40 @@ internal sealed class EntityIndexManager<T> where T : class, IEntity<ObjectId>
             if (!replaced.Any(r => r.Equals(key))) continue;
 
             await _collection.Indexes.DropOneAsync(existing["name"].AsString, ct);
+        }
+    }
+
+    /// <summary>
+    /// Drops a named index whose declaration has changed since it was created, so it is created again
+    /// as declared.
+    /// </summary>
+    /// <remarks>
+    /// Creating an index under a name the collection already holds with other keys or another
+    /// uniqueness fails, so an application whose schema changed a named index's fields would not
+    /// start -- and a renamed one would leave the old index enforcing beside it. Found when a unique
+    /// link index gained two fields: under the old keys, a project could hold only one link of the new
+    /// kind. Only an index of a declared name whose keys or uniqueness differ is dropped. A changed
+    /// index that is now stricter than the data allows still fails on create, loudly, as a new one
+    /// would.
+    /// </remarks>
+    private async Task DropRedeclaredIndexesAsync(IReadOnlyList<CreateIndexModel<T>> models, CancellationToken ct)
+    {
+        var args = new RenderArgs<T>(_collection.DocumentSerializer, _collection.Settings.SerializerRegistry);
+        var declared = models
+            .Where(m => !string.IsNullOrWhiteSpace(m.Options?.Name))
+            .ToDictionary(m => m.Options!.Name!, m => (Keys: m.Keys.Render(args), Unique: m.Options!.Unique == true));
+        if (declared.Count == 0) return;
+
+        using var cursor = await _collection.Indexes.ListAsync(ct);
+        foreach (var existing in await cursor.ToListAsync(ct))
+        {
+            var name = existing.GetValue("name", BsonNull.Value);
+            if (!name.IsString || !declared.TryGetValue(name.AsString, out var wanted)) continue;
+            var sameKeys = existing.GetValue("key", null) is BsonDocument key && key.Equals(wanted.Keys);
+            var sameUnique = existing.GetValue("unique", false).ToBoolean() == wanted.Unique;
+            if (sameKeys && sameUnique) continue;
+
+            await _collection.Indexes.DropOneAsync(name.AsString, ct);
         }
     }
 

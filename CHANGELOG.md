@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A named index whose declaration changed is recreated as declared.** Creating it under a name
+  the collection already held with other keys failed, so an application whose schema changed a
+  named index's fields would not start; and renaming it left the old index enforcing beside the
+  new one. Found in Resourcify, where a unique link index gained two fields and, under the old
+  keys, a project could hold only one link of the new kind. Only an index of a declared name whose
+  keys or uniqueness differ is dropped first.
+
 ## [2.8.1] - 2026-08-22
 
 The first release cut through the preflight gate, and the reason the gate exists: **2.5.0, 2.6.0,
