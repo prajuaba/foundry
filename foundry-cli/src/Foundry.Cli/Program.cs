@@ -788,7 +788,8 @@ public class Program
             "FluentValidation.DependencyInjectionExtensions",
             "Microsoft.OpenApi",
             "Swashbuckle.AspNetCore",
-            "MessagePack"
+            "MessagePack",
+            "System.Security.Cryptography.Pkcs"
         };
 
         var packageReferences = new List<string>();

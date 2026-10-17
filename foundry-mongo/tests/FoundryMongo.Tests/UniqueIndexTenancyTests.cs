@@ -118,6 +118,69 @@ public class UniqueIndexTenancyTests : IDisposable
     }
 
     [Fact]
+    public async Task ANamedIndexWhoseFieldsChangedIsReplaced_NotLeftEnforcingTheOldKeys()
+    {
+        // As a database holds it after an earlier schema declared ux_region_day on Region alone.
+        var holidays = _db.GetCollection<BsonDocument>("Holidays");
+        await holidays.Indexes.CreateOneAsync(new CreateIndexModel<BsonDocument>(
+            new BsonDocument { { "tenantId", 1 }, { "region", 1 } }, new CreateIndexOptions { Unique = true, Name = "ux_region_day" }));
+
+        var repo = For<Holiday>("acme");
+        await repo.CreateIndexesAsync();
+
+        // Under the old keys, a second holiday in the same region was a duplicate.
+        await repo.InsertAsync(new Holiday { Id = ObjectId.GenerateNewId(), Region = "TH", Day = new DateTime(2026, 4, 13, 0, 0, 0, DateTimeKind.Utc) });
+        await repo.InsertAsync(new Holiday { Id = ObjectId.GenerateNewId(), Region = "TH", Day = new DateTime(2026, 4, 14, 0, 0, 0, DateTimeKind.Utc) });
+
+        var index = (await (await repo.Collection.Indexes.ListAsync()).ToListAsync()).Single(i => i["name"] == "ux_region_day");
+        Assert.Equal(new BsonDocument { { "tenantId", 1 }, { "region", 1 }, { "day", 1 } }, index["key"].AsBsonDocument);
+    }
+
+    public record Article : BaseEntity<ObjectId>
+    {
+        [Indexed(Name = "ix_slug")]
+        public string Slug { get; init; } = string.Empty;
+
+        [TextIndexed]
+        public string Title { get; init; } = string.Empty;
+    }
+
+    [Fact]
+    public async Task ATextIndexIsNotRebuiltOnEveryStart()
+    {
+        // The server stores a text index under keys that never match the declared ones, so a plain
+        // comparison would call it changed and drop it on every start. Watch the wire for the drop.
+        var drops = new List<string>();
+        var settings = MongoClientSettings.FromConnectionString("mongodb://localhost:27017");
+        settings.ClusterConfigurator = cb => cb.Subscribe<MongoDB.Driver.Core.Events.CommandStartedEvent>(e =>
+        {
+            if (e.CommandName == "dropIndexes") lock (drops) drops.Add(e.Command.ToString());
+        });
+        var repo = new Repository<Article>(new MongoClient(settings).GetDatabase(_dbName));
+
+        await repo.CreateIndexesAsync();
+        await repo.CreateIndexesAsync();
+
+        Assert.Empty(drops);
+        var names = (await (await repo.Collection.Indexes.ListAsync()).ToListAsync()).Select(i => i["name"].AsString).ToList();
+        Assert.Contains("TextIndex", names);
+        Assert.Contains("ix_slug", names);
+    }
+
+    [Fact]
+    public async Task AnUnchangedNamedIndexIsLeftAlone()
+    {
+        var repo = For<Holiday>("acme");
+        await repo.CreateIndexesAsync();
+        var before = (await (await repo.Collection.Indexes.ListAsync()).ToListAsync()).Single(i => i["name"] == "ux_region_day");
+
+        await repo.CreateIndexesAsync();
+
+        var after = (await (await repo.Collection.Indexes.ListAsync()).ToListAsync()).Single(i => i["name"] == "ux_region_day");
+        Assert.Equal(before, after);
+    }
+
+    [Fact]
     public async Task AnEntityWithNoTenantKeepsItsUniqueIndexGlobal()
     {
         var repo = new Repository<Currency>(_db);
