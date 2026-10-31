@@ -40,7 +40,11 @@ public class UpdateCommandHandler<TEntity> : IRequestHandler<UpdateCommand<TEnti
     public async Task<TEntity> Handle(UpdateCommand<TEntity> request, CancellationToken cancellationToken)
     {
         await _repository.UpdateAsync(request.Entity, ct: cancellationToken);
-        return request.Entity;
+
+        // UpdateAsync restores a masked field the caller may not read into this same instance, so
+        // the write keeps the stored value. Returned as-is, the PUT response handed that value to the
+        // caller unmasked; it is masked for the caller like any read.
+        return _repository.MaskSensitiveFields(request.Entity);
     }
 }
 

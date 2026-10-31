@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **The generic PUT answers with the caller's masked view.** `UpdateAsync` restores a masked
+  field the caller may not read into the caller's own instance (so the write keeps the stored
+  value), and the handler returned that instance, so such a caller got the real value back.
+  The response now goes through `MaskSensitiveFields`, like any read. Found in Resourcify
+  (its backlog item 38); not reachable there, since every PUT role can also read the masked fields.
 - **A PUT or POST custom endpoint changes the row its route names.** The request was bound from
   the JSON body alone, so `/sprints/{id}/points` with a different `Id` in the body changed the
   body's row, and one with no body `Id` answered 500. Route values now fill a property the body
