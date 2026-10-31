@@ -169,4 +169,61 @@ public class CustomRequestBindingTests
     [Fact]
     public void NoParametersLeavesTheDefaults()
         => Assert.Equal(0, Bind().Count);
+
+    private sealed class Move
+    {
+        public string Id { get; set; } = string.Empty;
+        public ObjectId SprintId { get; set; }
+        public int Rank { get; set; }
+    }
+
+    private static HttpContext Routed(params (string Key, string Value)[] route)
+    {
+        var context = new DefaultHttpContext();
+        foreach (var (key, value) in route) context.Request.RouteValues[key] = value;
+        return context;
+    }
+
+    [Fact]
+    public void ABodyWithoutTheIdTakesTheRoutesId()
+    {
+        // This answered 500 ("Cannot convert '' to ObjectId") when the body carried no Id.
+        var bound = CustomRequestBinder.ApplyRoute(new Move { Rank = 5 }, Routed(("id", "abc")));
+        Assert.Equal("abc", bound.Id);
+        Assert.Equal(5, bound.Rank);
+    }
+
+    [Fact]
+    public void ABodyNamingAnotherRowIsRefused()
+    {
+        // This changed the body's row while the URL named a different one.
+        var ex = Assert.Throws<ValidationException>(() =>
+            CustomRequestBinder.ApplyRoute(new Move { Id = "other" }, Routed(("id", "abc"))));
+        Assert.Contains("does not match", ex.Message);
+    }
+
+    [Fact]
+    public void ABodyAgreeingWithTheRouteIsUnchanged()
+    {
+        var id = ObjectId.GenerateNewId();
+        var bound = CustomRequestBinder.ApplyRoute(
+            new Move { Id = "abc", SprintId = id }, Routed(("id", "abc"), ("sprintId", id.ToString())));
+        Assert.Equal("abc", bound.Id);
+        Assert.Equal(id, bound.SprintId);
+    }
+
+    [Fact]
+    public void AMissingBodyIsBuiltFromTheRoute()
+    {
+        var id = ObjectId.GenerateNewId();
+        var bound = CustomRequestBinder.ApplyRoute<Move>(null, Routed(("sprintId", id.ToString())));
+        Assert.Equal(id, bound.SprintId);
+    }
+
+    [Fact]
+    public void AnUnparseableRouteValueIsRejected()
+    {
+        Assert.Throws<ValidationException>(() =>
+            CustomRequestBinder.ApplyRoute(new Move(), Routed(("sprintId", "not-an-id"))));
+    }
 }

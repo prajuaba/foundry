@@ -79,6 +79,71 @@ public static class CustomRequestBinder
     }
 
     /// <summary>
+    /// Reconciles a body-bound request with its route values: a property the body left at its
+    /// default takes the route's value, and one the body set differently is refused.
+    /// </summary>
+    /// <remarks>
+    /// PUT and POST custom endpoints bound the request from the JSON body alone, so
+    /// <c>/sprints/{id}/points</c> with a different <c>Id</c> in the body changed the body's row,
+    /// and one with no body <c>Id</c> answered 500. The route and the row it changed could
+    /// disagree; a caller trusting the URL was misled. A mismatch is refused (400) rather than
+    /// silently resolved either way, because either guess may be the one the caller did not mean.
+    /// </remarks>
+    /// <exception cref="System.ComponentModel.DataAnnotations.ValidationException">
+    /// A route value is unparseable, or the body names a different value for the same property.
+    /// </exception>
+    [RequiresUnreferencedCode("Binds generated request records by reflecting over their properties.")]
+    public static TRequest ApplyRoute<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicParameterlessConstructor)] TRequest>(
+        TRequest? request, HttpContext context)
+        where TRequest : class
+    {
+        if (request is null)
+        {
+            // A positional record cannot be built from nothing; such a request needs its body.
+            if (typeof(TRequest).GetConstructor(Type.EmptyTypes) is null)
+                throw new System.ComponentModel.DataAnnotations.ValidationException("A request body is required.");
+            request = Activator.CreateInstance<TRequest>();
+        }
+
+        var properties = typeof(TRequest)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.CanWrite && p.CanRead && p.GetIndexParameters().Length == 0)
+            .ToArray();
+
+        foreach (var entry in context.Request.RouteValues)
+        {
+            var raw = entry.Value?.ToString();
+            if (string.IsNullOrEmpty(raw)) continue;
+
+            var property = Array.Find(
+                properties, p => p.Name.Equals(entry.Key, StringComparison.OrdinalIgnoreCase));
+            if (property is null) continue;
+
+            var fromRoute = QueryValueBinder.Convert(raw, property.PropertyType, entry.Key, property.Name);
+            var fromBody = property.GetValue(request);
+
+            if (IsUnset(fromBody, property.PropertyType))
+            {
+                property.SetValue(request, fromRoute);
+            }
+            else if (!Equals(fromBody, fromRoute))
+            {
+                throw new System.ComponentModel.DataAnnotations.ValidationException(
+                    $"The body's '{property.Name}' ('{fromBody}') does not match the route's '{entry.Key}' ('{raw}').");
+            }
+        }
+
+        return request;
+    }
+
+    private static bool IsUnset(object? value, Type type)
+    {
+        if (value is null) return true;
+        if (value is string s) return s.Length == 0;
+        return type.IsValueType && value.Equals(Activator.CreateInstance(type));
+    }
+
+    /// <summary>
     /// Every name/value the caller supplied, query string first so route values overwrite them.
     /// </summary>
     private static System.Collections.Generic.IEnumerable<(string Name, string Value)> Supplied(HttpContext context)

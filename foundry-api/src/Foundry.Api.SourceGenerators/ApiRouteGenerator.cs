@@ -489,8 +489,11 @@ namespace Foundry.Api.SourceGenerators
                 }
                 else
                 {
-                    sb.AppendLine($"            var builder_{localSuffix} = endpoints.MapMethods(\"{customEp.Route}\", new[] {{ \"{method}\" }}, async ({ns}.{customEp.RequestType} command, HttpContext context, ISender sender) =>");
+                    sb.AppendLine($"            var builder_{localSuffix} = endpoints.MapMethods(\"{customEp.Route}\", new[] {{ \"{method}\" }}, async ({ns}.{customEp.RequestType}? body, HttpContext context, ISender sender) =>");
                     sb.AppendLine("            {");
+                    // The body alone used to decide which row changed; the route id was ignored.
+                    // See CustomRequestBinder.ApplyRoute.
+                    sb.AppendLine("                var command = Foundry.Api.Endpoints.CustomRequestBinder.ApplyRoute(body, context);");
                     sb.AppendLine("                var result = await sender.Send(command, context.RequestAborted);");
                     sb.AppendLine("                return Foundry.Api.Endpoints.CustomEndpointResult.From(result);");
                     sb.AppendLine("            });");
