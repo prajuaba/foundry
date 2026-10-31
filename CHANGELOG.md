@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A PUT or POST custom endpoint changes the row its route names.** The request was bound from
+  the JSON body alone, so `/sprints/{id}/points` with a different `Id` in the body changed the
+  body's row, and one with no body `Id` answered 500. Route values now fill a property the body
+  left unset, and a body value that contradicts the route is refused with 400. Found in
+  Resourcify (its backlog item 35).
 - **A named index whose declaration changed is recreated as declared.** Creating it under a name
   the collection already held with other keys failed, so an application whose schema changed a
   named index's fields would not start; and renaming it left the old index enforcing beside the
