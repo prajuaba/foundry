@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A deleted row gives up its unique value.** On an `ISoftDelete` entity a deleted row stays in
+  the collection, and every unique index counted it, so its value could never be used again: a
+  removed member could not rejoin, a deleted name or code could not be created again, and each
+  attempt was refused as a duplicate of a row the API no longer shows. Unique indexes on these
+  entities now carry `partialFilterExpression: { isDeleted: false }` and hold live rows only.
+  Restoring a deleted row is refused with the same duplicate-key error when a live row has taken
+  its value since. An existing index without the filter is dropped and recreated at start-up;
+  that only loosens it, so the create cannot fail on existing data. Index reconciliation now also
+  matches an unnamed index by the server's default name and compares its partial filter. Entities
+  without soft delete keep uniqueness over every row. Found in Resourcify (its backlog item 64).
 - **The generic PUT answers with the caller's masked view.** `UpdateAsync` restores a masked
   field the caller may not read into the caller's own instance (so the write keeps the stored
   value), and the handler returned that instance, so such a caller got the real value back.
