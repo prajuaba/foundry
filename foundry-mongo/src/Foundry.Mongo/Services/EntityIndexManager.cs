@@ -77,29 +77,32 @@ internal sealed class EntityIndexManager<T> where T : class, IEntity<ObjectId>
     }
 
     /// <summary>
-    /// Drops a named index whose declaration has changed since it was created, so it is created again
+    /// Drops an index whose declaration has changed since it was created, so it is created again
     /// as declared.
     /// </summary>
     /// <remarks>
-    /// Creating an index under a name the collection already holds with other keys or another
-    /// uniqueness fails, so an application whose schema changed a named index's fields would not
-    /// start -- and a renamed one would leave the old index enforcing beside it. Found when a unique
-    /// link index gained two fields: under the old keys, a project could hold only one link of the new
-    /// kind. Only an index of a declared name whose keys or uniqueness differ is dropped. A changed
-    /// index that is now stricter than the data allows still fails on create, loudly, as a new one
-    /// would. A text index is never compared: the server stores it under different keys from the
-    /// ones declared, so it would be dropped and rebuilt on every start.
+    /// Creating an index under a name the collection already holds with other keys, another
+    /// uniqueness or another partial filter fails, so an application whose schema changed an index
+    /// would not start -- and a renamed one would leave the old index enforcing beside it. Found when a
+    /// unique link index gained two fields: under the old keys, a project could hold only one link of
+    /// the new kind. A declared name is matched by name; an unnamed declaration by the driver's
+    /// default name for its keys, so an index someone added by hand under another name is never
+    /// touched. A changed index that is now stricter than the data allows still fails on create,
+    /// loudly, as a new one would. A text index is never compared: the server stores it under
+    /// different keys from the ones declared, so it would be dropped and rebuilt on every start.
     /// </remarks>
     private async Task DropRedeclaredIndexesAsync(IReadOnlyList<CreateIndexModel<T>> models, CancellationToken ct)
     {
-        var named = models.Where(m => !string.IsNullOrWhiteSpace(m.Options?.Name)).ToList();
-        if (named.Count == 0) return;
-
         var args = new RenderArgs<T>(_collection.DocumentSerializer, _collection.Settings?.SerializerRegistry ?? MongoDB.Bson.Serialization.BsonSerializer.SerializerRegistry);
-        var declared = named
-            .Select(m => (Name: m.Options!.Name!, Keys: m.Keys.Render(args), Unique: m.Options!.Unique == true))
-            .Where(d => !d.Keys.Values.Any(v => v.IsString && v.AsString == "text"))
-            .ToDictionary(d => d.Name, d => (d.Keys, d.Unique));
+        var declared = new Dictionary<string, (BsonDocument Keys, bool Unique, BsonDocument? Partial)>();
+        foreach (var m in models)
+        {
+            var keys = m.Keys.Render(args);
+            if (keys.Values.Any(v => v.IsString && v.AsString == "text")) continue;
+            var name = string.IsNullOrWhiteSpace(m.Options?.Name) ? DefaultName(keys) : m.Options!.Name!;
+            var partial = (m.Options as CreateIndexOptions<T>)?.PartialFilterExpression?.Render(args);
+            declared[name] = (keys, m.Options?.Unique == true, partial);
+        }
         if (declared.Count == 0) return;
 
         using var cursor = await _collection.Indexes.ListAsync(ct);
@@ -110,11 +113,39 @@ internal sealed class EntityIndexManager<T> where T : class, IEntity<ObjectId>
             if (!name.IsString || !declared.TryGetValue(name.AsString, out var wanted)) continue;
             var sameKeys = existing.GetValue("key", null) is BsonDocument key && key.Equals(wanted.Keys);
             var sameUnique = existing.GetValue("unique", false).ToBoolean() == wanted.Unique;
-            if (sameKeys && sameUnique) continue;
+            var samePartial = Equals(existing.GetValue("partialFilterExpression", null) as BsonDocument, wanted.Partial);
+            if (sameKeys && sameUnique && samePartial) continue;
 
             await _collection.Indexes.DropOneAsync(name.AsString, ct);
         }
     }
+
+    /// <summary>The name the server gives an index created without one: <c>field_1_other_-1</c>.</summary>
+    private static string DefaultName(BsonDocument keys)
+        => string.Join("_", keys.Elements.Select(e => $"{e.Name}_{e.Value}"));
+
+    private static bool IsSoftDelete => typeof(ISoftDelete).IsAssignableFrom(typeof(T));
+
+    /// <summary>
+    /// The options for a declared index. A unique index on a soft-deleted entity counts live rows only.
+    /// </summary>
+    /// <remarks>
+    /// A deleted row stays in the collection, and it used to keep its unique value for good: a removed
+    /// squad member could never rejoin, a deleted code or name could never be used again, and every
+    /// attempt was refused as a duplicate of a row the API no longer shows. The index now holds only
+    /// rows whose <c>IsDeleted</c> is false, so a deleted row gives its value up. Restoring it is then
+    /// refused as a duplicate if a live row has taken the value since -- the same refusal a create
+    /// gets, from the same index. The field is always written on these entities, so no live row is
+    /// missing from the index.
+    /// </remarks>
+    private static CreateIndexOptions<T> Options(bool unique, string? name) => new()
+    {
+        Unique = unique,
+        Name = name,
+        PartialFilterExpression = unique && IsSoftDelete
+            ? Builders<T>.Filter.Eq(nameof(ISoftDelete.IsDeleted), false)
+            : null
+    };
 
     /// <summary>
     /// A unique index on a multi-tenant entity is unique within its tenant.
@@ -150,11 +181,7 @@ internal sealed class EntityIndexManager<T> where T : class, IEntity<ObjectId>
                     ? Builders<T>.IndexKeys.Descending(prop.Name)
                     : Builders<T>.IndexKeys.Ascending(prop.Name);
 
-                var options = new CreateIndexOptions
-                {
-                    Unique = indexedAttr.Unique,
-                    Name = indexedAttr.Name
-                };
+                var options = Options(indexedAttr.Unique, indexedAttr.Name);
 
                 indexModels.Add(new CreateIndexModel<T>(ScopedToTenant(indexKeys, indexedAttr.Unique, prop.Name), options));
             }
@@ -185,15 +212,10 @@ internal sealed class EntityIndexManager<T> where T : class, IEntity<ObjectId>
             if (keys is null) continue;
 
             keys = ScopedToTenant(keys, compound.Unique, compound.Fields[0]);
-            indexModels.Add(new CreateIndexModel<T>(keys, new CreateIndexOptions
-            {
-                Unique = compound.Unique,
-                // A stable derived name keeps a rebuild from creating a second copy of the same
-                // index under a driver-generated name.
-                Name = string.IsNullOrWhiteSpace(compound.Name)
-                    ? "IX_" + string.Join("_", compound.Fields)
-                    : compound.Name
-            }));
+            // A stable derived name keeps a rebuild from creating a second copy of the same
+            // index under a driver-generated name.
+            indexModels.Add(new CreateIndexModel<T>(keys, Options(compound.Unique,
+                string.IsNullOrWhiteSpace(compound.Name) ? "IX_" + string.Join("_", compound.Fields) : compound.Name)));
         }
 
         if (textIndexFields.Count > 0)
